@@ -74,7 +74,7 @@ with RefineryServer(model_generation_timeout=1200, library_paths=["./lib"]) as s
         result = refinery.generate_many("model.problem", 10)
 ```
 
-The container listens on a random free port of `127.0.0.1` and is removed on exit. `library_paths` are mounted read-only, so problems can `import` the `.refinery` modules in them. Any other [server setting](https://refinery.tools/learn/docker/#environmental-variables) can be passed via `env={...}`.
+The container listens on a random free port of `127.0.0.1` and is removed on exit. `library_paths` are mounted read-only, so problems can `import` the `.refinery` modules in them. Any other [server setting](https://refinery.tools/learn/docker/#environmental-variables) can be passed via `env={...}`. Before returning, `RefineryServer` sends a few small warm-up requests, so the first `semantics`/`concretize`/`validate` call doesn't time out while the JVM warms up. Pass `warmup=False` to skip this.
 
 ## API overview
 
@@ -200,7 +200,7 @@ All errors subclass `RefineryError`:
 
 Network failures are raised as `httpx` exceptions.
 
-`semantics` and `concretize` run under the server's semantics timeout (`REFINERY_SEMANTICS_TIMEOUT_MS`, 1 second by default). The first requests after a server starts may hit it while the JVM warms up, and then report `timeout` even for problems that are invalid.
+`semantics` and `concretize` run under the server's semantics timeout (`REFINERY_SEMANTICS_TIMEOUT_MS`, 1 second by default). On a server you started yourself, the first requests may hit it while the JVM warms up, and then report `timeout` even for problems that are invalid. `RefineryServer` warms the server up for you.
 
 ## Development
 
