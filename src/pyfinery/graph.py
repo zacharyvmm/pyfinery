@@ -141,7 +141,9 @@ class _Short:
 def _short_repr(value: Any) -> Any:
     if isinstance(value, RefineryNode):
         return _Short(f"<{type(value).__name__} at {id(value):#x}>")
-    if isinstance(value, list):
+    if isinstance(value, list | tuple):
+        return type(value)(_short_repr(v) for v in value)
+    if isinstance(value, set | frozenset):
         return [_short_repr(v) for v in value]
     return value
 
@@ -512,7 +514,12 @@ class Metamodel:
     # -- instances ----------------------------------------------------------
 
     def collect(self, objects: Iterable[RefineryNode]) -> list[RefineryNode]:
-        """All nodes reachable from ``objects`` through reference fields."""
+        """All nodes reachable from ``objects`` through reference fields.
+
+        Only outgoing references are followed: a node that is referenced by
+        nothing (e.g., a child that only sets its own ``parent``) must be
+        passed in ``objects`` itself.
+        """
         result: list[RefineryNode] = []
         seen: set[int] = set()
         pending = list(objects)
@@ -528,6 +535,29 @@ class Metamodel:
                 if not feature.is_attribute and not feature.is_enum:
                     pending.extend(value)
         return result
+
+    def link_opposites(self, objects: Iterable[RefineryNode]) -> int:
+        """Fill in the missing side of every ``opposite`` pair in the graph.
+
+        For example, after ``home.contents.append(doc)`` this sets
+        ``doc.parent = home``, and after ``doc.parent = home`` it appends
+        ``doc`` to ``home.contents``. Refinery infers missing sides on its own,
+        so this is only needed to keep the Python objects consistent.
+
+        Single-valued fields that already point at a different node are left
+        unchanged; :meth:`validate` reports such conflicts. Returns the number
+        of references added.
+        """
+        added = 0
+        for node in self.collect(objects):
+            for _, feature, values in self._values(node):
+                if feature.opposite is None:
+                    continue
+                for target in values:
+                    other = self._find_feature(type(target), feature.opposite)
+                    if other is not None and _add_reference(target, other, node):
+                        added += 1
+        return added
 
     def _values(self, node: RefineryNode) -> Iterator[tuple[type, Feature, list[Any]]]:
         for cls in type(node).__mro__:
@@ -597,8 +627,10 @@ class Metamodel:
     def validate(self, objects: Iterable[RefineryNode], refinery: Refinery) -> ValidationReport:
         """Check the graph reachable from ``objects`` against the metamodel and rules.
 
-        Raises :class:`~pyfinery.InvalidProblemError` if the rules don't
-        compile; constraint violations are returned in the report.
+        Only nodes reachable from ``objects`` through outgoing references are
+        checked (see :meth:`collect`). Raises
+        :class:`~pyfinery.InvalidProblemError` if the rules don't compile;
+        constraint violations are returned in the report.
         """
         source, by_name = self._prepare(objects)
         try:
@@ -617,6 +649,30 @@ class Metamodel:
         except RefineryTimeoutError as e:
             raise _timeout_hint(e) from e
         return _report(source, result.json_, by_name)
+
+
+def _add_reference(node: RefineryNode, feature: Feature, value: RefineryNode) -> bool:
+    """Add ``value`` to ``node.<feature>`` unless already present or the slot is taken."""
+    current = getattr(node, feature.name)
+    if not feature.many:
+        if current is not None:
+            return False
+        setattr(node, feature.name, value)
+        return True
+    if current is None:
+        setattr(node, feature.name, [value])
+        return True
+    if any(item is value for item in current):
+        return False
+    if isinstance(current, list):
+        current.append(value)
+    elif isinstance(current, set):
+        current.add(value)
+    elif isinstance(current, frozenset):
+        setattr(node, feature.name, current | {value})
+    else:
+        setattr(node, feature.name, (*current, value))
+    return True
 
 
 # ---------------------------------------------------------------------------

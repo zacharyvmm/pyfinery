@@ -270,3 +270,46 @@ def test_avalidate_ok():
     report = asyncio.run(main())
     assert report.ok
     report.raise_for_violations()
+
+
+def test_link_opposites_fills_missing_sides():
+    home = Dir(name="home")
+    doc = File()
+    home.contents = [doc]  # only the containment side
+    note = File(parent=home)  # only the container side
+    mm = metamodel()
+
+    # note is only reachable through its own parent pointer, so pass it explicitly.
+    assert mm.link_opposites([Filesystem(root=home), note]) == 2
+    assert doc.parent is home
+    assert home.contents == [doc, note]
+    assert mm.link_opposites([home]) == 0  # idempotent
+
+
+def test_link_opposites_leaves_conflicts_for_validation():
+    a, b = Dir(name="a"), Dir(name="b")
+    doc = File(parent=b)
+    a.contents = [doc]
+    metamodel().link_opposites([a, b])
+    assert doc.parent is b  # not overwritten
+    assert a.contents == [doc] and b.contents == [doc]
+
+
+def test_link_opposites_symmetric_and_collections():
+    class Person(RefineryNode):
+        friends: Annotated[tuple[Person, ...], Ref(opposite="friends")] = ()
+        tags: Annotated[set[Tag], Ref(opposite="people")] = set()
+
+    class Tag(RefineryNode):
+        people: Annotated[frozenset[Person], Ref(opposite="tags")] = frozenset()
+
+    Person.model_rebuild(_types_namespace={"Tag": Tag})
+    alice, bob, tag = Person(), Person(), Tag()
+    alice.friends = (bob,)
+    tag.people = frozenset({alice})
+    mm = Metamodel(Person)
+
+    assert mm.link_opposites([alice, tag]) == 2
+    assert bob.friends == (alice,)
+    assert alice.tags == {tag}
+    assert repr(alice).count("Person(") == 1  # referenced nodes are abbreviated

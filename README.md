@@ -177,7 +177,8 @@ How validation works:
 A few things to keep in mind:
 
 - **Identity:** nodes compare and hash by identity, so two `Dir(name="a")` objects are different nodes.
-- **Opposites:** you only need to set one side of an `opposite` pair. Refinery infers the other side.
+- **Opposites:** you only need to set one side of an `opposite` pair. Refinery infers the other side. If you want your Python objects to agree too, call `metamodel.link_opposites(objects)`; it fills in each missing side (for example, setting `doc.parent` after `home.contents.append(doc)`) and leaves conflicting values for `validate()` to report.
+- **Reachability:** `validate()` walks only *outgoing* references from the objects you pass. A node that nothing points to, such as a child that only sets its own `parent`, isn't found unless you pass it too (or run `link_opposites` with it first).
 - **Where multiplicities are enforced:** Pydantic enforces `Field(min_length=...)` when you construct an object. `Ref(multiplicity=...)` is only checked by Refinery, which is handy when you build graphs step by step.
 - **Graph size and timeouts:** validation runs under the server's *semantics* timeout, which defaults to 1 second (enough for a few hundred nodes). For larger graphs, start the server with `RefineryServer(semantics_timeout=10_000)`, or set `REFINERY_SEMANTICS_TIMEOUT_MS`.
 - **Inspecting what's sent:** `metamodel.problem(objects)` returns the exact problem that would be sent, so you can paste it into the Refinery web editor.
