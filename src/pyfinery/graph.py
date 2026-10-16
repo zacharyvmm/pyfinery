@@ -2,66 +2,49 @@
 #
 # SPDX-License-Identifier: EPL-2.0
 
-"""Define Refinery metamodels with Pydantic and validate object graphs against them.
+"""Validate and query Pydantic object graphs with Refinery.
 
-Subclass :class:`RefineryNode` to declare classes. Fields become Refinery
-features:
+A :class:`Metamodel` derives a Refinery metamodel from Pydantic model classes,
+and turns instances of them into Refinery facts:
 
-=================================  ===========================================
-Python annotation                  Refinery declaration
-=================================  ===========================================
-``Dir``                            ``Dir[1] f``
-``Dir | None``                     ``Dir[0..1] f``
-``list[Dir]``                      ``Dir[0..*] f``
-``Annotated[list[Dir], Contains()]``  ``contains Dir[0..*] f``
-``Annotated[Dir | None, Container(opposite="g")]``  ``container Dir f opposite g``
-``Annotated[..., Ref(opposite="g")]``  ``... opposite g``
-a plain Pydantic ``BaseModel``     ``contains Address[1] f`` (see below)
-an :class:`enum.Enum` subclass     ``enum`` declaration and a reference to it
+- :meth:`Metamodel.validate` checks a graph against the metamodel and
+  ``error pred`` rules, closing the world (anything not asserted is false)
+  with Refinery's ``concretize`` operation, and reports each constraint that
+  evaluates to ``error`` as a :class:`Violation`.
+- :meth:`Metamodel.query` evaluates graph patterns written as Refinery
+  predicates over a closed world that may hold *uncertain* facts, and
+  reports each :class:`Match` as ``must`` (true in Refinery's four-valued
+  logic) or ``may`` (unknown).
+
+How fields map to Refinery:
+
+========================================  =========================================
+Python                                    Refinery
+========================================  =========================================
 ``int`` / ``float`` / ``str`` / ``bool``  ``int`` / ``real`` / ``string`` / ``boolean``
-=================================  ===========================================
+``Literal["a", "b"]``                     an enum (single-value tags are skipped)
+an :class:`enum.Enum` subclass            an enum
+``Model`` / ``Model | None`` / ``list``   ``Model[1]`` / ``Model[0..1]`` / ``Model[0..*]``
+``A | B``                                 an abstract superclass of ``A`` and ``B``
+subclassing                               ``extends``
+========================================  =========================================
 
-Narrow list multiplicities with ``Field(min_length=..., max_length=...)`` (also
-enforced by Pydantic when constructing objects) or ``Ref(multiplicity="1..3")``
-(only checked by Refinery).
+Whether a field typed as a model class is containment or a plain reference
+depends on the identity of that class:
 
-Plain Pydantic models (not :class:`RefineryNode`) nested in a field are value
-objects owned by the enclosing object: the field becomes an implicit
-containment reference, and the nested model becomes a Refinery class whose
-fields are mapped the same way. Each nested instance must have exactly one
-owner; use a :class:`RefineryNode` for objects referenced from several places.
+- plain Pydantic models are *owned values*: each instance is a node
+  contained in the object holding it;
+- classes with ``ClassOptions(key=...)`` are *entities*: instances with equal
+  keys are one node, and fields typed as them are references. Fields that
+  hold keys rather than objects are mapped with
+  ``ClassOptions(references=...)``;
+- :class:`RefineryNode` subclasses are entities by object identity, for
+  hand-built graphs, with :func:`Contains`, :func:`Container` and
+  :class:`Ref` markers for containment, opposites, and multiplicities.
 
-Classes you can't (or don't want to) change, such as models generated at
-runtime, are configured from outside with :class:`ClassOptions`:
-
-- ``key``: an entity identity. Instances with equal keys are one node, so a
-  field holding an equal *copy* of an entity refers to it instead of owning a
-  new node. Fields typed as keyed classes are plain references.
-- ``exclude``: fields left out of the metamodel (e.g., free-form payload).
-- ``node_name`` and ``abstract``.
-
-Unions of model classes (``File | Variable``, with or without a Pydantic
-discriminator) become an abstract Refinery superclass of their members, named
-after them or as given in ``unions``. ``Literal`` fields with several string
-values become Refinery enums; single-value ``Literal`` fields (discriminator
-tags such as ``type: Literal["file"]``) carry no information beyond the class
-and are skipped. ``unsupported="skip"`` skips other fields that have no
-Refinery counterpart (e.g. ``list[str]``) instead of raising; they're listed
-in :attr:`Metamodel.skipped`.
-
-Set ``__abstract__ = True`` in a class body to declare an abstract class.
-Extra constraints are written as Refinery predicates, e.g.
-``error pred emptyDir(Dir d) <-> !contents(d, _).``, and passed as ``rules``.
-
-:meth:`Metamodel.validate` asserts the object graph as facts, closes the world
-(anything not asserted is false) with Refinery's ``concretize`` endpoint, and
-reports every constraint that evaluates to ``error``.
-
-:meth:`Metamodel.query` instead evaluates graph patterns written as Refinery
-predicates (``pred``) over a closed world that may hold *uncertain* facts:
-objects that may not exist (``ClassOptions(exists=...)``) and facts computed in
-Python (:class:`Predicate`) that may hold. Each match ``must`` hold (true in
-Refinery's four-valued logic) or only ``may`` (unknown).
+:class:`ClassOptions` configure classes from outside, so generated or
+third-party models can be used unchanged; :class:`Predicate` provides
+relations computed in Python (e.g. regular expressions) to rules.
 """
 
 from __future__ import annotations
@@ -472,7 +455,7 @@ class Metamodel:
 
     :param options: :class:`ClassOptions` by class.
     :param unions: Names for the abstract superclasses standing for unions,
-        e.g. ``{"Resource": [File, Variable, Endpoint]}``.
+        e.g. ``{"Component": [Service, Database]}``.
     :param unsupported: ``"skip"`` to leave out fields with no Refinery
         counterpart instead of raising ``TypeError``.
     """
@@ -1172,7 +1155,7 @@ class Metamodel:
         """Evaluate graph patterns over the graph reachable from ``objects``.
 
         ``rules`` are Refinery predicates, e.g.
-        ``"pred exfiltration(File key, Endpoint net) <-> underSsh(key), flows+(key, net)."``;
+        ``"pred reaches(Service s, Database d) <-> Service::depends_on+(s, d)."``;
         every ``pred`` they declare is reported unless ``select`` names the
         ones to report. Unlike :meth:`validate`, the world is closed by
         asserting that there is nothing else (no other objects, references,

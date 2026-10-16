@@ -1,0 +1,12 @@
+{
+  "components": [
+    {"kind": "service", "name": "web", "image": "web:1.4", "tier": "frontend",
+     "ports": [{"number": 443, "public": true}], "depends_on": ["api", "cache"]},
+    {"kind": "service", "name": "api", "image": "api:latest", "tier": "backend",
+     "depends_on": ["db", "billing"]},
+    {"kind": "service", "name": "worker", "image": "worker:2.0", "tier": "backend",
+     "depends_on": ["db"]},
+    {"kind": "database", "name": "db", "engine": "postgres", "encrypted": false},
+    {"kind": "database", "name": "cache", "engine": "redis", "encrypted": true}
+  ]
+}

@@ -15,3 +15,8 @@ SPDX-License-Identifier = "CC0-1.0"
 path = "src/pyfinery/py.typed"
 SPDX-FileCopyrightText = "2026 zacharyvmm <58368863+zacharyvmm@users.noreply.github.com>"
 SPDX-License-Identifier = "EPL-2.0"
+
+[[annotations]]
+path = "examples/deployment.json"
+SPDX-FileCopyrightText = "2026 zacharyvmm <58368863+zacharyvmm@users.noreply.github.com>"
+SPDX-License-Identifier = "EPL-2.0"
