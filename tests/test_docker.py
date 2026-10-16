@@ -120,3 +120,26 @@ def test_fresh_server_validates_immediately():
     with pf.RefineryServer() as fresh, fresh.client() as refinery:
         report = metamodel().validate([Filesystem(root=Dir(name="a", contents=[File()]))], refinery)
     assert report.ok, report.violations
+
+
+def test_validate_nested_plain_models(refinery):
+    from .nested_models import Address, Country, Order, Person, Phone, people
+
+    shared = Address(street="1 Main", country=Country.CA)
+    alice = Person(name="alice", home=shared, contacts=[Phone(value="1")])
+    assert people().validate([alice], refinery).ok
+
+    bob = Person(name="bob", home=Address(street="2", country=Country.FR), work=shared)
+    bob.manager = bob
+    report = people().validate([alice, bob], refinery)
+    found = sorted((v.kind, v.constraint, v.nodes) for v in report.violations)
+    # Plain Pydantic models aren't hashable, so compare as an ordered list.
+    assert [(kind, constraint) for kind, constraint, _ in found] == [
+        ("containment", "builtin::invalidContainer"),  # the shared value object
+        ("rule", "selfManaged"),
+    ]
+    assert found[0][2][0] is shared and found[1][2][0] is bob
+
+    empty = Order(lines=[])
+    report = pf.Metamodel(Order).validate([empty], refinery)
+    assert [(v.kind, v.nodes) for v in report.violations] == [("multiplicity", (empty,))]
