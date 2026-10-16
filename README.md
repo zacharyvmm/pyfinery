@@ -186,6 +186,33 @@ class Person(RefineryNode):
 
 You can even validate a graph made only of plain models, such as an `Order` containing `Line`s. Since each nested object has exactly one owner, a single `Address` *instance* reused for two people is reported as `containment: builtin::invalidContainer(address_1)`. Use `address.model_copy()` to give each person their own, or make the class a `RefineryNode` if it should be shared. Plain models can't take part in `opposite` pairs or use `Container()`. Make them `RefineryNode`s if they need a back-reference.
 
+### Existing and generated Pydantic classes
+
+pyfinery also works with classes you can't (or don't want to) change, such as models generated at runtime from a grammar. You configure them from outside:
+
+```python
+from pyfinery import ClassOptions, Metamodel
+
+metamodel = Metamodel(
+    EffectGraph,
+    options={
+        File: ClassOptions(key=lambda f: f.key),        # equal keys -> one node
+        Endpoint: ClassOptions(key=lambda e: e.key),
+        Effect: ClassOptions(exclude=["command", "trace"]),
+    },
+    unions={"Resource": [File, Variable, Endpoint]},   # name for File | Variable | Endpoint
+    unsupported="skip",                                 # leave out e.g. list[str] fields
+)
+print(metamodel.skipped)   # [(Path, 'segments', '...')]
+```
+
+- **`key`** makes a class an *entity*. Instances with equal keys are one node, so a field holding an equal **copy** of a resource refers to that resource instead of owning a new node. Fields typed as keyed classes are plain references, not containment. Classes without a key stay owned values, as described above.
+- **Unions** of model classes become an abstract superclass that their members extend. This works with or without a Pydantic `discriminator`. The superclass is named after its members (`FileOrEndpoint`) unless you name it in `unions`.
+- **`Literal` fields** with several string values become Refinery enums (`op: Literal["read", "write"]` → `enum EffectOp { read, write }`). Single-value `Literal`s, such as discriminator tags (`type: Literal["file"]`), are skipped, since the class already says it.
+- **Exclusion:** `exclude` drops payload fields. `unsupported="skip"` drops fields that have no Refinery counterpart, such as `list[str]` or `dict`, and records them in `metamodel.skipped`. By default, such fields raise `TypeError`.
+- **Subclass discovery** only goes *down* from the classes your fields refer to. A base class shared by many unrelated generated classes doesn't pull them all in.
+- **Other options:** `node_name` names nodes (for example after their key), and `abstract` declares an abstract class.
+
 How validation works:
 
 - **Building the metamodel:** `Metamodel(...)` collects every `RefineryNode` class reachable from the ones you pass: superclasses, referenced classes, and subclasses that have already been imported. It checks that each `opposite` is declared on both sides.
