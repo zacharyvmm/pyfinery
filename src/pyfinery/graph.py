@@ -144,8 +144,12 @@ class ClassOptions:
     :param exclude: Names of fields (declared in this class) to leave out.
     :param abstract: Declare the Refinery class ``abstract``.
     :param exists: Whether an instance certainly exists (``"must"`` or
-        ``True``) or only may (``"may"``), e.g. an effect that happens on
-        some paths only. Used by :meth:`Metamodel.query`.
+        ``True``) or only may (``"may"``), e.g. something that happens on
+        some paths only. Used by :meth:`Metamodel.query` only.
+    :param certainty: Whether the value of a field certainly holds, called as
+        ``certainty(instance, field_name, value)`` for each reference target
+        and attribute value; ``"may"`` asserts it as unknown, e.g. a
+        dependency found by a heuristic.
     """
 
     key: Callable[[Any], Hashable] | None = None
@@ -154,24 +158,41 @@ class ClassOptions:
     exclude: frozenset[str] | Sequence[str] = ()
     abstract: bool | None = None
     exists: Callable[[Any], Certainty | bool] | None = None
+    certainty: Callable[[Any, str, Any], Certainty | bool] | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class Predicate:
-    """A relation computed in Python, for :meth:`Metamodel.query`.
+    """A relation computed in Python, usable in the rules of :meth:`Metamodel.validate`
+    and :meth:`Metamodel.query`.
 
-    For what Refinery can't express, such as glob matching on paths. It is
-    declared as ``pred <name>(<types>).`` and evaluated on every combination
-    of nodes of the parameter types (a model class, or the name of a union);
-    ``evaluate`` returns ``True``/``"must"`` (holds), ``"may"`` (may hold,
-    i.e. unknown), or ``False``/``None`` (doesn't hold).
+    For what Refinery can't express, such as regular expressions, globs, or
+    relations computed elsewhere. It is declared as ``pred <name>(<types>).``,
+    where each parameter type is a model class or the name of a union, and
+    its facts come from either:
 
-    >>> Predicate("underSsh", (File,), lambda f: f.path.startswith("~/.ssh/"))
+    - ``evaluate``, called on every combination of nodes of the parameter
+      types, returning ``True``/``"must"`` (holds), ``"may"`` (may hold), or
+      ``False``/``None`` (doesn't hold); or
+    - ``tuples``: the argument tuples that hold, each optionally paired with
+      a certainty, e.g. ``[((a, b), "may"), (c, d)]``. Use it when the
+      relation is already known, or when combinations would be too many.
+
+    >>> Predicate("validEmail", (User,), lambda u: EMAIL.fullmatch(u.email) is not None)
+    >>> Predicate("calls", (Service, Service), tuples=traced_calls)
     """
 
     name: str
     parameters: tuple[type[BaseModel] | str, ...]
-    evaluate: Callable[..., Certainty | bool | None]
+    evaluate: Callable[..., Certainty | bool | None] | None = None
+    tuples: Iterable[Any] | None = None
+
+    def __post_init__(self) -> None:
+        if (self.evaluate is None) == (self.tuples is None):
+            raise ValueError(f"Predicate {self.name!r} needs exactly one of evaluate or tuples")
+        if self.tuples is not None:
+            # Allow one-shot iterables (e.g. generators) to be read once.
+            object.__setattr__(self, "tuples", list(self.tuples))
 
 
 # ---------------------------------------------------------------------------
@@ -952,6 +973,21 @@ class Metamodel:
             names[self.identity(node)] = name
         return names
 
+    def _fact_prefix(self, node: BaseModel, feature: Feature, value: Any) -> str:
+        """``"?"`` if ``ClassOptions.certainty`` says the value only may hold."""
+        decide = self._options(type(node)).certainty
+        if decide is None:
+            return ""
+        answer = decide(node, feature.name, value)
+        if answer in ("must", True):
+            return ""
+        if answer == "may":
+            return "?"
+        raise ValueError(
+            f"ClassOptions.certainty of {type(node).__name__} must return 'must', 'may' or True, "
+            f"not {answer!r} (leave values that don't hold out of the object)"
+        )
+
     def _name_from_key(self, node: BaseModel) -> str | None:
         """The key as a node name, if it is a string or integer that isn't a type's name."""
         key_of = self._options(type(node)).key
@@ -1023,24 +1059,31 @@ class Metamodel:
                     for key in values:
                         found = self._resolve(feature, key, index)
                         if len(found) == 1:  # others are reported by reference_errors
-                            lines.append(f"{symbol}({name}, {names[self.identity(found[0])]}).")
+                            prefix = self._fact_prefix(node, feature, key)
+                            target = names[self.identity(found[0])]
+                            lines.append(f"{prefix}{symbol}({name}, {target}).")
                     continue
                 if canonical_opposites and not self._canonical(feature):
                     for value in values:
                         other = self._find_feature(type(value), feature.opposite)  # type: ignore[arg-type]
                         assert other is not None
+                        prefix = self._fact_prefix(node, feature, value)
                         reverse = f"{self.class_name(other.owner)}::{quote_id(other.name)}"
-                        lines.append(f"{reverse}({names[self.identity(value)]}, {name}).")
+                        lines.append(f"{prefix}{reverse}({names[self.identity(value)]}, {name}).")
                     continue
                 for value in values:
+                    prefix = self._fact_prefix(node, feature, value)
                     if feature.is_attribute:
+                        if prefix:
+                            continue  # an uncertain attribute value is simply unknown
                         literal = _attribute_literal(value, feature.target)  # type: ignore[arg-type]
                         lines.append(f"{symbol}({name}): {literal}.")
                     elif feature.is_enum:
                         literal = self._literal(feature.target, value)  # type: ignore[arg-type]
-                        lines.append(f"{symbol}({name}, {literal}).")
+                        lines.append(f"{prefix}{symbol}({name}, {literal}).")
                     else:
-                        lines.append(f"{symbol}({name}, {names[self.identity(value)]}).")
+                        target = names[self.identity(value)]
+                        lines.append(f"{prefix}{symbol}({name}, {target}).")
         return "\n".join(lines) + "\n"
 
     def problem(self, objects: Iterable[BaseModel]) -> str:
@@ -1053,23 +1096,46 @@ class Metamodel:
     _FORMAT = OutputFormats(json_=JsonOutputFormat(), source=SourceOutputFormat(enabled=False))
 
     def _prepare(
-        self, objects: Iterable[BaseModel]
+        self,
+        objects: Iterable[BaseModel],
+        rules: Iterable[str] = (),
+        predicates: Iterable[Predicate] = (),
     ) -> tuple[str, dict[str, BaseModel], list[Violation]]:
+        predicates = list(predicates)
         nodes = self.collect(objects)
         names = self.node_names(nodes)
-        source = self.source + "\n" + self.facts(nodes, names)
+        lines = [self.source, *rules, *(self._declare_predicate(p) for p in predicates), ""]
+        lines.append(self.facts(nodes, names))
+        lines += self._predicate_facts(predicates, nodes, names)
         by_name = {names[self.identity(node)]: node for node in nodes}
-        return source, by_name, self.reference_errors(nodes, names)
+        return "\n".join(lines) + "\n", by_name, self.reference_errors(nodes, names)
 
-    def validate(self, objects: Iterable[BaseModel], refinery: Refinery) -> ValidationReport:
+    def validate(
+        self,
+        objects: Iterable[BaseModel],
+        refinery: Refinery,
+        rules: Iterable[str] = (),
+        *,
+        predicates: Iterable[Predicate] = (),
+    ) -> ValidationReport:
         """Check the graph reachable from ``objects`` against the metamodel and rules.
+
+        ``rules`` (Refinery source, typically ``error pred`` declarations) are added to
+        those given to the :class:`Metamodel`, and ``predicates`` provide
+        relations computed in Python for them to use.
+
+        Validation is two-valued: it checks what certainly holds. Facts that
+        only ``"may"`` hold (from :class:`Predicate` or
+        ``ClassOptions(certainty=...)``) count as not holding, and every
+        object exists (``ClassOptions(exists=...)`` is ignored). Use
+        :meth:`query` to reason about what may hold.
 
         Only nodes reachable from ``objects`` through outgoing references are
         checked (see :meth:`collect`). Raises
         :class:`~pyfinery.InvalidProblemError` if the rules don't compile;
         constraint violations are returned in the report.
         """
-        source, by_name, errors = self._prepare(objects)
+        source, by_name, errors = self._prepare(objects, rules, predicates)
         try:
             result = refinery.concretize(source, format=self._FORMAT)
         except RefineryTimeoutError as e:
@@ -1077,10 +1143,15 @@ class Metamodel:
         return _report(source, result.json_, by_name, self.identity, errors)
 
     async def avalidate(
-        self, objects: Iterable[BaseModel], refinery: AsyncRefinery
+        self,
+        objects: Iterable[BaseModel],
+        refinery: AsyncRefinery,
+        rules: Iterable[str] = (),
+        *,
+        predicates: Iterable[Predicate] = (),
     ) -> ValidationReport:
         """Asynchronous variant of :meth:`validate`."""
-        source, by_name, errors = self._prepare(objects)
+        source, by_name, errors = self._prepare(objects, rules, predicates)
         try:
             result = await refinery.concretize(source, format=self._FORMAT)
         except RefineryTimeoutError as e:
@@ -1227,9 +1298,7 @@ class Metamodel:
     ) -> list[str]:
         lines = []
         for predicate in predicates:
-            domains = [[n for n in nodes if self._matches_type(n, t)] for t in predicate.parameters]
-            for arguments in itertools.product(*domains):
-                answer = predicate.evaluate(*arguments)
+            for arguments, answer in self._predicate_tuples(predicate, nodes):
                 if answer in (None, False):
                     continue
                 if answer not in (True, "must", "may"):
@@ -1238,9 +1307,43 @@ class Metamodel:
                         "False, None, 'must' or 'may'"
                     )
                 prefix = "?" if answer == "may" else ""
-                rendered = ", ".join(names[self.identity(a)] for a in arguments)
-                lines.append(f"{prefix}{quote_id(predicate.name)}({rendered}).")
+                rendered = []
+                for argument, parameter in zip(arguments, predicate.parameters, strict=True):
+                    node_name = names.get(self.identity(argument))
+                    if node_name is None or not self._matches_type(argument, parameter):
+                        raise ValueError(
+                            f"Predicate {predicate.name!r}: {argument!r} is not a node of type "
+                            f"{getattr(parameter, '__name__', parameter)} in this graph"
+                        )
+                    rendered.append(node_name)
+                lines.append(f"{prefix}{quote_id(predicate.name)}({', '.join(rendered)}).")
         return lines
+
+    def _predicate_tuples(
+        self, predicate: Predicate, nodes: Sequence[BaseModel]
+    ) -> Iterator[tuple[tuple[BaseModel, ...], Any]]:
+        arity = len(predicate.parameters)
+        if predicate.evaluate is not None:
+            domains = [[n for n in nodes if self._matches_type(n, t)] for t in predicate.parameters]
+            for arguments in itertools.product(*domains):
+                yield arguments, predicate.evaluate(*arguments)
+            return
+        for item in predicate.tuples or ():
+            # ((a, b), "may") or (a, b); for arity 1, ((a,), "may"), (a,) or a.
+            if (
+                isinstance(item, tuple)
+                and len(item) == 2
+                and isinstance(item[0], tuple)
+                and (arity != 2 or isinstance(item[1], str | bool))
+            ):
+                arguments, answer = item
+            else:
+                arguments, answer = (item if isinstance(item, tuple) else (item,)), True
+            if len(arguments) != arity:
+                raise ValueError(
+                    f"Predicate {predicate.name!r} takes {arity} argument(s), got {arguments!r}"
+                )
+            yield arguments, answer
 
     def _canonical(self, feature: Feature) -> bool:
         """Of an opposite pair, the side facts and closed-world defaults are written on."""
@@ -1472,9 +1575,15 @@ class _PreparedQuery:
                     certainty = "may"
                 nodes = tuple(self.by_name.get(name) for name in names)
                 matches.append(Match(predicate, names, nodes, certainty))
-        errors = _report(
-            self.source, model, self.by_name, self.identity, self.reference_errors
-        ).violations
+        errors = [
+            error
+            for error in _report(
+                self.source, model, self.by_name, self.identity, self.reference_errors
+            ).violations
+            # Refinery still evaluates constraints on the C::new objects the
+            # closed world says don't exist.
+            if not any(name.endswith("::new") for name in error.node_names)
+        ]
         return QueryResult(matches, errors, self.source, model)
 
 

@@ -190,3 +190,38 @@ def test_validate_references_by_key(refinery):
         "reference: Service::depends_on::unresolved(api, 'billing')",
         "rule: publicDependsOnData(web, cache)",
     ]
+
+
+def test_validate_and_query_with_shared_options(refinery):
+    from .test_options import FLOATING, components, metamodel
+
+    d, web, api, db, cache = components()
+    report = metamodel().validate(
+        [d], refinery, ["error pred unpinned(Service s) <-> floatingTag(s)."], predicates=[FLOATING]
+    )
+    assert "rule: unpinned(api)" in [str(v) for v in report.violations]
+
+    heuristic = metamodel(lambda s, f, v: "may" if (s.name, v) == ("api", "db") else True)
+    traced = pf.Predicate(
+        "calls", ("Component", "Component"), tuples=[(web, api), ((api, db), "may")]
+    )
+    result = heuristic.query(
+        [d],
+        refinery,
+        [
+            "pred reachesUnencrypted(Service s, Database d) <-> "
+            "Service::depends_on+(s, d), !Database::encrypted(d).",
+            "pred tracedCall(Component a, Component b) <-> calls(a, b).",
+        ],
+        predicates=[traced],
+    )
+    assert [str(m) for m in result.matches] == [
+        "may: reachesUnencrypted(web, db)",
+        "may: reachesUnencrypted(api, db)",
+        "must: tracedCall(web, api)",
+        "may: tracedCall(api, db)",
+    ]
+    assert [str(e) for e in result.errors] == [
+        "reference: Service::depends_on::unresolved(api, 'billing')",
+        "rule: publicDependsOnData(web, cache)",
+    ]
