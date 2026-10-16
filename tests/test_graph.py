@@ -153,6 +153,16 @@ def test_metamodel_definition_errors():
     with pytest.raises(TypeError, match="single node"):
         Metamodel(F)
 
+    class Owner(RefineryNode):
+        items: Annotated[list[Item], Ref(opposite="owner")] = []
+
+    class Item(RefineryNode):
+        owner: Annotated[Owner | None, Container(opposite="items")] = None
+
+    Owner.model_rebuild(_types_namespace={"Item": Item})
+    with pytest.raises(TypeError, match="opposite of a container reference must use Contains"):
+        Metamodel(Owner)
+
 
 def test_multiplicity_from_field_constraints():
     from pydantic import Field

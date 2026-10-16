@@ -460,6 +460,11 @@ class Metamodel:
                     raise TypeError(
                         f"{where}: the opposite of a containment reference must use Container()"
                     )
+                if feature.kind == "container" and other.kind != "contains":
+                    raise TypeError(
+                        f"{where}: the opposite of a container reference must use Contains(); "
+                        f"{other.owner.__name__}.{other.name} is not a containment reference"
+                    )
 
     # -- rendering ----------------------------------------------------------
 
