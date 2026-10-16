@@ -150,3 +150,33 @@ def test_validate_generic_models(refinery):
 
     report = metamodel().validate([graph()], refinery)
     assert report.ok, report.violations
+
+
+def test_query_must_and_may(refinery):
+    from .test_query import PREDICATES, RULES, metamodel, uncertain_graph
+
+    result = metamodel().query([uncertain_graph()], refinery, RULES, predicates=PREDICATES)
+    assert [str(m) for m in result.matches] == [
+        "must: writes(file_1, endpoint_1)",
+        "must: writes(file_2, endpoint_1)",
+        "must: exfiltration(file_1, endpoint_1)",
+        "may: exfiltration(file_2, endpoint_1)",
+        "may: removes(effect_4, file_1)",
+    ]
+    assert result.errors == []
+
+
+def test_query_closed_world_has_no_spurious_errors(refinery):
+    """Containment opposites and subclasses must not contradict the closed world."""
+    from .graph_models import Dir, File, Filesystem, Link, metamodel
+
+    home = Dir(name="home")
+    file = File(parent=home)
+    home.contents.append(Link(target=file))
+    result = metamodel().query(
+        [Filesystem(root=home), file],
+        refinery,
+        ["pred linked(Link l, FSObject t) <-> Link::target(l, t)."],
+    )
+    assert result.errors == []
+    assert [str(m) for m in result.matches] == ["must: linked(link_1, file_1)"]

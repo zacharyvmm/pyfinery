@@ -229,6 +229,48 @@ A few things to keep in mind:
 - **Graph size and timeouts:** validation runs under the server's *semantics* timeout, which defaults to 1 second (enough for a few hundred nodes). For larger graphs, start the server with `RefineryServer(semantics_timeout=10_000)`, or set `REFINERY_SEMANTICS_TIMEOUT_MS`.
 - **Inspecting what's sent:** `metamodel.problem(objects)` returns the exact problem that would be sent, so you can paste it into the Refinery web editor.
 
+## Querying graph patterns with must/may
+
+`metamodel.query()` answers *which parts of the graph match a pattern*, rather than *does the graph obey the metamodel*. Patterns are Refinery predicates. Uncertainty in your data carries through Refinery's four-valued logic, so each match either **must** hold or only **may** hold:
+
+```python
+from pyfinery import ClassOptions, Metamodel, Predicate
+
+metamodel = Metamodel(
+    EffectGraph,
+    options={
+        File: ClassOptions(key=lambda f: f.key),
+        Endpoint: ClassOptions(key=lambda e: e.key),
+        # An effect that happens on some paths only may not exist.
+        Effect: ClassOptions(exists=lambda e: "must" if e.definite else "may"),
+    },
+    unions={"Resource": [File, Endpoint]},
+    unsupported="skip",
+)
+rules = [
+    "pred writes(Resource a, Resource b) <-> Effect::sources(e, a), Effect::target(e, b), Effect::op(e, EffectOp::write).",
+    "pred exfiltration(File key, Endpoint net) <-> underSsh(key), writes+(key, net).",
+]
+# What Refinery can't do (globs, path logic) is computed in Python: True, "may", or False.
+under_ssh = Predicate("underSsh", (File,), lambda f: "may" if f.path_unknown else f.path.startswith("~/.ssh/"))
+
+result = metamodel.query([graph], refinery, rules, predicates=[under_ssh])
+for match in result.matches:
+    print(match)          # must: exfiltration(file_1, endpoint_1)
+result.must("exfiltration"), result.may("exfiltration"), result["writes"]
+```
+
+- **Closed world:** `query()` asserts that the graph holds nothing beyond what you pass: no other objects, references, subclass memberships or `Predicate` facts. What's uncertain stays uncertain.
+  - **Objects:** an object that only *may* exist (`ClassOptions(exists=...)`) is asserted as `?exists(...)`.
+  - **Facts:** a `Predicate` returning `"may"` becomes an unknown fact.
+- **How certainty is decided:** a match is `must` when Refinery evaluates the predicate to true, and `may` when it's unknown. It's also `may` when one of its arguments only may exist, because Refinery weakens a predicate for nodes quantified in its body but not for its arguments.
+- **Which predicates are reported:** every `pred` declared in `rules`, unless you choose with `select=[...]`.
+- **Errors:** metamodel violations and contradictions found along the way are in `result.errors`.
+- **Arguments:** `Predicate` parameters are model classes or union names. Each predicate is evaluated on every combination of nodes of those types, so keep arity low on large graphs.
+- **Debugging:** `metamodel.query_problem(...)` returns the exact problem sent, for pasting into the web editor. `aquery()` is the async variant.
+
+I checked this against [bash-validation](https://github.com/zacharyvmm/bash-validation)'s own matcher for its `exfiltration` rule on six sessions (a variable, a copy, a pipe, a path known only at run time, a branch, and a benign case). Both gave the same matches and certainties. The rule above ignores the *order* of writes, so it also flags a key that is sent before it's copied. Order-aware data flow is better computed in Python and passed as a two-argument `Predicate`.
+
 ## Errors
 
 All errors subclass `RefineryError`:
