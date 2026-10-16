@@ -206,6 +206,8 @@ metamodel = Metamodel(
 print(metamodel.skipped)   # [(Path, 'segments', '...')]
 ```
 
+- **`references={"depends_on": Service}`** maps a field holding *keys* (`depends_on: list[str]`, as JSON and YAML usually express links) to references to the objects with those keys. The target can be a keyed class, a list of them, or a union name. A key that matches no object, or several, is reported as a `reference` violation, such as `reference: Service::depends_on::unresolved(api, 'billing')`.
+- **Node names** default to the key when it's a string or integer (`web`, `api`). They fall back to `service_1` when the key clashes with a type, a builtin, or another node.
 - **`key`** makes a class an *entity*. Instances with equal keys are one node, so a field holding an equal **copy** of a resource refers to that resource instead of owning a new node. Fields typed as keyed classes are plain references, not containment. Classes without a key stay owned values, as described above.
 - **Unions** of model classes become an abstract superclass that their members extend. This works with or without a Pydantic `discriminator`. The superclass is named after its members (`FileOrEndpoint`) unless you name it in `unions`.
 - **`Literal` fields** with several string values become Refinery enums (`op: Literal["read", "write"]` → `enum EffectOp { read, write }`). Single-value `Literal`s, such as discriminator tags (`type: Literal["file"]`), are skipped, since the class already says it.

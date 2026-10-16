@@ -75,8 +75,8 @@ def test_query_problem_closes_the_world():
     assert "default !secretFile(*)." in lines
     # Uncertainty is kept.
     assert "?exists(effect_4)." in lines
-    assert "secretFile(file_1)." in lines
-    assert "?secretFile(file_2)." in lines
+    assert "secretFile('file:.ssh/id_rsa')." in lines
+    assert "?secretFile('file:x')." in lines
 
 
 def test_query_canonical_opposites_and_subclasses():
@@ -176,7 +176,7 @@ def test_union_parameter_predicate():
         .splitlines()
     )
     assert "pred known(Resource p0)." in lines
-    assert {"known(file_1).", "known(endpoint_1)."} <= set(lines)
+    assert {"known('file:.ssh/id_rsa').", "known('endpoint:https://example.com')."} <= set(lines)
 
 
 def test_aquery():

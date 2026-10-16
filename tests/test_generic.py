@@ -67,23 +67,23 @@ def test_keyed_copies_are_one_node():
     facts = mm.problem([g]).removeprefix(EXPECTED_SOURCE).strip().splitlines()
     assert facts == [
         "Graph(graph_1).",
-        "Graph::resources(graph_1, file_1).",
-        "Graph::resources(graph_1, endpoint_1).",
+        "Graph::resources(graph_1, 'file:.ssh/id_rsa').",
+        "Graph::resources(graph_1, 'endpoint:https://example.com').",
         "Graph::effects(graph_1, effect_1).",
         "Graph::effects(graph_1, effect_2).",
-        "File(file_1).",
-        "File::path(file_1, path_1).",
-        "Endpoint(endpoint_1).",
-        'Endpoint::url(endpoint_1): "https://example.com".',
+        "File('file:.ssh/id_rsa').",
+        "File::path('file:.ssh/id_rsa', path_1).",
+        "Endpoint('endpoint:https://example.com').",
+        "Endpoint::url('endpoint:https://example.com'): \"https://example.com\".",
         "Effect(effect_1).",
         "Effect::op(effect_1, EffectOp::read).",
-        "Effect::target(effect_1, file_1).",
+        "Effect::target(effect_1, 'file:.ssh/id_rsa').",
         "Effect::definite(effect_1): true.",
         "Effect::index(effect_1): 0.",
         "Effect(effect_2).",
         "Effect::op(effect_2, EffectOp::write).",
-        "Effect::target(effect_2, endpoint_1).",
-        "Effect::sources(effect_2, file_1).",
+        "Effect::target(effect_2, 'endpoint:https://example.com').",
+        "Effect::sources(effect_2, 'file:.ssh/id_rsa').",
         "Effect::definite(effect_2): true.",
         "Effect::index(effect_2): 1.",
         "Path(path_1).",
@@ -175,7 +175,7 @@ def test_report_for_node_matches_copies():
     mm = metamodel()
     stored = File(path=Path(anchor="home", segments=["a"]))
     report = ValidationReport(
-        [Violation("rule", "r", ("file_1",), (stored,))], "", None, mm.identity
+        [Violation("rule", "r", ("'file:.ssh/id_rsa'",), (stored,))], "", None, mm.identity
     )
     copy = File(path=Path(anchor="home", segments=["a"]))
     assert report.for_node(copy) == report.violations

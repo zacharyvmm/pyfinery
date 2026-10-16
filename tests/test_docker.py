@@ -157,11 +157,11 @@ def test_query_must_and_may(refinery):
 
     result = metamodel().query([uncertain_graph()], refinery, RULES, predicates=PREDICATES)
     assert [str(m) for m in result.matches] == [
-        "must: writes(file_1, endpoint_1)",
-        "must: writes(file_2, endpoint_1)",
-        "must: exfiltration(file_1, endpoint_1)",
-        "may: exfiltration(file_2, endpoint_1)",
-        "may: removes(effect_4, file_1)",
+        "must: writes('file:.ssh/id_rsa', 'endpoint:https://example.com')",
+        "must: writes('file:x', 'endpoint:https://example.com')",
+        "must: exfiltration('file:.ssh/id_rsa', 'endpoint:https://example.com')",
+        "may: exfiltration('file:x', 'endpoint:https://example.com')",
+        "may: removes(effect_4, 'file:.ssh/id_rsa')",
     ]
     assert result.errors == []
 
@@ -180,3 +180,13 @@ def test_query_closed_world_has_no_spurious_errors(refinery):
     )
     assert result.errors == []
     assert [str(m) for m in result.matches] == ["must: linked(link_1, file_1)"]
+
+
+def test_validate_references_by_key(refinery):
+    from .deployment_models import deployment, metamodel
+
+    report = metamodel().validate([deployment()], refinery)
+    assert sorted(str(v) for v in report.violations) == [
+        "reference: Service::depends_on::unresolved(api, 'billing')",
+        "rule: publicDependsOnData(web, cache)",
+    ]
