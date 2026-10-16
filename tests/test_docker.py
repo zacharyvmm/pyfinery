@@ -143,3 +143,10 @@ def test_validate_nested_plain_models(refinery):
     empty = Order(lines=[])
     report = pf.Metamodel(Order).validate([empty], refinery)
     assert [(v.kind, v.nodes) for v in report.violations] == [("multiplicity", (empty,))]
+
+
+def test_validate_generic_models(refinery):
+    from .generic_models import graph, metamodel
+
+    report = metamodel().validate([graph()], refinery)
+    assert report.ok, report.violations

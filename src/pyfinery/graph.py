@@ -31,6 +31,24 @@ containment reference, and the nested model becomes a Refinery class whose
 fields are mapped the same way. Each nested instance must have exactly one
 owner; use a :class:`RefineryNode` for objects referenced from several places.
 
+Classes you can't (or don't want to) change, such as models generated at
+runtime, are configured from outside with :class:`ClassOptions`:
+
+- ``key``: an entity identity. Instances with equal keys are one node, so a
+  field holding an equal *copy* of an entity refers to it instead of owning a
+  new node. Fields typed as keyed classes are plain references.
+- ``exclude``: fields left out of the metamodel (e.g., free-form payload).
+- ``node_name`` and ``abstract``.
+
+Unions of model classes (``File | Variable``, with or without a Pydantic
+discriminator) become an abstract Refinery superclass of their members, named
+after them or as given in ``unions``. ``Literal`` fields with several string
+values become Refinery enums; single-value ``Literal`` fields (discriminator
+tags such as ``type: Literal["file"]``) carry no information beyond the class
+and are skipped. ``unsupported="skip"`` skips other fields that have no
+Refinery counterpart (e.g. ``list[str]``) instead of raising; they're listed
+in :attr:`Metamodel.skipped`.
+
 Set ``__abstract__ = True`` in a class body to declare an abstract class.
 Extra constraints are written as Refinery predicates, e.g.
 ``error pred emptyDir(Dir d) <-> !contents(d, _).``, and passed as ``rules``.
@@ -47,7 +65,7 @@ import inspect
 import math
 import re
 import types
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal, Union, get_args, get_origin
 
@@ -94,6 +112,29 @@ def Contains(  # noqa: N802 - reads like a type annotation
 def Container(opposite: str) -> Ref:  # noqa: N802
     """Marks the container side of a containment reference (``container``)."""
     return Ref(opposite=opposite, kind="container")
+
+
+@dataclass(frozen=True, slots=True)
+class ClassOptions:
+    """How to map a model class, for classes that can't carry the options themselves.
+
+    Passed to :class:`Metamodel` as ``options={cls: ClassOptions(...)}``; the
+    options of the nearest class in the MRO apply, so options given for a
+    base class also apply to its subclasses.
+
+    :param key: Identity of an instance, e.g. ``lambda f: f.path``. Instances
+        with equal keys (and the same class) are the same node, and fields
+        typed as this class are references rather than containment.
+    :param node_name: Name of the Refinery node of an instance (defaults to
+        ``<class>_<n>``).
+    :param exclude: Names of fields (declared in this class) to leave out.
+    :param abstract: Declare the Refinery class ``abstract``.
+    """
+
+    key: Callable[[Any], Hashable] | None = None
+    node_name: Callable[[Any], str] | None = None
+    exclude: frozenset[str] | Sequence[str] = ()
+    abstract: bool | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -269,13 +310,33 @@ _DATA_TYPES: dict[type, str] = {bool: "boolean", int: "int", float: "real", str:
 
 
 @dataclass(frozen=True, slots=True)
+class UnionClass:
+    """An abstract Refinery superclass standing for a union of model classes."""
+
+    name: str
+    members: tuple[type[BaseModel], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class LiteralEnum:
+    """A Refinery enum standing for a ``Literal`` of strings."""
+
+    name: str
+    values: tuple[str, ...]
+
+
+ClassLike = type[BaseModel] | UnionClass
+EnumLike = type[enum.Enum] | LiteralEnum
+
+
+@dataclass(frozen=True, slots=True)
 class Feature:
     """A field of a Pydantic model class mapped to Refinery."""
 
     owner: type[BaseModel]
     name: str
-    target: type[BaseModel] | type[enum.Enum] | str
-    """Model class, enum class, or data type name for attributes."""
+    target: ClassLike | EnumLike | str
+    """Model class, union, enum, ``Literal`` enum, or data type name for attributes."""
     many: bool
     lower: int
     upper: int | None
@@ -288,14 +349,14 @@ class Feature:
 
     @property
     def is_enum(self) -> bool:
-        return isinstance(self.target, type) and issubclass(self.target, enum.Enum)
+        return isinstance(self.target, LiteralEnum) or _is_enum_class(self.target)
 
 
 def _strip_optional(annotation: Any) -> tuple[Any, bool]:
     if get_origin(annotation) in (Union, types.UnionType):
         args = [a for a in get_args(annotation) if a is not type(None)]
-        if len(args) == len(get_args(annotation)) - 1 and len(args) == 1:
-            return args[0], True
+        if len(args) == len(get_args(annotation)) - 1:
+            return (args[0] if len(args) == 1 else Union[tuple(args)]), True  # noqa: UP007
     return annotation, False
 
 
@@ -323,9 +384,16 @@ def _is_model_class(value: Any) -> bool:
     )
 
 
-def _is_embedded(value: Any) -> bool:
-    """Plain Pydantic models, which are owned by (contained in) their parent."""
-    return _is_model_class(value) and not issubclass(value, RefineryNode)
+def _is_union(annotation: Any) -> bool:
+    return get_origin(annotation) in (Union, types.UnionType)
+
+
+def _camel(name: str) -> str:
+    return "".join(part[:1].upper() + part[1:] for part in name.split("_") if part)
+
+
+class _Unsupported(TypeError):
+    """A field type with no Refinery counterpart (skipped with ``unsupported="skip"``)."""
 
 
 class Metamodel:
@@ -338,47 +406,122 @@ class Metamodel:
     >>> print(metamodel.source)
     >>> report = metamodel.validate([my_filesystem], refinery)
 
-    Classes reachable from the given ones (through superclasses, references,
-    and already-imported subclasses) are included automatically.
+    Classes reachable from the given ones are included automatically: their
+    superclasses, the classes their fields refer to, and the already-imported
+    subclasses of those (but not every subclass of a shared base class).
+
+    :param options: :class:`ClassOptions` by class.
+    :param unions: Names for the abstract superclasses standing for unions,
+        e.g. ``{"Resource": [File, Variable, Endpoint]}``.
+    :param unsupported: ``"skip"`` to leave out fields with no Refinery
+        counterpart instead of raising ``TypeError``.
     """
 
-    def __init__(self, *classes: type[BaseModel], rules: Iterable[str] = ()) -> None:
+    def __init__(
+        self,
+        *classes: type[BaseModel],
+        rules: Iterable[str] = (),
+        options: Mapping[type, ClassOptions] | None = None,
+        unions: Mapping[str, Iterable[type[BaseModel]]] | None = None,
+        unsupported: Literal["error", "skip"] = "error",
+    ) -> None:
         if not classes:
             raise ValueError("Metamodel needs at least one model class")
         self.rules = list(rules)
+        self.options = dict(options or {})
+        self._union_names = {frozenset(members): name for name, members in (unions or {}).items()}
+        self._unsupported = unsupported
         self.classes: list[type[BaseModel]] = []
-        self.enums: list[type[enum.Enum]] = []
+        self.unions: list[UnionClass] = []
+        self.enums: list[EnumLike] = []
         self.features: dict[type[BaseModel], list[Feature]] = {}
+        self.skipped: list[tuple[type[BaseModel], str, str]] = []
+        """Fields left out of the metamodel: ``(class, field, reason)``."""
         self._collect(classes)
+        self._check_names()
         self._check_opposites()
         self.source = self._render()
 
     # -- discovery ----------------------------------------------------------
 
     def _collect(self, roots: Iterable[type[BaseModel]]) -> None:
-        pending = list(roots)
-        seen: set[type[BaseModel]] = set()
+        # (class, whether to include its subclasses): roots and field types are
+        # expanded downwards, superclasses only upwards, so that a base class
+        # shared by unrelated models doesn't pull all of them in.
+        pending: list[tuple[type[BaseModel], bool]] = [(cls, True) for cls in roots]
+        expanded: set[type[BaseModel]] = set()
         while pending:
-            cls = pending.pop(0)
-            if cls in seen or cls is RefineryNode:
+            cls, downwards = pending.pop(0)
+            if cls is RefineryNode:
                 continue
             if not _is_model_class(cls):
                 raise TypeError(f"{cls!r} is not a RefineryNode subclass or Pydantic model")
-            seen.add(cls)
-            self._rebuild(cls)
-            self.classes.append(cls)
-            pending.extend(b for b in cls.__bases__ if _is_model_class(b))
-            pending.extend(cls.__subclasses__())
-            features = [self._feature(cls, name) for name in self._own_fields(cls)]
-            self.features[cls] = features
-            for feature in features:
-                if feature.is_enum:
-                    if feature.target not in self.enums:
-                        self.enums.append(feature.target)  # type: ignore[arg-type]
-                elif not feature.is_attribute:
-                    pending.append(feature.target)  # type: ignore[arg-type]
+            if cls not in self.features:
+                self._rebuild(cls)
+                self.classes.append(cls)
+                self.features[cls] = self._features(cls)
+                pending.extend((b, False) for b in cls.__bases__ if _is_model_class(b))
+                for feature in self.features[cls]:
+                    target = feature.target
+                    if feature.is_enum:
+                        if target not in self.enums:
+                            self.enums.append(target)  # type: ignore[arg-type]
+                    elif isinstance(target, UnionClass):
+                        if target not in self.unions:
+                            self.unions.append(target)
+                        pending.extend((member, True) for member in target.members)
+                    elif not feature.is_attribute:
+                        pending.append((target, True))  # type: ignore[arg-type]
+            if downwards and cls not in expanded:
+                expanded.add(cls)
+                pending.extend((sub, True) for sub in cls.__subclasses__())
         # Superclasses must be declared before subclasses for readability.
         self.classes.sort(key=lambda c: (len(c.__mro__), c.__qualname__))
+
+    def _options(self, cls: type) -> ClassOptions:
+        for base in cls.__mro__:
+            if base in self.options:
+                return self.options[base]
+        return _DEFAULT_OPTIONS
+
+    def _is_entity(self, cls: type) -> bool:
+        """Whether instances are shared nodes (RefineryNode or keyed), not owned values."""
+        return issubclass(cls, RefineryNode) or self._options(cls).key is not None
+
+    def _is_abstract(self, cls: type) -> bool:
+        abstract = self.options[cls].abstract if cls in self.options else None
+        return bool(cls.__dict__.get("__abstract__", False)) if abstract is None else abstract
+
+    def _features(self, cls: type[BaseModel]) -> list[Feature]:
+        exclude = set(self._options(cls).exclude)
+        features = []
+        for name in self._own_fields(cls):
+            if name in exclude:
+                continue
+            try:
+                feature = self._feature(cls, name)
+            except _Unsupported as e:
+                if self._unsupported == "error":
+                    raise TypeError(
+                        f"{e} (exclude the field with ClassOptions(exclude=...) or pass "
+                        "unsupported='skip')"
+                    ) from None
+                self.skipped.append((cls, name, str(e)))
+                continue
+            if feature is not None:
+                features.append(feature)
+        return features
+
+    def _check_names(self) -> None:
+        seen: dict[str, object] = {}
+        named: list[tuple[str, object]] = [(c.__name__, c) for c in self.classes]
+        named += [(u.name, u) for u in self.unions]
+        named += [(e.name if isinstance(e, LiteralEnum) else e.__name__, e) for e in self.enums]
+        for name, owner in named:
+            if seen.setdefault(name, owner) is not owner:
+                raise TypeError(
+                    f"Two different types are both named {name!r}; Refinery needs unique names"
+                )
 
     @staticmethod
     def _rebuild(node_class: type[BaseModel]) -> None:
@@ -403,7 +546,7 @@ class Metamodel:
         }
         return [name for name in node_class.model_fields if name in own and name not in inherited]
 
-    def _feature(self, cls: type[BaseModel], name: str) -> Feature:
+    def _feature(self, cls: type[BaseModel], name: str) -> Feature | None:
         info = cls.model_fields[name]
         where = f"{cls.__name__}.{name}"
         annotation, metadata = _strip_annotated(info.annotation)
@@ -421,8 +564,8 @@ class Metamodel:
             many = True
             annotation, more = _strip_annotated(args[0])
             metadata += more
-        elif origin is not None:
-            raise TypeError(f"{where}: unsupported field type {info.annotation!r}")
+        elif origin is not None and origin is not Literal and not _is_union(annotation):
+            raise _Unsupported(f"{where}: unsupported field type {info.annotation!r}")
 
         refs = [m for m in metadata if isinstance(m, Ref)]
         if len(refs) > 1:
@@ -430,27 +573,54 @@ class Metamodel:
         ref = refs[0] if refs else Ref()
 
         if annotation in _DATA_TYPES:
-            if many or refs:
-                raise TypeError(f"{where}: attributes cannot be collections or have Ref markers")
+            if many:
+                raise _Unsupported(f"{where}: Refinery attributes can't hold collections")
+            if refs:
+                raise TypeError(f"{where}: attributes can't have Ref markers")
             return Feature(cls, name, _DATA_TYPES[annotation], False, 0, 1, "refers", None)
 
-        if not (_is_model_class(annotation) or _is_enum_class(annotation)):
-            raise TypeError(
+        target: ClassLike | EnumLike
+        if get_origin(annotation) is Literal:
+            values = get_args(annotation)
+            if not all(isinstance(v, str) for v in values):
+                raise _Unsupported(f"{where}: only Literals of strings map to Refinery enums")
+            if len(values) == 1:
+                # A constant, e.g. a discriminator tag: the class says it all.
+                return None
+            target = self._literal_enum(f"{cls.__name__}{_camel(name)}", values)
+        elif _is_union(annotation):
+            target = self._union(where, annotation)
+        elif _is_model_class(annotation) or _is_enum_class(annotation):
+            target = annotation
+        else:
+            raise _Unsupported(
                 f"{where}: unsupported field type {annotation!r}; use a RefineryNode subclass, "
-                "a Pydantic model, an Enum, int, float, str, or bool"
+                "a Pydantic model, a union of them, an Enum, a Literal of strings, int, float, "
+                "str, or bool"
             )
-        if _is_enum_class(annotation) and ref.kind != "refers":
-            raise TypeError(f"{where}: enums cannot be containment references")
-        kind = ref.kind
-        if _is_embedded(annotation):
-            # Nested plain models are value objects owned by this object.
-            if ref.kind == "container" or ref.opposite is not None:
+        if isinstance(target, LiteralEnum) or _is_enum_class(target):
+            if ref.kind != "refers":
+                raise TypeError(f"{where}: enums cannot be containment references")
+            kind: ReferenceKind = "refers"
+        else:
+            members = target.members if isinstance(target, UnionClass) else (target,)
+            entities = [self._is_entity(m) for m in members]  # type: ignore[arg-type]
+            if any(entities) and not all(entities):
                 raise TypeError(
-                    f"{where}: {annotation.__name__} is a plain Pydantic model, which is always "
-                    "contained in its owner and cannot have opposites; make it a RefineryNode "
-                    "to use opposites or Container()"
+                    f"{where}: mixes owned value classes with entity classes (RefineryNode or "
+                    "keyed); Refinery needs them all to be one or the other"
                 )
-            kind = "contains"
+            kind = ref.kind
+            if not any(entities):
+                # Plain models without a key are value objects owned by this object.
+                if ref.kind == "container" or ref.opposite is not None:
+                    shown = getattr(target, "name", None) or target.__name__  # type: ignore[union-attr]
+                    raise TypeError(
+                        f"{where}: {shown} is a plain Pydantic model, which is always "
+                        "contained in its owner and cannot have opposites; make it a RefineryNode "
+                        "(or give it a key) to use opposites or Container()"
+                    )
+                kind = "contains"
 
         if many:
             lower = next(
@@ -468,7 +638,27 @@ class Metamodel:
                 raise TypeError(f"{where}: a container reference must be a single node")
             if ref.opposite is None:
                 raise TypeError(f"{where}: a container reference needs an opposite")
-        return Feature(cls, name, annotation, many, lower, upper, kind, ref.opposite)
+        return Feature(cls, name, target, many, lower, upper, kind, ref.opposite)
+
+    def _literal_enum(self, name: str, values: tuple[str, ...]) -> LiteralEnum:
+        for existing in self.enums:
+            if isinstance(existing, LiteralEnum) and existing.values == values:
+                return existing
+        return LiteralEnum(name, values)
+
+    def _union(self, where: str, annotation: Any) -> UnionClass:
+        members = []
+        for arg in get_args(annotation):
+            arg, _ = _strip_annotated(arg)
+            if not _is_model_class(arg):
+                raise _Unsupported(f"{where}: unions must only contain Pydantic model classes")
+            members.append(arg)
+        key = frozenset(members)
+        for existing in self.unions:
+            if frozenset(existing.members) == key:
+                return existing
+        name = self._union_names.get(key) or "Or".join(m.__name__ for m in members)
+        return UnionClass(name, tuple(members))
 
     def _find_feature(self, cls: type, name: str) -> Feature | None:
         for base in cls.__mro__:
@@ -483,6 +673,8 @@ class Metamodel:
                 if feature.opposite is None:
                     continue
                 where = f"{feature.owner.__name__}.{feature.name}"
+                if isinstance(feature.target, UnionClass):
+                    raise TypeError(f"{where}: references to unions can't have opposites")
                 other = self._find_feature(feature.target, feature.opposite)  # type: ignore[arg-type]
                 if other is None:
                     raise TypeError(
@@ -507,8 +699,15 @@ class Metamodel:
     # -- rendering ----------------------------------------------------------
 
     @staticmethod
-    def class_name(node_class: type) -> str:
+    def class_name(node_class: type | UnionClass | LiteralEnum) -> str:
+        if isinstance(node_class, UnionClass | LiteralEnum):
+            return quote_id(node_class.name)
         return quote_id(node_class.__name__)
+
+    def _literal(self, enum_type: EnumLike, value: Any) -> str:
+        """The Refinery name of an enum value, e.g. ``Color::red``."""
+        member = value if isinstance(enum_type, LiteralEnum) else value.name
+        return f"{self.class_name(enum_type)}::{quote_id(member)}"
 
     def _render_feature(self, feature: Feature) -> str:
         name = quote_id(feature.name)
@@ -523,14 +722,21 @@ class Metamodel:
 
     def _render(self) -> str:
         lines: list[str] = []
-        for enum_class in self.enums:
-            literals = ", ".join(quote_id(member.name) for member in enum_class)
-            lines.append(f"enum {self.class_name(enum_class)} {{ {literals} }}")
+        for enum_type in self.enums:
+            if isinstance(enum_type, LiteralEnum):
+                members = enum_type.values
+            else:
+                members = tuple(member.name for member in enum_type)
+            literals = ", ".join(quote_id(member) for member in members)
+            lines.append(f"enum {self.class_name(enum_type)} {{ {literals} }}")
+        for union in self.unions:
+            lines.append(f"abstract class {self.class_name(union)}.")
         for cls in self.classes:
             header = f"class {self.class_name(cls)}"
-            if cls.__dict__.get("__abstract__", False):
+            if self._is_abstract(cls):
                 header = f"abstract {header}"
-            supers = [b for b in cls.__bases__ if _is_model_class(b)]
+            supers: list[type | UnionClass] = [b for b in cls.__bases__ if _is_model_class(b)]
+            supers += [u for u in self.unions if cls in u.members]
             if supers:
                 header += " extends " + ", ".join(self.class_name(b) for b in supers)
             features = self.features[cls]
@@ -555,20 +761,30 @@ class Metamodel:
         passed in ``objects`` itself.
         """
         result: list[BaseModel] = []
-        seen: set[int] = set()
+        seen: set[Hashable] = set()
         pending = list(objects)
         while pending:
             node = pending.pop(0)
-            if id(node) in seen:
-                continue
             if type(node) not in self.features:
                 raise TypeError(f"{type(node).__name__} is not part of this metamodel")
-            seen.add(id(node))
+            identity = self.identity(node)
+            if identity in seen:
+                continue
+            seen.add(identity)
             result.append(node)
             for _, feature, value in self._values(node):
                 if not feature.is_attribute and not feature.is_enum:
                     pending.extend(value)
         return result
+
+    def identity(self, node: BaseModel) -> Hashable:
+        """What makes ``node`` one Refinery node: its key if its class has one, else itself.
+
+        Of several instances with the same key, the first one reached
+        represents them all (its fields are the ones asserted).
+        """
+        key = self._options(type(node)).key
+        return (type(node), key(node)) if key is not None else id(node)
 
     def link_opposites(self, objects: Iterable[BaseModel]) -> int:
         """Fill in the missing side of every ``opposite`` pair in the graph.
@@ -589,7 +805,7 @@ class Metamodel:
                     continue
                 for target in values:
                     other = self._find_feature(type(target), feature.opposite)
-                    if other is not None and _add_reference(target, other, node):
+                    if other is not None and _add_reference(target, other, node, self.identity):
                         added += 1
         return added
 
@@ -602,17 +818,20 @@ class Metamodel:
                 values = list(value) if feature.many else [value]
                 yield cls, feature, values
 
-    def node_names(self, nodes: Sequence[BaseModel]) -> dict[int, str]:
-        """Refinery node names (as rendered in the problem) keyed by ``id(node)``."""
-        names: dict[int, str] = {}
+    def node_names(self, nodes: Sequence[BaseModel]) -> dict[Hashable, str]:
+        """Refinery node names (as rendered in the problem) by :meth:`identity`."""
+        names: dict[Hashable, str] = {}
         used: set[str] = set()
         counters: dict[type, int] = {}
         for node in nodes:
             id_field: str | None = getattr(type(node), "__node_id__", None)
-            if id_field is not None:
-                name = quote_id(str(getattr(node, id_field)))
+            naming = self._options(type(node)).node_name
+            if naming is not None or id_field is not None:
+                raw = naming(node) if naming is not None else getattr(node, id_field)  # type: ignore[arg-type]
+                name = quote_id(str(raw))
                 if name in used:
-                    raise ValueError(f"Duplicate node id {name} (from field {id_field!r})")
+                    source = "node_name" if naming is not None else f"field {id_field!r}"
+                    raise ValueError(f"Duplicate node id {name} (from {source})")
             else:
                 while True:
                     counters[type(node)] = counters.get(type(node), 0) + 1
@@ -620,14 +839,14 @@ class Metamodel:
                     if name not in used:
                         break
             used.add(name)
-            names[id(node)] = name
+            names[self.identity(node)] = name
         return names
 
-    def facts(self, nodes: Sequence[BaseModel], names: dict[int, str]) -> str:
+    def facts(self, nodes: Sequence[BaseModel], names: Mapping[Hashable, str]) -> str:
         """Assertions describing ``nodes`` (which must include every referenced node)."""
         lines = []
         for node in nodes:
-            name = names[id(node)]
+            name = names[self.identity(node)]
             lines.append(f"{self.class_name(type(node))}({name}).")
             for cls, feature, values in self._values(node):
                 symbol = f"{self.class_name(cls)}::{quote_id(feature.name)}"
@@ -636,11 +855,10 @@ class Metamodel:
                         literal = _attribute_literal(value, feature.target)  # type: ignore[arg-type]
                         lines.append(f"{symbol}({name}): {literal}.")
                     elif feature.is_enum:
-                        enum_name = self.class_name(feature.target)  # type: ignore[arg-type]
-                        literal = f"{enum_name}::{quote_id(value.name)}"
+                        literal = self._literal(feature.target, value)  # type: ignore[arg-type]
                         lines.append(f"{symbol}({name}, {literal}).")
                     else:
-                        lines.append(f"{symbol}({name}, {names[id(value)]}).")
+                        lines.append(f"{symbol}({name}, {names[self.identity(value)]}).")
         return "\n".join(lines) + "\n"
 
     def problem(self, objects: Iterable[BaseModel]) -> str:
@@ -656,7 +874,7 @@ class Metamodel:
         nodes = self.collect(objects)
         names = self.node_names(nodes)
         source = self.source + "\n" + self.facts(nodes, names)
-        return source, {names[id(node)]: node for node in nodes}
+        return source, {names[self.identity(node)]: node for node in nodes}
 
     def validate(self, objects: Iterable[BaseModel], refinery: Refinery) -> ValidationReport:
         """Check the graph reachable from ``objects`` against the metamodel and rules.
@@ -671,7 +889,7 @@ class Metamodel:
             result = refinery.concretize(source, format=self._FORMAT)
         except RefineryTimeoutError as e:
             raise _timeout_hint(e) from e
-        return _report(source, result.json_, by_name)
+        return _report(source, result.json_, by_name, self.identity)
 
     async def avalidate(
         self, objects: Iterable[BaseModel], refinery: AsyncRefinery
@@ -682,10 +900,18 @@ class Metamodel:
             result = await refinery.concretize(source, format=self._FORMAT)
         except RefineryTimeoutError as e:
             raise _timeout_hint(e) from e
-        return _report(source, result.json_, by_name)
+        return _report(source, result.json_, by_name, self.identity)
 
 
-def _add_reference(node: BaseModel, feature: Feature, value: BaseModel) -> bool:
+_DEFAULT_OPTIONS = ClassOptions()
+
+
+def _add_reference(
+    node: BaseModel,
+    feature: Feature,
+    value: BaseModel,
+    identity: Callable[[BaseModel], Hashable],
+) -> bool:
     """Add ``value`` to ``node.<feature>`` unless already present or the slot is taken."""
     current = getattr(node, feature.name)
     if not feature.many:
@@ -696,7 +922,7 @@ def _add_reference(node: BaseModel, feature: Feature, value: BaseModel) -> bool:
     if current is None:
         setattr(node, feature.name, [value])
         return True
-    if any(item is value for item in current):
+    if any(identity(item) == identity(value) for item in current):
         return False
     if isinstance(current, list):
         current.append(value)
@@ -756,6 +982,7 @@ class ValidationReport:
     source: str
     """The problem sent to Refinery (metamodel, rules, and facts)."""
     model: JsonOutput | None
+    identity: Callable[[BaseModel], Hashable] = field(default=id, repr=False, compare=False)
 
     @property
     def ok(self) -> bool:
@@ -765,8 +992,13 @@ class ValidationReport:
         return self.ok
 
     def for_node(self, node: BaseModel) -> list[Violation]:
-        """Violations that involve ``node``."""
-        return [v for v in self.violations if any(n is node for n in v.nodes)]
+        """Violations that involve ``node`` (or another instance with the same key)."""
+        wanted = self.identity(node)
+        return [
+            v
+            for v in self.violations
+            if any(n is not None and self.identity(n) == wanted for n in v.nodes)
+        ]
 
     def raise_for_violations(self) -> None:
         if self.violations:
@@ -796,7 +1028,10 @@ def _classify(relation: str, is_error_predicate: bool) -> ViolationKind | None:
 
 
 def _report(
-    source: str, model: JsonOutput | None, by_name: dict[str, BaseModel]
+    source: str,
+    model: JsonOutput | None,
+    by_name: dict[str, BaseModel],
+    identity: Callable[[BaseModel], Hashable] = id,
 ) -> ValidationReport:
     if model is None:
         raise RefineryError("Refinery did not return a model to validate")
@@ -812,4 +1047,4 @@ def _report(
             names = tuple(model.nodes[i].name for i in raw[: relation.arity])  # type: ignore[index]
             nodes = tuple(by_name.get(name) for name in names)
             violations.append(Violation(kind, relation.name, names, nodes))
-    return ValidationReport(violations, source, model)
+    return ValidationReport(violations, source, model, identity)

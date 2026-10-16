@@ -25,6 +25,7 @@ from .errors import (
     UnsatisfiableError,
 )
 from .graph import (
+    ClassOptions,
     Container,
     Contains,
     Metamodel,
@@ -59,6 +60,7 @@ __all__ = [
     "AsyncRefineryChat",
     "BadRequestError",
     "ChatMessage",
+    "ClassOptions",
     "ConcretizationResult",
     "Container",
     "Contains",
