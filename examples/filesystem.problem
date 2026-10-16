@@ -1,0 +1,26 @@
+% SPDX-FileCopyrightText: 2023-2024 The Refinery Authors <https://refinery.tools/>
+%
+% SPDX-License-Identifier: EPL-2.0
+%
+% File system example from the Refinery tutorial:
+% https://refinery.tools/learn/tutorials/file-system
+
+class Filesystem {
+    contains Dir[1] root
+}
+
+abstract class FSObject {
+    container Dir parent opposite contents
+}
+
+class Dir extends FSObject {
+    contains FSObject[] contents opposite parent
+}
+
+class File extends FSObject.
+
+class Link extends FSObject {
+    FSObject[1] target
+}
+
+scope node = 5..8.

@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 zacharyvmm <58368863+zacharyvmm@users.noreply.github.com>
+#
+# SPDX-License-Identifier: CC0-1.0
+
+version = 1
+SPDX-PackageName = "pyfinery"
+SPDX-PackageDownloadLocation = "https://github.com/zacharyvmm/pyfinery"
+
+[[annotations]]
+path = [".gitignore", ".python-version", "pyproject.toml", "uv.lock"]
+SPDX-FileCopyrightText = "2026 zacharyvmm <58368863+zacharyvmm@users.noreply.github.com>"
+SPDX-License-Identifier = "CC0-1.0"
+
+[[annotations]]
+path = "src/pyfinery/py.typed"
+SPDX-FileCopyrightText = "2026 zacharyvmm <58368863+zacharyvmm@users.noreply.github.com>"
+SPDX-License-Identifier = "EPL-2.0"
