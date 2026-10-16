@@ -268,6 +268,9 @@ result.must("exfiltration"), result.may("exfiltration"), result["writes"]
 - **How certainty is decided:** a match is `must` when Refinery evaluates the predicate to true, and `may` when it's unknown. It's also `may` when one of its arguments only may exist, because Refinery weakens a predicate for nodes quantified in its body but not for its arguments.
 - **Which predicates are reported:** every `pred` declared in `rules`, unless you choose with `select=[...]`.
 - **Errors:** metamodel violations and contradictions found along the way are in `result.errors`.
+- **Explicit facts:** `Predicate(name, params, tuples=[(a, b), ((c, d), "may")])` takes the facts directly, for relations you already have. It skips evaluating every combination.
+- **Uncertain fields:** `ClassOptions(certainty=lambda obj, field, value: ...)` marks individual references or attribute values as `"may"`, for example links found by a heuristic.
+- **`validate()` takes the same options:** it accepts `rules` and `predicates` per call too. It's two-valued, though: facts that only *may* hold count as not holding, and every object exists.
 - **Arguments:** `Predicate` parameters are model classes or union names. Each predicate is evaluated on every combination of nodes of those types, so keep arity low on large graphs.
 - **Debugging:** `metamodel.query_problem(...)` returns the exact problem sent, for pasting into the web editor. `aquery()` is the async variant.
 
