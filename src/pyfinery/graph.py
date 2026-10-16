@@ -130,11 +130,17 @@ class ClassOptions:
     options of the nearest class in the MRO apply, so options given for a
     base class also apply to its subclasses.
 
-    :param key: Identity of an instance, e.g. ``lambda f: f.path``. Instances
+    :param key: Identity of an instance, e.g. ``lambda s: s.name``. Instances
         with equal keys (and the same class) are the same node, and fields
         typed as this class are references rather than containment.
-    :param node_name: Name of the Refinery node of an instance (defaults to
-        ``<class>_<n>``).
+    :param references: Fields holding the *keys* of other objects rather than
+        the objects, e.g. ``{"depends_on": Service}`` for
+        ``depends_on: list[str]``. The target is a keyed class, a sequence of
+        them, or the name of a union given to :class:`Metamodel`. Keys that
+        match no object (or several) are reported as ``"reference"``
+        violations.
+    :param node_name: Name of the Refinery node of an instance. Defaults to
+        the key, if it is a string or integer, else ``<class>_<n>``.
     :param exclude: Names of fields (declared in this class) to leave out.
     :param abstract: Declare the Refinery class ``abstract``.
     :param exists: Whether an instance certainly exists (``"must"`` or
@@ -143,6 +149,7 @@ class ClassOptions:
     """
 
     key: Callable[[Any], Hashable] | None = None
+    references: Mapping[str, type[BaseModel] | Sequence[type[BaseModel]] | str] | None = None
     node_name: Callable[[Any], str] | None = None
     exclude: frozenset[str] | Sequence[str] = ()
     abstract: bool | None = None
@@ -372,6 +379,8 @@ class Feature:
     upper: int | None
     kind: ReferenceKind
     opposite: str | None
+    by_key: bool = False
+    """Whether the field holds keys of the target objects rather than the objects."""
 
     @property
     def is_attribute(self) -> bool:
@@ -459,7 +468,10 @@ class Metamodel:
             raise ValueError("Metamodel needs at least one model class")
         self.rules = list(rules)
         self.options = dict(options or {})
-        self._union_names = {frozenset(members): name for name, members in (unions or {}).items()}
+        self._union_members = {name: tuple(members) for name, members in (unions or {}).items()}
+        self._union_names = {
+            frozenset(members): name for name, members in self._union_members.items()
+        }
         self._unsupported = unsupported
         self.classes: list[type[BaseModel]] = []
         self.unions: list[UnionClass] = []
@@ -470,6 +482,10 @@ class Metamodel:
         self._collect(classes)
         self._check_names()
         self._check_opposites()
+        self._check_key_references()
+        self._type_names = {self.class_name(c) for c in self.classes}
+        self._type_names |= {quote_id(u.name) for u in self.unions}
+        self._type_names |= {self.class_name(e) for e in self.enums}
         self.source = self._render()
 
     # -- discovery ----------------------------------------------------------
@@ -577,6 +593,9 @@ class Metamodel:
         return [name for name in node_class.model_fields if name in own and name not in inherited]
 
     def _feature(self, cls: type[BaseModel], name: str) -> Feature | None:
+        by_key = self._options(cls).references or {}
+        if name in by_key:
+            return self._key_reference(cls, name, by_key[name])
         info = cls.model_fields[name]
         where = f"{cls.__name__}.{name}"
         annotation, metadata = _strip_annotated(info.annotation)
@@ -670,6 +689,62 @@ class Metamodel:
                 raise TypeError(f"{where}: a container reference needs an opposite")
         return Feature(cls, name, target, many, lower, upper, kind, ref.opposite)
 
+    def _key_reference(
+        self,
+        cls: type[BaseModel],
+        name: str,
+        spec: type[BaseModel] | Sequence[type[BaseModel]] | str,
+    ) -> Feature:
+        info = cls.model_fields[name]
+        where = f"{cls.__name__}.{name}"
+        annotation, metadata = _strip_annotated(info.annotation)
+        metadata = [*info.metadata, *metadata]
+        annotation, optional = _strip_optional(annotation)
+        annotation, _ = _strip_annotated(annotation)
+        many = get_origin(annotation) in _COLLECTIONS or annotation in (list, set, frozenset, tuple)
+        if many:
+            args = [a for a in get_args(annotation) if a is not Ellipsis]
+            annotation = _strip_annotated(args[0])[0] if len(args) == 1 else None
+        if annotation not in (str, int):
+            raise TypeError(
+                f"{where}: a reference by key must hold str or int keys, or a collection of them"
+            )
+        target: ClassLike
+        if isinstance(spec, str):
+            if spec not in self._union_members:
+                raise TypeError(f"{where}: no union named {spec!r} was given to Metamodel(unions=)")
+            target = self._union_of(self._union_members[spec])
+        elif isinstance(spec, type):
+            if not _is_model_class(spec):
+                raise TypeError(f"{where}: {spec!r} is not a Pydantic model class")
+            target = spec
+        else:
+            target = self._union_of(tuple(spec))
+        if many:
+            lower = next(
+                (m.min_length for m in metadata if isinstance(m, annotated_types.MinLen)), 0
+            )
+            upper = next(
+                (m.max_length for m in metadata if isinstance(m, annotated_types.MaxLen)), None
+            )
+        else:
+            lower, upper = (0 if optional else 1), 1
+        return Feature(cls, name, target, many, lower, upper, "refers", None, by_key=True)
+
+    def _check_key_references(self) -> None:
+        for features in self.features.values():
+            for feature in features:
+                if not feature.by_key:
+                    continue
+                target = feature.target
+                members = target.members if isinstance(target, UnionClass) else (target,)
+                for member in members:
+                    if self._options(member).key is None:  # type: ignore[arg-type]
+                        raise TypeError(
+                            f"{feature.owner.__name__}.{feature.name}: references by key need "
+                            f"ClassOptions(key=...) on {member.__name__}"  # type: ignore[union-attr]
+                        )
+
     def _literal_enum(self, name: str, values: tuple[str, ...]) -> LiteralEnum:
         for existing in self.enums:
             if isinstance(existing, LiteralEnum) and existing.values == values:
@@ -683,12 +758,15 @@ class Metamodel:
             if not _is_model_class(arg):
                 raise _Unsupported(f"{where}: unions must only contain Pydantic model classes")
             members.append(arg)
+        return self._union_of(tuple(members))
+
+    def _union_of(self, members: tuple[type[BaseModel], ...]) -> UnionClass:
         key = frozenset(members)
         for existing in self.unions:
             if frozenset(existing.members) == key:
                 return existing
         name = self._union_names.get(key) or "Or".join(m.__name__ for m in members)
-        return UnionClass(name, tuple(members))
+        return UnionClass(name, members)
 
     def _find_feature(self, cls: type, name: str) -> Feature | None:
         for base in cls.__mro__:
@@ -803,7 +881,7 @@ class Metamodel:
             seen.add(identity)
             result.append(node)
             for _, feature, value in self._values(node):
-                if not feature.is_attribute and not feature.is_enum:
+                if not (feature.is_attribute or feature.is_enum or feature.by_key):
                     pending.extend(value)
         return result
 
@@ -862,6 +940,8 @@ class Metamodel:
                 if name in used:
                     source = "node_name" if naming is not None else f"field {id_field!r}"
                     raise ValueError(f"Duplicate node id {name} (from {source})")
+            elif (key := self._name_from_key(node)) is not None and key not in used:
+                name = key
             else:
                 while True:
                     counters[type(node)] = counters.get(type(node), 0) + 1
@@ -871,6 +951,53 @@ class Metamodel:
             used.add(name)
             names[self.identity(node)] = name
         return names
+
+    def _name_from_key(self, node: BaseModel) -> str | None:
+        """The key as a node name, if it is a string or integer that isn't a type's name."""
+        key_of = self._options(type(node)).key
+        if key_of is None:
+            return None
+        key = key_of(node)
+        if isinstance(key, bool) or not isinstance(key, str | int) or str(key) == "":
+            return None
+        name = quote_id(str(key))
+        return None if name in self._type_names or str(key) in _RESERVED_NODE_NAMES else name
+
+    def _key_index(self, nodes: Sequence[BaseModel]) -> dict[Hashable, list[BaseModel]]:
+        index: dict[Hashable, list[BaseModel]] = {}
+        for node in nodes:
+            key_of = self._options(type(node)).key
+            if key_of is not None:
+                index.setdefault(key_of(node), []).append(node)
+        return index
+
+    @staticmethod
+    def _resolve(
+        feature: Feature, key: Hashable, index: Mapping[Hashable, list[BaseModel]]
+    ) -> list[BaseModel]:
+        target = feature.target
+        members = target.members if isinstance(target, UnionClass) else (target,)
+        return [n for n in index.get(key, []) if isinstance(n, members)]  # type: ignore[arg-type]
+
+    def reference_errors(
+        self, nodes: Sequence[BaseModel], names: Mapping[Hashable, str]
+    ) -> list[Violation]:
+        """Keys in reference-by-key fields that match no object, or several."""
+        index = self._key_index(nodes)
+        errors = []
+        for node in nodes:
+            for cls, feature, keys in self._values(node):
+                if not feature.by_key:
+                    continue
+                for key in keys:
+                    found = self._resolve(feature, key, index)
+                    if len(found) == 1:
+                        continue
+                    problem = "unresolved" if not found else "ambiguous"
+                    constraint = f"{self.class_name(cls)}::{quote_id(feature.name)}::{problem}"
+                    node_names = (names[self.identity(node)], repr(key))
+                    errors.append(Violation("reference", constraint, node_names, (node, None)))
+        return errors
 
     def facts(
         self,
@@ -886,11 +1013,18 @@ class Metamodel:
         closed-world defaults on that side don't contradict it.
         """
         lines = []
+        index = self._key_index(nodes)
         for node in nodes:
             name = names[self.identity(node)]
             lines.append(f"{self.class_name(type(node))}({name}).")
             for cls, feature, values in self._values(node):
                 symbol = f"{self.class_name(cls)}::{quote_id(feature.name)}"
+                if feature.by_key:
+                    for key in values:
+                        found = self._resolve(feature, key, index)
+                        if len(found) == 1:  # others are reported by reference_errors
+                            lines.append(f"{symbol}({name}, {names[self.identity(found[0])]}).")
+                    continue
                 if canonical_opposites and not self._canonical(feature):
                     for value in values:
                         other = self._find_feature(type(value), feature.opposite)  # type: ignore[arg-type]
@@ -918,11 +1052,14 @@ class Metamodel:
 
     _FORMAT = OutputFormats(json_=JsonOutputFormat(), source=SourceOutputFormat(enabled=False))
 
-    def _prepare(self, objects: Iterable[BaseModel]) -> tuple[str, dict[str, BaseModel]]:
+    def _prepare(
+        self, objects: Iterable[BaseModel]
+    ) -> tuple[str, dict[str, BaseModel], list[Violation]]:
         nodes = self.collect(objects)
         names = self.node_names(nodes)
         source = self.source + "\n" + self.facts(nodes, names)
-        return source, {names[self.identity(node)]: node for node in nodes}
+        by_name = {names[self.identity(node)]: node for node in nodes}
+        return source, by_name, self.reference_errors(nodes, names)
 
     def validate(self, objects: Iterable[BaseModel], refinery: Refinery) -> ValidationReport:
         """Check the graph reachable from ``objects`` against the metamodel and rules.
@@ -932,23 +1069,23 @@ class Metamodel:
         :class:`~pyfinery.InvalidProblemError` if the rules don't compile;
         constraint violations are returned in the report.
         """
-        source, by_name = self._prepare(objects)
+        source, by_name, errors = self._prepare(objects)
         try:
             result = refinery.concretize(source, format=self._FORMAT)
         except RefineryTimeoutError as e:
             raise _timeout_hint(e) from e
-        return _report(source, result.json_, by_name, self.identity)
+        return _report(source, result.json_, by_name, self.identity, errors)
 
     async def avalidate(
         self, objects: Iterable[BaseModel], refinery: AsyncRefinery
     ) -> ValidationReport:
         """Asynchronous variant of :meth:`validate`."""
-        source, by_name = self._prepare(objects)
+        source, by_name, errors = self._prepare(objects)
         try:
             result = await refinery.concretize(source, format=self._FORMAT)
         except RefineryTimeoutError as e:
             raise _timeout_hint(e) from e
-        return _report(source, result.json_, by_name, self.identity)
+        return _report(source, result.json_, by_name, self.identity, errors)
 
     # -- queries ------------------------------------------------------------
 
@@ -1034,7 +1171,14 @@ class Metamodel:
         lines += self._predicate_facts(predicates, nodes, names)
         selected = list(select) if select is not None else _declared_predicates(rules)
         by_name = {names[self.identity(node)]: node for node in nodes}
-        return _PreparedQuery("\n".join(lines) + "\n", selected, by_name, exists, self.identity)
+        return _PreparedQuery(
+            "\n".join(lines) + "\n",
+            selected,
+            by_name,
+            exists,
+            self.identity,
+            self.reference_errors(nodes, names),
+        )
 
     def _exists(self, node: BaseModel) -> Certainty:
         decide = self._options(type(node)).exists
@@ -1128,6 +1272,15 @@ class Metamodel:
 
 _DEFAULT_OPTIONS = ClassOptions()
 
+# Builtin symbols a node name shouldn't shadow.
+_RESERVED_NODE_NAMES = frozenset(
+    {
+        *("node", "exists", "equals", "count"),
+        *("contains", "contained", "container"),
+        *("int", "real", "string", "boolean"),
+    }
+)
+
 
 def _add_reference(
     node: BaseModel,
@@ -1162,7 +1315,7 @@ def _add_reference(
 # Validation results
 # ---------------------------------------------------------------------------
 
-ViolationKind = Literal["rule", "multiplicity", "containment", "contradiction"]
+ViolationKind = Literal["rule", "multiplicity", "containment", "contradiction", "reference"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1172,8 +1325,10 @@ class Violation:
     ``kind`` is ``"rule"`` for user-defined error predicates,
     ``"multiplicity"`` for reference multiplicities, ``"containment"`` for
     containment hierarchy errors (missing or multiple containers, cycles),
-    and ``"contradiction"`` for facts that contradict the metamodel (e.g., a
-    reference to a node of the wrong class).
+    ``"contradiction"`` for facts that contradict the metamodel (e.g., a
+    reference to a node of the wrong class), and ``"reference"`` for keys in
+    reference-by-key fields that match no object (``...::unresolved``, with
+    the key as second name) or several (``...::ambiguous``).
     """
 
     kind: ViolationKind
@@ -1292,6 +1447,7 @@ class _PreparedQuery:
     by_name: dict[str, BaseModel]
     exists: dict[str, Certainty]
     identity: Callable[[BaseModel], Hashable]
+    reference_errors: list[Violation]
 
     def result(self, model: JsonOutput | None) -> QueryResult:
         if model is None:
@@ -1316,7 +1472,9 @@ class _PreparedQuery:
                     certainty = "may"
                 nodes = tuple(self.by_name.get(name) for name in names)
                 matches.append(Match(predicate, names, nodes, certainty))
-        errors = _report(self.source, model, self.by_name, self.identity).violations
+        errors = _report(
+            self.source, model, self.by_name, self.identity, self.reference_errors
+        ).violations
         return QueryResult(matches, errors, self.source, model)
 
 
@@ -1347,10 +1505,11 @@ def _report(
     model: JsonOutput | None,
     by_name: dict[str, BaseModel],
     identity: Callable[[BaseModel], Hashable] = id,
+    errors: Sequence[Violation] = (),
 ) -> ValidationReport:
     if model is None:
         raise RefineryError("Refinery did not return a model to validate")
-    violations = []
+    violations = list(errors)
     for relation in model.relations:
         is_error_predicate = relation.detail.type == "pred" and relation.detail.kind == "error"
         kind = _classify(relation.name, is_error_predicate)
