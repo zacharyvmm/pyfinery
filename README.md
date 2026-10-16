@@ -163,9 +163,28 @@ How Python annotations map to Refinery:
 | `Annotated[..., Contains()]` | `contains Dir[...] x` |
 | `Annotated[Dir \| None, Container(opposite="y")]` | `container Dir x opposite y` |
 | `Annotated[..., Ref(opposite="y")]` | `Dir[...] x opposite y` |
+| a plain Pydantic `BaseModel` (`home: Address`) | `contains Address[1] home`, with `Address` as a class |
 | an `enum.Enum` subclass | an `enum` and a reference to its literals |
 | `int`, `float`, `str`, `bool` | `int`, `real`, `string`, `boolean` attributes |
 | Python subclassing, `__abstract__ = True` | `extends`, `abstract class` |
+
+### Nested Pydantic models (composition)
+
+Ordinary Pydantic models nested inside a node are treated as **value objects owned by their parent**. The field becomes a containment reference, and the nested model becomes a Refinery class whose fields are mapped the same way. Lists, optionals and subclasses of nested models all work:
+
+```python
+class Address(BaseModel):          # plain Pydantic, not a RefineryNode
+    street: str
+    country: Country               # an Enum
+
+class Person(RefineryNode):
+    name: str
+    home: Address                  # contains Address[1] home
+    work: Address | None = None    # contains Address[0..1] work
+    manager: Person | None = None  # ordinary reference
+```
+
+You can even validate a graph made only of plain models, such as an `Order` containing `Line`s. Since each nested object has exactly one owner, a single `Address` *instance* reused for two people is reported as `containment: builtin::invalidContainer(address_1)`. Use `address.model_copy()` to give each person their own, or make the class a `RefineryNode` if it should be shared. Plain models can't take part in `opposite` pairs or use `Container()`. Make them `RefineryNode`s if they need a back-reference.
 
 How validation works:
 

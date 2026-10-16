@@ -313,3 +313,66 @@ def test_link_opposites_symmetric_and_collections():
     assert bob.friends == (alice,)
     assert alice.tags == {tag}
     assert repr(alice).count("Person(") == 1  # referenced nodes are abbreviated
+
+
+def test_nested_plain_models_become_contained_classes():
+    from .nested_models import people
+
+    source = people().source
+    assert "enum Country { CA, FR }" in source
+    assert "class Address {\n    string street\n    Country[1] country\n}" in source
+    assert "class Contact {\n    string value\n}" in source
+    assert "class Phone extends Contact." in source
+    assert "class Email extends Contact {\n    boolean verified\n}" in source
+    assert (
+        "class Person {\n"
+        "    string name\n"
+        "    contains Address[1] home\n"
+        "    contains Address[0..1] work\n"
+        "    contains Contact[0..2] contacts\n"
+        "    Person[0..1] manager\n"
+        "}"
+    ) in source
+
+
+def test_nested_plain_model_facts():
+    from .nested_models import Address, Country, Email, Person, people
+
+    shared = Address(street="1 Main", country=Country.CA)
+    alice = Person(name="alice", home=shared, contacts=[Email(value="a@x")])
+    bob = Person(name="bob", home=Address(street="2 Side", country=Country.FR), work=shared)
+    facts = people().problem([alice, bob]).split("\n\n")[-1].splitlines()
+    assert "Person::home(alice, address_1)." in facts
+    assert "Person::work(bob, address_1)." in facts  # same instance, same node
+    assert "Person::contacts(alice, email_1)." in facts
+    assert 'Contact::value(email_1): "a@x".' in facts
+    assert "Email::verified(email_1): false." in facts
+    assert "Address::country(address_2, Country::FR)." in facts
+
+
+def test_fully_plain_metamodel():
+    from .nested_models import Line, Order
+
+    mm = Metamodel(Order)
+    assert "class Order {\n    contains Line[1..*] lines\n}" in mm.source
+    order = Order(lines=[Line(sku="a", qty=2)])
+    assert mm.collect([order]) == [order, order.lines[0]]
+
+
+def test_plain_models_cannot_use_opposites():
+    from pydantic import BaseModel
+
+    class Note(BaseModel):
+        text: str
+
+    class Holder(RefineryNode):
+        note: Annotated[Note | None, Ref(opposite="holder")] = None
+
+    with pytest.raises(TypeError, match="plain Pydantic model"):
+        Metamodel(Holder)
+
+    class Holder2(RefineryNode):
+        note: Annotated[Note | None, Container(opposite="x")] = None
+
+    with pytest.raises(TypeError, match="plain Pydantic model"):
+        Metamodel(Holder2)

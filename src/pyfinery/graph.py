@@ -16,6 +16,7 @@ Python annotation                  Refinery declaration
 ``Annotated[list[Dir], Contains()]``  ``contains Dir[0..*] f``
 ``Annotated[Dir | None, Container(opposite="g")]``  ``container Dir f opposite g``
 ``Annotated[..., Ref(opposite="g")]``  ``... opposite g``
+a plain Pydantic ``BaseModel``     ``contains Address[1] f`` (see below)
 an :class:`enum.Enum` subclass     ``enum`` declaration and a reference to it
 ``int`` / ``float`` / ``str`` / ``bool``  ``int`` / ``real`` / ``string`` / ``boolean``
 =================================  ===========================================
@@ -23,6 +24,12 @@ an :class:`enum.Enum` subclass     ``enum`` declaration and a reference to it
 Narrow list multiplicities with ``Field(min_length=..., max_length=...)`` (also
 enforced by Pydantic when constructing objects) or ``Ref(multiplicity="1..3")``
 (only checked by Refinery).
+
+Plain Pydantic models (not :class:`RefineryNode`) nested in a field are value
+objects owned by the enclosing object: the field becomes an implicit
+containment reference, and the nested model becomes a Refinery class whose
+fields are mapped the same way. Each nested instance must have exactly one
+owner; use a :class:`RefineryNode` for objects referenced from several places.
 
 Set ``__abstract__ = True`` in a class body to declare an abstract class.
 Extra constraints are written as Refinery predicates, e.g.
@@ -263,12 +270,12 @@ _DATA_TYPES: dict[type, str] = {bool: "boolean", int: "int", float: "real", str:
 
 @dataclass(frozen=True, slots=True)
 class Feature:
-    """A field of a :class:`RefineryNode` class mapped to Refinery."""
+    """A field of a Pydantic model class mapped to Refinery."""
 
-    owner: type[RefineryNode]
+    owner: type[BaseModel]
     name: str
-    target: type[RefineryNode] | type[enum.Enum] | str
-    """Node class, enum class, or data type name for attributes."""
+    target: type[BaseModel] | type[enum.Enum] | str
+    """Model class, enum class, or data type name for attributes."""
     many: bool
     lower: int
     upper: int | None
@@ -303,8 +310,27 @@ def _strip_annotated(annotation: Any) -> tuple[Any, list[Any]]:
 _COLLECTIONS = (list, set, frozenset, tuple, Sequence, Iterable)
 
 
+def _is_enum_class(value: Any) -> bool:
+    return isinstance(value, type) and issubclass(value, enum.Enum)
+
+
+def _is_model_class(value: Any) -> bool:
+    """Pydantic model classes that can be mapped to Refinery classes."""
+    return (
+        isinstance(value, type)
+        and issubclass(value, BaseModel)
+        and value not in (BaseModel, RefineryNode)
+    )
+
+
+def _is_embedded(value: Any) -> bool:
+    """Plain Pydantic models, which are owned by (contained in) their parent."""
+    return _is_model_class(value) and not issubclass(value, RefineryNode)
+
+
 class Metamodel:
-    """A Refinery metamodel derived from :class:`RefineryNode` subclasses.
+    """A Refinery metamodel derived from :class:`RefineryNode` subclasses
+    (and the plain Pydantic models nested in them).
 
     >>> metamodel = Metamodel(Filesystem, rules=[
     ...     "error pred emptyDir(Dir d) <-> !contents(d, _).",
@@ -316,32 +342,32 @@ class Metamodel:
     and already-imported subclasses) are included automatically.
     """
 
-    def __init__(self, *classes: type[RefineryNode], rules: Iterable[str] = ()) -> None:
+    def __init__(self, *classes: type[BaseModel], rules: Iterable[str] = ()) -> None:
         if not classes:
-            raise ValueError("Metamodel needs at least one RefineryNode class")
+            raise ValueError("Metamodel needs at least one model class")
         self.rules = list(rules)
-        self.classes: list[type[RefineryNode]] = []
+        self.classes: list[type[BaseModel]] = []
         self.enums: list[type[enum.Enum]] = []
-        self.features: dict[type[RefineryNode], list[Feature]] = {}
+        self.features: dict[type[BaseModel], list[Feature]] = {}
         self._collect(classes)
         self._check_opposites()
         self.source = self._render()
 
     # -- discovery ----------------------------------------------------------
 
-    def _collect(self, roots: Iterable[type[RefineryNode]]) -> None:
+    def _collect(self, roots: Iterable[type[BaseModel]]) -> None:
         pending = list(roots)
-        seen: set[type[RefineryNode]] = set()
+        seen: set[type[BaseModel]] = set()
         while pending:
             cls = pending.pop(0)
             if cls in seen or cls is RefineryNode:
                 continue
-            if not (isinstance(cls, type) and issubclass(cls, RefineryNode)):
-                raise TypeError(f"{cls!r} is not a RefineryNode subclass")
+            if not _is_model_class(cls):
+                raise TypeError(f"{cls!r} is not a RefineryNode subclass or Pydantic model")
             seen.add(cls)
             self._rebuild(cls)
             self.classes.append(cls)
-            pending.extend(b for b in cls.__bases__ if issubclass(b, RefineryNode))
+            pending.extend(b for b in cls.__bases__ if _is_model_class(b))
             pending.extend(cls.__subclasses__())
             features = [self._feature(cls, name) for name in self._own_fields(cls)]
             self.features[cls] = features
@@ -355,7 +381,7 @@ class Metamodel:
         self.classes.sort(key=lambda c: (len(c.__mro__), c.__qualname__))
 
     @staticmethod
-    def _rebuild(node_class: type[RefineryNode]) -> None:
+    def _rebuild(node_class: type[BaseModel]) -> None:
         if not node_class.__pydantic_complete__:
             try:
                 node_class.model_rebuild()
@@ -366,18 +392,18 @@ class Metamodel:
                 ) from e
 
     @staticmethod
-    def _own_fields(node_class: type[RefineryNode]) -> list[str]:
+    def _own_fields(node_class: type[BaseModel]) -> list[str]:
         """Fields first declared in ``node_class`` (inherited ones belong to a superclass)."""
         own = inspect.get_annotations(node_class)
         inherited = {
             name
             for base in node_class.__mro__[1:]
-            if isinstance(base, type) and issubclass(base, RefineryNode)
-            for name in base.model_fields
+            if _is_model_class(base)
+            for name in base.model_fields  # type: ignore[union-attr]
         }
         return [name for name in node_class.model_fields if name in own and name not in inherited]
 
-    def _feature(self, cls: type[RefineryNode], name: str) -> Feature:
+    def _feature(self, cls: type[BaseModel], name: str) -> Feature:
         info = cls.model_fields[name]
         where = f"{cls.__name__}.{name}"
         annotation, metadata = _strip_annotated(info.annotation)
@@ -408,13 +434,23 @@ class Metamodel:
                 raise TypeError(f"{where}: attributes cannot be collections or have Ref markers")
             return Feature(cls, name, _DATA_TYPES[annotation], False, 0, 1, "refers", None)
 
-        if not isinstance(annotation, type) or not issubclass(annotation, RefineryNode | enum.Enum):
+        if not (_is_model_class(annotation) or _is_enum_class(annotation)):
             raise TypeError(
                 f"{where}: unsupported field type {annotation!r}; use a RefineryNode subclass, "
-                "an Enum, int, float, str, or bool"
+                "a Pydantic model, an Enum, int, float, str, or bool"
             )
-        if issubclass(annotation, enum.Enum) and ref.kind != "refers":
+        if _is_enum_class(annotation) and ref.kind != "refers":
             raise TypeError(f"{where}: enums cannot be containment references")
+        kind = ref.kind
+        if _is_embedded(annotation):
+            # Nested plain models are value objects owned by this object.
+            if ref.kind == "container" or ref.opposite is not None:
+                raise TypeError(
+                    f"{where}: {annotation.__name__} is a plain Pydantic model, which is always "
+                    "contained in its owner and cannot have opposites; make it a RefineryNode "
+                    "to use opposites or Container()"
+                )
+            kind = "contains"
 
         if many:
             lower = next(
@@ -432,7 +468,7 @@ class Metamodel:
                 raise TypeError(f"{where}: a container reference must be a single node")
             if ref.opposite is None:
                 raise TypeError(f"{where}: a container reference needs an opposite")
-        return Feature(cls, name, annotation, many, lower, upper, ref.kind, ref.opposite)
+        return Feature(cls, name, annotation, many, lower, upper, kind, ref.opposite)
 
     def _find_feature(self, cls: type, name: str) -> Feature | None:
         for base in cls.__mro__:
@@ -494,9 +530,7 @@ class Metamodel:
             header = f"class {self.class_name(cls)}"
             if cls.__dict__.get("__abstract__", False):
                 header = f"abstract {header}"
-            supers = [
-                b for b in cls.__bases__ if issubclass(b, RefineryNode) and b is not RefineryNode
-            ]
+            supers = [b for b in cls.__bases__ if _is_model_class(b)]
             if supers:
                 header += " extends " + ", ".join(self.class_name(b) for b in supers)
             features = self.features[cls]
@@ -513,14 +547,14 @@ class Metamodel:
 
     # -- instances ----------------------------------------------------------
 
-    def collect(self, objects: Iterable[RefineryNode]) -> list[RefineryNode]:
+    def collect(self, objects: Iterable[BaseModel]) -> list[BaseModel]:
         """All nodes reachable from ``objects`` through reference fields.
 
         Only outgoing references are followed: a node that is referenced by
         nothing (e.g., a child that only sets its own ``parent``) must be
         passed in ``objects`` itself.
         """
-        result: list[RefineryNode] = []
+        result: list[BaseModel] = []
         seen: set[int] = set()
         pending = list(objects)
         while pending:
@@ -536,7 +570,7 @@ class Metamodel:
                     pending.extend(value)
         return result
 
-    def link_opposites(self, objects: Iterable[RefineryNode]) -> int:
+    def link_opposites(self, objects: Iterable[BaseModel]) -> int:
         """Fill in the missing side of every ``opposite`` pair in the graph.
 
         For example, after ``home.contents.append(doc)`` this sets
@@ -559,7 +593,7 @@ class Metamodel:
                         added += 1
         return added
 
-    def _values(self, node: RefineryNode) -> Iterator[tuple[type, Feature, list[Any]]]:
+    def _values(self, node: BaseModel) -> Iterator[tuple[type, Feature, list[Any]]]:
         for cls in type(node).__mro__:
             for feature in self.features.get(cls, []):  # type: ignore[call-overload]
                 value = getattr(node, feature.name)
@@ -568,13 +602,13 @@ class Metamodel:
                 values = list(value) if feature.many else [value]
                 yield cls, feature, values
 
-    def node_names(self, nodes: Sequence[RefineryNode]) -> dict[int, str]:
+    def node_names(self, nodes: Sequence[BaseModel]) -> dict[int, str]:
         """Refinery node names (as rendered in the problem) keyed by ``id(node)``."""
         names: dict[int, str] = {}
         used: set[str] = set()
         counters: dict[type, int] = {}
         for node in nodes:
-            id_field = type(node).__node_id__
+            id_field: str | None = getattr(type(node), "__node_id__", None)
             if id_field is not None:
                 name = quote_id(str(getattr(node, id_field)))
                 if name in used:
@@ -589,7 +623,7 @@ class Metamodel:
             names[id(node)] = name
         return names
 
-    def facts(self, nodes: Sequence[RefineryNode], names: dict[int, str]) -> str:
+    def facts(self, nodes: Sequence[BaseModel], names: dict[int, str]) -> str:
         """Assertions describing ``nodes`` (which must include every referenced node)."""
         lines = []
         for node in nodes:
@@ -609,7 +643,7 @@ class Metamodel:
                         lines.append(f"{symbol}({name}, {names[id(value)]}).")
         return "\n".join(lines) + "\n"
 
-    def problem(self, objects: Iterable[RefineryNode]) -> str:
+    def problem(self, objects: Iterable[BaseModel]) -> str:
         """The metamodel, rules, and the facts of the graph reachable from ``objects``."""
         nodes = self.collect(objects)
         return self.source + "\n" + self.facts(nodes, self.node_names(nodes))
@@ -618,13 +652,13 @@ class Metamodel:
 
     _FORMAT = OutputFormats(json_=JsonOutputFormat(), source=SourceOutputFormat(enabled=False))
 
-    def _prepare(self, objects: Iterable[RefineryNode]) -> tuple[str, dict[str, RefineryNode]]:
+    def _prepare(self, objects: Iterable[BaseModel]) -> tuple[str, dict[str, BaseModel]]:
         nodes = self.collect(objects)
         names = self.node_names(nodes)
         source = self.source + "\n" + self.facts(nodes, names)
         return source, {names[id(node)]: node for node in nodes}
 
-    def validate(self, objects: Iterable[RefineryNode], refinery: Refinery) -> ValidationReport:
+    def validate(self, objects: Iterable[BaseModel], refinery: Refinery) -> ValidationReport:
         """Check the graph reachable from ``objects`` against the metamodel and rules.
 
         Only nodes reachable from ``objects`` through outgoing references are
@@ -640,7 +674,7 @@ class Metamodel:
         return _report(source, result.json_, by_name)
 
     async def avalidate(
-        self, objects: Iterable[RefineryNode], refinery: AsyncRefinery
+        self, objects: Iterable[BaseModel], refinery: AsyncRefinery
     ) -> ValidationReport:
         """Asynchronous variant of :meth:`validate`."""
         source, by_name = self._prepare(objects)
@@ -651,7 +685,7 @@ class Metamodel:
         return _report(source, result.json_, by_name)
 
 
-def _add_reference(node: RefineryNode, feature: Feature, value: RefineryNode) -> bool:
+def _add_reference(node: BaseModel, feature: Feature, value: BaseModel) -> bool:
     """Add ``value`` to ``node.<feature>`` unless already present or the slot is taken."""
     current = getattr(node, feature.name)
     if not feature.many:
@@ -669,7 +703,7 @@ def _add_reference(node: RefineryNode, feature: Feature, value: RefineryNode) ->
     elif isinstance(current, set):
         current.add(value)
     elif isinstance(current, frozenset):
-        setattr(node, feature.name, current | {value})
+        setattr(node, feature.name, frozenset((*current, value)))
     else:
         setattr(node, feature.name, (*current, value))
     return True
@@ -697,7 +731,7 @@ class Violation:
     constraint: str
     """Refinery relation that reported the error, e.g. ``Dir::contents::invalidMultiplicity``."""
     node_names: tuple[str, ...]
-    nodes: tuple[RefineryNode | None, ...] = field(compare=False)
+    nodes: tuple[BaseModel | None, ...] = field(compare=False)
     """The Python objects, or ``None`` for nodes Refinery added (e.g., enum literals)."""
 
     def __str__(self) -> str:
@@ -730,7 +764,7 @@ class ValidationReport:
     def __bool__(self) -> bool:
         return self.ok
 
-    def for_node(self, node: RefineryNode) -> list[Violation]:
+    def for_node(self, node: BaseModel) -> list[Violation]:
         """Violations that involve ``node``."""
         return [v for v in self.violations if any(n is node for n in v.nodes)]
 
@@ -762,7 +796,7 @@ def _classify(relation: str, is_error_predicate: bool) -> ViolationKind | None:
 
 
 def _report(
-    source: str, model: JsonOutput | None, by_name: dict[str, RefineryNode]
+    source: str, model: JsonOutput | None, by_name: dict[str, BaseModel]
 ) -> ValidationReport:
     if model is None:
         raise RefineryError("Refinery did not return a model to validate")
