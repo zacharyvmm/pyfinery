@@ -15,6 +15,7 @@ It talks to a Refinery server over its HTTP API (`/api/v1`) and mirrors the offi
 - typed request and response models (pydantic), with helpers for reading the generated graph
 - typed exceptions for every error the server reports
 - `RefineryServer`, which starts a local Refinery server in Docker for you
+- `pyfinery.graph`: define a Refinery metamodel as Pydantic classes, then check that your object graphs follow its rules
 
 ## Installation
 
@@ -110,6 +111,77 @@ for event in refinery.stream_generate_many(problem, 5):
 
 If you close a stream early (`break` followed by `stream.close()`, or `contextlib.closing`/`aclosing`), or cancel an asyncio task, the client disconnects and the server cancels the generation.
 
+## Validating Pydantic object graphs
+
+`pyfinery.graph` lets you declare Refinery classes as Pydantic models. Build an ordinary object graph from them, then ask Refinery whether it follows the metamodel and your rules: multiplicities, the containment hierarchy, opposites, types, and custom `error pred` constraints.
+
+```python
+from __future__ import annotations
+from typing import Annotated
+from pydantic import Field
+from pyfinery import Container, Contains, Metamodel, RefineryNode, RefineryServer
+
+class Filesystem(RefineryNode):
+    root: Annotated[Dir, Contains()]                      # contains Dir[1] root
+
+class FSObject(RefineryNode):
+    __abstract__ = True
+    parent: Annotated[Dir | None, Container(opposite="contents")] = None
+
+class Dir(FSObject):
+    __node_id__ = "name"                                   # name nodes after this field
+    name: str
+    contents: Annotated[list[FSObject], Contains(opposite="parent", multiplicity="0..3")] = Field(default_factory=list)
+
+class File(FSObject):
+    size: int = 0
+
+metamodel = Metamodel(Filesystem, rules=[
+    "error pred emptyDir(Dir d) <-> !contents(d, _).",
+])
+print(metamodel.source)          # the generated Refinery metamodel
+
+home = Dir(name="home", contents=[File(size=10)])
+orphan = Dir(name="orphan")      # not contained anywhere, and empty
+
+with RefineryServer() as server, server.client() as refinery:
+    report = metamodel.validate([Filesystem(root=home), orphan], refinery)
+
+for violation in report.violations:
+    print(violation)
+# containment: builtin::invalidContainer(orphan)
+# rule: emptyDir(orphan)
+report.raise_for_violations()    # raises ModelValidationError
+```
+
+How Python annotations map to Refinery:
+
+| Python field | Refinery |
+| --- | --- |
+| `x: Dir` / `x: Dir \| None` / `x: list[Dir]` | `Dir[1] x` / `Dir[0..1] x` / `Dir[0..*] x` |
+| `Field(min_length=1, max_length=3)` on a list, or `Ref(multiplicity="1..3")` | `Dir[1..3] x` |
+| `Annotated[..., Contains()]` | `contains Dir[...] x` |
+| `Annotated[Dir \| None, Container(opposite="y")]` | `container Dir x opposite y` |
+| `Annotated[..., Ref(opposite="y")]` | `Dir[...] x opposite y` |
+| an `enum.Enum` subclass | an `enum` and a reference to its literals |
+| `int`, `float`, `str`, `bool` | `int`, `real`, `string`, `boolean` attributes |
+| Python subclassing, `__abstract__ = True` | `extends`, `abstract class` |
+
+How validation works:
+
+- **Building the metamodel:** `Metamodel(...)` collects every `RefineryNode` class reachable from the ones you pass: superclasses, referenced classes, and subclasses that have already been imported. It checks that each `opposite` is declared on both sides.
+- **Sending the graph:** `validate()` walks the graph from the objects you pass and turns it into Refinery facts. It sends them with the server's `concretize` call, which treats everything you didn't assert as false.
+- **Reading the result:** it returns every constraint that evaluates to `error` as a `Violation`. Each has a `kind` (`rule`, `multiplicity`, `containment` or `contradiction`), the Refinery `constraint` name, and the offending Python `nodes`.
+- **Async:** use `await metamodel.avalidate(...)` with an `AsyncRefinery`.
+
+A few things to keep in mind:
+
+- **Identity:** nodes compare and hash by identity, so two `Dir(name="a")` objects are different nodes.
+- **Opposites:** you only need to set one side of an `opposite` pair. Refinery infers the other side.
+- **Where multiplicities are enforced:** Pydantic enforces `Field(min_length=...)` when you construct an object. `Ref(multiplicity=...)` is only checked by Refinery, which is handy when you build graphs step by step.
+- **Graph size and timeouts:** validation runs under the server's *semantics* timeout, which defaults to 1 second (enough for a few hundred nodes). For larger graphs, start the server with `RefineryServer(semantics_timeout=10_000)`, or set `REFINERY_SEMANTICS_TIMEOUT_MS`.
+- **Inspecting what's sent:** `metamodel.problem(objects)` returns the exact problem that would be sent, so you can paste it into the Refinery web editor.
+
 ## Errors
 
 All errors subclass `RefineryError`:
@@ -124,10 +196,11 @@ All errors subclass `RefineryError`:
 | `RequestCancelledError` | `cancelled` | the server cancelled the operation |
 | `ProtocolError` | | the response couldn't be understood |
 | `ServerStartError` | | `RefineryServer` failed to start |
+| `ModelValidationError` | | `ValidationReport.raise_for_violations()` found violations |
 
 Network failures are raised as `httpx` exceptions.
 
-Known server behaviour: in Refinery 0.3, `semantics`/`concretize` on a problem with errors returns `timeout` rather than `invalidProblem`. Use `generate` (or the web editor) to see the validation issues.
+`semantics` and `concretize` run under the server's semantics timeout (`REFINERY_SEMANTICS_TIMEOUT_MS`, 1 second by default). The first requests after a server starts may hit it while the JVM warms up, and then report `timeout` even for problems that are invalid.
 
 ## Development
 
@@ -135,6 +208,7 @@ Known server behaviour: in Refinery 0.3, `semantics`/`concretize` on a problem w
 uv run pytest                              # unit tests (mocked HTTP)
 PYFINERY_DOCKER_TESTS=1 uv run pytest      # plus end-to-end tests against a real server in Docker
 uv run examples/generate_filesystems.py
+uv run examples/validate_graph.py
 ```
 
 ## License and attribution

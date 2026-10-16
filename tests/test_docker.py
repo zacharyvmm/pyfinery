@@ -77,3 +77,37 @@ def test_async(server, filesystem_problem):
             return await client.generate(filesystem_problem)
 
     assert asyncio.run(main()).source
+
+
+def test_validate_graph(refinery):
+    from .graph_models import Dir, File, Filesystem, Link, metamodel
+
+    home = Dir(name="home")
+    file = File(size=3)
+    home.contents = [file, Link(target=file)]
+    filesystem = Filesystem(root=home)
+    report = metamodel().validate([filesystem], refinery)
+    assert report.ok, report.violations
+
+    orphan = Dir(name="orphan")
+    home.contents += [File(), File()]  # 4 > [0..3]
+    report = metamodel().validate([filesystem, orphan], refinery)
+    assert {(v.kind, v.constraint, v.nodes) for v in report.violations} == {
+        ("containment", "builtin::invalidContainer", (orphan,)),
+        ("multiplicity", "Dir::contents::invalidMultiplicity", (home,)),
+        ("rule", "emptyDir", (orphan,)),
+    }
+
+
+def test_validate_contradiction(refinery):
+    from .graph_models import Dir, Filesystem, metamodel
+
+    a, b = Dir(name="a"), Dir(name="b")
+    a.contents = [b]
+    b.contents = [a]  # containment cycle
+    report = metamodel().validate(
+        [Filesystem(root=Dir(name="root", contents=[Dir(name="c")])), a], refinery
+    )
+    assert {v.kind for v in report.for_node(a)} >= {"containment"}
+    with pytest.raises(pf.ModelValidationError):
+        report.raise_for_violations()

@@ -18,8 +18,15 @@ from __future__ import annotations
 import re
 from typing import Annotated, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 from pydantic.alias_generators import to_camel
+
+
+def _json_field(**kwargs):
+    """``json`` on the wire, ``json_`` in Python (``json`` would shadow a BaseModel method)."""
+    return Field(
+        validation_alias=AliasChoices("json", "json_"), serialization_alias="json", **kwargs
+    )
 
 
 class RefineryModel(BaseModel):
@@ -56,7 +63,7 @@ class SourceOutputFormat(RefineryModel):
 class OutputFormats(RefineryModel):
     """Which outputs the server should return (both are enabled by default)."""
 
-    json_: JsonOutputFormat = Field(default_factory=JsonOutputFormat, alias="json")
+    json_: JsonOutputFormat = _json_field(default_factory=JsonOutputFormat)
     source: SourceOutputFormat = Field(default_factory=SourceOutputFormat)
 
 
@@ -283,7 +290,7 @@ class JsonOutput(RefineryModel):
 class GenerateResult(RefineryModel):
     """A generated model. ``source`` is the model in Refinery syntax."""
 
-    json_: JsonOutput | None = Field(default=None, alias="json")
+    json_: JsonOutput | None = _json_field(default=None)
     source: str | None = None
 
 
@@ -302,7 +309,7 @@ class GenerateManyResult(RefineryModel):
 
 class SemanticsResult(RefineryModel):
     issues: list[Issue]
-    json_: JsonOutput | None = Field(default=None, alias="json")
+    json_: JsonOutput | None = _json_field(default=None)
 
 
 class ConcretizationResult(SemanticsResult):
