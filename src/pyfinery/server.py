@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import subprocess
@@ -17,11 +18,31 @@ from typing import Self
 import httpx
 
 from .client import AsyncRefinery, Refinery
-from .errors import RefineryError
+from .errors import InvalidProblemError, RefineryError, RefineryTimeoutError
 
 DEFAULT_IMAGE = "ghcr.io/graphs4value/refinery:latest"
 CONTAINER_PORT = 8888
 LIBRARY_MOUNT_ROOT = "/refinery-library"
+
+# Exercises the code paths of semantics, concretization and validation errors so
+# the JVM has loaded and compiled them before the first real request.
+_WARMUP_PROBLEM = """\
+enum Color { red, green }
+abstract class Item { container Box box opposite items }
+class Box extends Item {
+    contains Item[0..3] items opposite box
+    Color[0..1] color
+    string label
+    int size
+    real weight
+    boolean open
+}
+error pred emptyBox(Box b) <-> !items(b, _).
+Box(b1). Box(b2). Box::items(b1, b2). Box::color(b1, Color::red).
+Box::label(b1): "warm". Box::size(b1): 1. Box::weight(b1): 1.5. Box::open(b1): true.
+"""
+_WARMUP_INVALID_PROBLEM = "class Box.\nmissing(b1).\n"
+_WARMUP_MAX_ROUNDS = 10
 
 
 class ServerStartError(RefineryError):
@@ -51,6 +72,11 @@ class RefineryServer:
         (``REFINERY_MODEL_GENERATION_THREAD_COUNT``).
     :param env: Additional environment variables for the container, see
         https://refinery.tools/learn/docker/#environmental-variables
+    :param warmup: Send a few small requests after startup, retrying until they
+        finish within the semantics timeout. Without this, the first
+        ``semantics``/``concretize`` requests on a fresh server (including
+        graph validation) may fail with ``RefineryTimeoutError`` while the JVM
+        warms up.
     """
 
     def __init__(
@@ -68,10 +94,12 @@ class RefineryServer:
         startup_timeout: float = 120.0,
         docker: str = "docker",
         extra_args: Sequence[str] = (),
+        warmup: bool = True,
     ) -> None:
         self.image = image
         self.host = host
         self.startup_timeout = startup_timeout
+        self.warmup = warmup
         self._requested_port = port
         self._pull = pull
         self._docker = docker
@@ -145,8 +173,11 @@ class RefineryServer:
             self._checked("pull", self.image)
         self.container_id = self._checked(*self._run_args()).stdout.strip()
         try:
+            deadline = time.monotonic() + self.startup_timeout
             self.port = self._published_port()
-            self._wait_until_healthy()
+            self._wait_until_healthy(deadline)
+            if self.warmup:
+                self._warm_up(deadline)
         except BaseException:
             self.stop()
             raise
@@ -178,8 +209,7 @@ class RefineryServer:
         result = self._docker_cmd("logs", self.container_id, check=False)
         return result.stdout + result.stderr
 
-    def _wait_until_healthy(self) -> None:
-        deadline = time.monotonic() + self.startup_timeout
+    def _wait_until_healthy(self, deadline: float) -> None:
         with httpx.Client(timeout=5.0) as http:
             while time.monotonic() < deadline:
                 try:
@@ -192,6 +222,25 @@ class RefineryServer:
                 time.sleep(0.5)
         raise ServerStartError(
             f"Refinery did not become healthy within {self.startup_timeout}s:\n{self.logs()}"
+        )
+
+    def _warm_up(self, deadline: float) -> None:
+        """Repeat warm-up requests until a full round finishes without a timeout."""
+        with self.client() as refinery:
+            for _ in range(_WARMUP_MAX_ROUNDS):
+                if time.monotonic() >= deadline:
+                    break
+                try:
+                    refinery.semantics(_WARMUP_PROBLEM)
+                    refinery.concretize(_WARMUP_PROBLEM)
+                    with contextlib.suppress(InvalidProblemError):
+                        refinery.semantics(_WARMUP_INVALID_PROBLEM)
+                except RefineryTimeoutError:
+                    continue
+                return
+        raise ServerStartError(
+            "Refinery kept timing out on small warm-up requests; consider raising "
+            f"semantics_timeout:\n{self.logs()}"
         )
 
     def stop(self) -> None:

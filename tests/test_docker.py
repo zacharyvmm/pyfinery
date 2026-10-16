@@ -111,3 +111,12 @@ def test_validate_contradiction(refinery):
     assert {v.kind for v in report.for_node(a)} >= {"containment"}
     with pytest.raises(pf.ModelValidationError):
         report.raise_for_violations()
+
+
+def test_fresh_server_validates_immediately():
+    """Without warm-up, the first validation on a fresh server tends to time out."""
+    from .graph_models import Dir, File, Filesystem, metamodel
+
+    with pf.RefineryServer() as fresh, fresh.client() as refinery:
+        report = metamodel().validate([Filesystem(root=Dir(name="a", contents=[File()]))], refinery)
+    assert report.ok, report.violations
