@@ -182,6 +182,31 @@ def test_query_closed_world_has_no_spurious_errors(refinery):
     assert [str(m) for m in result.matches] == ["must: linked(link_1, file_1)"]
 
 
+def test_query_containment_closed_without_defaults(refinery):
+    """Containment stays closed when the defaults are left out, and for orphans they're kept."""
+    from .graph_models import Dir, File, Filesystem, metamodel
+
+    doc, tmp = File(), Dir(name="tmp")
+    fs = Filesystem(root=Dir(name="root", contents=[Dir(name="home", contents=[doc]), tmp]))
+    tmp.contents.append(File())
+    rules = ["pred elsewhere(Dir d, File f) <-> !contents(d, f)."]
+    result = metamodel().query([fs], refinery, rules)
+    assert sorted(map(str, result.matches)) == [
+        "must: elsewhere(home, file_2)",
+        "must: elsewhere(root, file_1)",
+        "must: elsewhere(root, file_2)",
+        "must: elsewhere(tmp, file_1)",
+    ]
+    assert result.errors == []
+
+    orphan = File()
+    result = metamodel().query([fs, orphan], refinery, rules)
+    assert len(result.matches) == 7 and all(m.certainty == "must" for m in result.matches)
+    assert [(e.constraint, e.nodes) for e in result.errors] == [
+        ("builtin::invalidContainer", (orphan,))
+    ]
+
+
 def test_validate_references_by_key(refinery):
     from .deployment_models import deployment, metamodel
 

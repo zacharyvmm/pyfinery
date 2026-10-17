@@ -213,8 +213,16 @@ report = metamodel.validate([Filesystem(root=home), Dir(name="orphan")], refiner
 ### Things to know
 
 - **Reachability:** `validate()` and `query()` follow only *outgoing* references from the objects you pass. An object that nothing refers to, such as a child that only sets its own `parent`, must be passed too.
-- **Timeouts:** `validate()` and `query()` run under the server's semantics timeout, which is 1 second by default and enough for a few hundred objects. Raise it with `RefineryServer(semantics_timeout=10_000)` or `REFINERY_SEMANTICS_TIMEOUT_MS`. `RefineryServer` warms the server up, so the first call doesn't time out while the JVM starts.
+- **Timeouts:** `validate()` and `query()` run under the server's semantics timeout, which is 1 second by default and enough for a few hundred objects. Raise it with `RefineryServer(semantics_timeout=10_000)` or `REFINERY_SEMANTICS_TIMEOUT_MS`. `RefineryServer` warms the server up, so the first call doesn't time out while the JVM starts. See [Performance](#performance) for what makes calls slow.
 - **Rule syntax** is Refinery's. See its [language reference](https://refinery.tools/learn/language/). Inside rules, features are written `Class::field`. Boolean attributes are used as literals (`Port::public(p)`), and other attributes are compared with operators (`Service::replicas(s) > 1`).
+
+### Performance
+
+Each `validate()` or `query()` call sends the whole problem. Refinery parses it, computes every relation over every object, both what must and what may hold, and returns all of them. It doesn't limit the work to the predicates you report, and the time grows faster than the graph. For example, a `query()` over about 1,000 objects takes 3 seconds with no rules, and 8 seconds with a rule that follows data flow transitively.
+
+- **Keep helper predicates small.** A predicate with three parameters, such as `between(Resource r, Effect a, Effect b)`, can hold for hundreds of thousands of tuples over a few hundred objects. Refinery computes them all and sends them back. In one query, rewriting such a helper as two predicates with two parameters cut the time from 24 to 2 seconds. `result.model.tuple_counts()` lists the largest relations. Declaring helpers `shadow` would leave them out of the response, but Refinery doesn't let a reported predicate use a `shadow` one.
+- **Pass fewer objects.** The number of objects matters more than the number of attribute values. Leave out fields that rules don't need with `exclude=[...]`.
+- **Give every owned value its owner in `query()`.** To close the world, `query()` rules out the containers an object isn't in. When each owned value certainly has its owner, Refinery infers that by itself. An object passed without one makes pyfinery close every containment field that could hold it, which takes time proportional to the square of the number of objects.
 
 ## Calling Refinery directly
 

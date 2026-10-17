@@ -90,8 +90,47 @@ def test_query_canonical_opposites_and_subclasses():
     lines = source.splitlines()
     assert "Dir::contents(home, file_1)." in lines  # written on the containment side
     assert not any(line.startswith("FSObject::parent(") for line in lines)
-    assert "default !Dir::contents(*, *)." in lines
     assert "default !FSObject::parent(*, *)." not in lines
+
+
+def _containment_defaults(metamodel, objects):
+    lines = metamodel.query_problem(objects).splitlines()
+    containment = ["default !Dir::contents(*, *).", "default !Filesystem::root(*, *)."]
+    return [line for line in containment if line in lines]
+
+
+def test_query_closes_containment_only_for_orphans():
+    from .graph_models import Dir, Filesystem
+    from .graph_models import File as FsFile
+    from .graph_models import metamodel as fs_metamodel
+
+    def graph():
+        doc = FsFile()
+        return doc, Filesystem(root=Dir(name="home", contents=[doc]))
+
+    doc, fs = graph()
+    # Every object certainly has a container: Refinery rules out the others.
+    assert _containment_defaults(fs_metamodel(), [fs]) == []
+    # An object with no container could be in any directory, unless closed.
+    assert _containment_defaults(fs_metamodel(), [fs, FsFile()]) == [
+        "default !Dir::contents(*, *)."
+    ]
+    assert _containment_defaults(fs_metamodel(), [fs, Dir(name="tmp")]) == [
+        "default !Dir::contents(*, *).",
+        "default !Filesystem::root(*, *).",
+    ]
+    # A container that only may contain it, or only may exist, doesn't count.
+    doc, fs = graph()
+    uncertain = Metamodel(
+        Filesystem,
+        options={
+            Dir: ClassOptions(certainty=lambda d, field, value: "may" if value is doc else True)
+        },
+    )
+    assert _containment_defaults(uncertain, [fs]) == ["default !Dir::contents(*, *)."]
+    doc, fs = graph()
+    ghost = Metamodel(Filesystem, options={Dir: ClassOptions(exists=lambda d: "may")})
+    assert _containment_defaults(ghost, [fs]) == ["default !Dir::contents(*, *)."]
 
 
 def _query_with_response(model_json: dict, **kwargs):

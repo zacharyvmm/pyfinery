@@ -46,6 +46,13 @@ def test_json_output_helpers():
         model.relation("missing")
 
 
+def test_json_output_tuple_counts():
+    interpretation = {**MODEL_JSON["partialInterpretation"], "File": [[1, "true"]]}
+    interpretation["Dir::contents"] = [*interpretation["Dir::contents"], [0, 0, "false"]]
+    model = pf.JsonOutput.model_validate({**MODEL_JSON, "partialInterpretation": interpretation})
+    assert list(model.tuple_counts().items()) == [("Dir::contents", 3), ("Dir", 2), ("File", 1)]
+
+
 def test_output_formats_accept_python_names():
     formats = pf.OutputFormats(
         json_=pf.JsonOutputFormat(non_existing_objects="keep"), source={"enabled": False}
