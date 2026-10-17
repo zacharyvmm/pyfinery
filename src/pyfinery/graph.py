@@ -1211,7 +1211,7 @@ class Metamodel:
         lines = [self.source, *rules, ""]
         lines += [self._declare_predicate(p) for p in predicates]
         lines.append("")
-        lines += self._closed_world(predicates)
+        lines += self._closed_world(predicates, nodes)
         lines.append("")
         lines.append(self.facts(nodes, names, canonical_opposites=True))
         exists: dict[str, Certainty] = {}
@@ -1338,22 +1338,47 @@ class Metamodel:
         assert other is not None
         return (feature.owner.__name__, feature.name) <= (other.owner.__name__, other.name)
 
-    def _closed_world(self, predicates: Sequence[Predicate]) -> list[str]:
+    def _closed_world(
+        self, predicates: Sequence[Predicate], nodes: Sequence[BaseModel]
+    ) -> list[str]:
         lines = [
             f"!exists({self.class_name(cls)}::new)."
             for cls in self.classes
             if not self._is_abstract(cls)
         ]
+        orphans = self._orphans(nodes)
         for cls in self.classes:
             for feature in self.features[cls]:
                 if feature.is_attribute or not self._canonical(feature):
                     continue
+                if feature.kind == "contains":
+                    target: ClassLike = feature.target  # type: ignore[assignment]
+                    members = target.members if isinstance(target, UnionClass) else (target,)
+                    if not any(isinstance(node, members) for node in orphans):
+                        # Refinery already rules out every other container of
+                        # a node that certainly has one. A default would only
+                        # cost time: Refinery refines it for every node pair.
+                        continue
                 symbol = f"{self.class_name(cls)}::{quote_id(feature.name)}"
                 lines.append(f"default !{symbol}(*, *).")
         for predicate in predicates:
             wildcards = ", ".join("*" for _ in predicate.parameters)
             lines.append(f"default !{quote_id(predicate.name)}({wildcards}).")
         return lines
+
+    def _orphans(self, nodes: Sequence[BaseModel]) -> list[BaseModel]:
+        """Nodes without a container that certainly exists and certainly contains them."""
+        owned: set[Hashable] = set()
+        for node in nodes:
+            for _, feature, values in self._values(node):
+                if feature.kind not in ("contains", "container"):
+                    continue
+                for value in values:
+                    owner, child = (node, value) if feature.kind == "contains" else (value, node)
+                    certain = not self._fact_prefix(node, feature, value)
+                    if certain and self._exists(owner) == "must":
+                        owned.add(self.identity(child))
+        return [node for node in nodes if self.identity(node) not in owned]
 
 
 _DEFAULT_OPTIONS = ClassOptions()
@@ -1574,7 +1599,9 @@ def _timeout_hint(error: RefineryTimeoutError) -> RefineryTimeoutError:
     return RefineryTimeoutError(
         f"{error.message}. Validation runs under the server's semantics timeout (1 second by "
         "default); raise it with RefineryServer(semantics_timeout=<ms>) or the "
-        "REFINERY_SEMANTICS_TIMEOUT_MS environment variable of the server."
+        "REFINERY_SEMANTICS_TIMEOUT_MS environment variable of the server. Refinery computes "
+        "every relation in full, so helper predicates with many tuples (e.g., with three "
+        "parameters) are often what makes it slow; see Performance in pyfinery's README."
     )
 
 

@@ -286,6 +286,16 @@ class JsonOutput(RefineryModel):
         """Node names of the tuples for which ``relation`` is definitely true."""
         return [cast(tuple[str, ...], t[:-1]) for t in self.tuples(relation) if t[-1] == "true"]
 
+    def tuple_counts(self) -> dict[str, int]:
+        """The number of tuples of each relation, largest first.
+
+        Refinery computes and returns every relation in full, so a large count,
+        e.g. of a helper predicate with three parameters, usually explains a
+        slow request.
+        """
+        counts = {name: len(tuples) for name, tuples in self.partial_interpretation.items()}
+        return dict(sorted(counts.items(), key=lambda item: item[1], reverse=True))
+
 
 class GenerateResult(RefineryModel):
     """A generated model. ``source`` is the model in Refinery syntax."""
