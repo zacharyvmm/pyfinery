@@ -116,3 +116,17 @@ def test_reference_definition_errors():
 def test_deployment_classes_are_plain_pydantic():
     # Nothing in the models knows about Refinery.
     assert not any(issubclass(c, pf.RefineryNode) for c in (Service, Database, Deployment))
+
+
+def test_unencodable_keys_and_strings():
+    """A lone surrogate, e.g. from bytes decoded with ``surrogateescape``, can't be sent as JSON."""
+    d = deployment()
+    d.components.append(Service(name="w\udcffb", image="i\udcff\u00e9", tier="backend"))
+    mm = metamodel()
+    nodes = mm.collect([d])
+    names = mm.node_names(nodes)
+    # Refinery would name the node "'w?b'", which couldn't be mapped back.
+    assert "service_1" in names.values()
+    source = mm.problem([d])
+    source.encode("utf-8")
+    assert 'Service::image(service_1): "i\\udcff\u00e9".' in source

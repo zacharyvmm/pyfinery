@@ -297,6 +297,15 @@ def quote_id(name: str) -> str:
     return f"'{escaped}'"
 
 
+def _encodable(text: str) -> bool:
+    """Whether ``text`` can be sent as JSON: not if it holds a lone surrogate."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _string_literal(value: str) -> str:
     escaped = (
         value.replace("\\", "\\\\")
@@ -305,6 +314,9 @@ def _string_literal(value: str) -> str:
         .replace("\r", "\\r")
         .replace("\t", "\\t")
     )
+    if not _encodable(escaped):
+        # Refinery reads ``\uXXXX`` as a UTF-16 code unit, as Java does.
+        escaped = "".join(c if _encodable(c) else f"\\u{ord(c):04x}" for c in escaped)
     return f'"{escaped}"'
 
 
@@ -978,6 +990,10 @@ class Metamodel:
             return None
         key = key_of(node)
         if isinstance(key, bool) or not isinstance(key, str | int) or str(key) == "":
+            return None
+        if not _encodable(str(key)):
+            # Escaped, Refinery would name the node with "?" for each lone
+            # surrogate, so the name couldn't be mapped back to the node.
             return None
         name = quote_id(str(key))
         return None if name in self._type_names or str(key) in _RESERVED_NODE_NAMES else name
