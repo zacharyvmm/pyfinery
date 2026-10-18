@@ -1503,9 +1503,26 @@ class Match:
     nodes: tuple[BaseModel | None, ...] = field(compare=False)
     """The Python objects, or ``None`` for nodes Refinery added (e.g., enum literals)."""
     certainty: Certainty = "must"
+    parameters: tuple[str, ...] = field(default=(), compare=False)
+    """The names of the predicate's parameters, as declared."""
 
     def __str__(self) -> str:
         return f"{self.certainty}: {self.predicate}({', '.join(self.node_names)})"
+
+    @property
+    def arguments(self) -> dict[str, BaseModel | None]:
+        """The Python objects by the name of the parameter they are bound to.
+
+        Empty if Refinery didn't report the parameters' names.
+        """
+        return dict(zip(self.parameters, self.nodes, strict=True)) if self.parameters else {}
+
+    def __getitem__(self, parameter: str) -> BaseModel | None:
+        """The Python object bound to ``parameter``."""
+        try:
+            return self.nodes[self.parameters.index(parameter)]
+        except ValueError:
+            raise KeyError(f"{self.predicate} has no parameter named {parameter!r}") from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1582,7 +1599,8 @@ class _PreparedQuery:
                 if any(self.exists.get(name) == "may" for name in names):
                     certainty = "may"
                 nodes = tuple(self.by_name.get(name) for name in names)
-                matches.append(Match(predicate, names, nodes, certainty))
+                parameters = tuple(relation.parameter_names or ())
+                matches.append(Match(predicate, names, nodes, certainty, parameters))
         errors = [
             error
             for error in _report(

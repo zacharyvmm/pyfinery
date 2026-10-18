@@ -144,11 +144,12 @@ def _query_with_response(model_json: dict, **kwargs):
     ), recorder
 
 
-def _pred(name, arity):
+def _pred(name, arity, parameters=None):
     return {
         "name": name,
         "simpleName": name,
         "arity": arity,
+        "parameterNames": parameters,
         "detail": {"type": "pred", "kind": "defined"},
     }
 
@@ -159,7 +160,11 @@ MODEL = {
         {"name": n, "simpleName": n, "kind": "default"}
         for n in ["File::new", "file_1", "file_2", "endpoint_1", "effect_4"]
     ],
-    "relations": [_pred("writes", 2), _pred("exfiltration", 2), _pred("removes", 2)],
+    "relations": [
+        _pred("writes", 2),
+        _pred("exfiltration", 2, ["key", "net"]),
+        _pred("removes", 2, ["e", "f"]),
+    ],
     "partialInterpretation": {
         "writes": [[1, 3, "true"], [2, 3, "false"]],
         "exfiltration": [[1, 3, "true"], [2, 3, "unknown"], [0, 3, "true"], [2, 2, "error"]],
@@ -181,6 +186,19 @@ def test_query_result_certainties():
     assert [m.predicate for m in result.may()] == ["exfiltration", "removes"]
     assert isinstance(result["removes"][0].nodes[0], Effect)
     assert [str(e) for e in result.errors] == ["contradiction: exfiltration(file_2, file_2)"]
+
+
+def test_query_matches_by_parameter_name():
+    result, _ = _query_with_response(MODEL)
+    exfiltration = result.must("exfiltration")[0]
+    assert exfiltration.parameters == ("key", "net")
+    assert exfiltration["key"] is exfiltration.nodes[0]
+    assert list(exfiltration.arguments) == ["key", "net"]
+    assert isinstance(result["removes"][0]["e"], Effect)
+    with pytest.raises(KeyError, match="no parameter named 'secret'"):
+        exfiltration["secret"]
+    # Without parameter names from Refinery, there is nothing to look up by name.
+    assert result["writes"][0].arguments == {}
 
 
 def test_query_select():

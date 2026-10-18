@@ -164,6 +164,10 @@ def test_query_must_and_may(refinery):
         "may: removes(effect_4, 'file:.ssh/id_rsa')",
     ]
     assert result.errors == []
+    # Refinery reports the parameters' names, so matches can be read by name.
+    removes = result["removes"][0]
+    assert removes.parameters == ("e", "f")
+    assert removes["f"] == removes.nodes[1]
 
 
 def test_query_closed_world_has_no_spurious_errors(refinery):
