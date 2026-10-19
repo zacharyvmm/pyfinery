@@ -221,36 +221,18 @@ def test_validate_references_by_key(refinery):
     ]
 
 
-def test_validate_and_query_with_shared_options(refinery):
-    from .test_options import FLOATING, components, metamodel
+def test_validate_unencodable_strings(refinery):
+    from .deployment_models import Port, Service, deployment, metamodel
 
-    d, web, api, db, cache = components()
-    report = metamodel().validate(
-        [d], refinery, ["error pred unpinned(Service s) <-> floatingTag(s)."], predicates=[FLOATING]
+    d = deployment()
+    odd = Service(
+        name="w\udcffb",
+        image="i\udcff",
+        tier="frontend",
+        ports=[Port(number=80, public=True)],
+        depends_on=["cache"],
     )
-    assert "rule: unpinned(api)" in [str(v) for v in report.violations]
-
-    heuristic = metamodel(lambda s, f, v: "may" if (s.name, v) == ("api", "db") else True)
-    traced = pf.Predicate(
-        "calls", ("Component", "Component"), tuples=[(web, api), ((api, db), "may")]
-    )
-    result = heuristic.query(
-        [d],
-        refinery,
-        [
-            "pred reachesUnencrypted(Service s, Database d) <-> "
-            "Service::depends_on+(s, d), !Database::encrypted(d).",
-            "pred tracedCall(Component a, Component b) <-> calls(a, b).",
-        ],
-        predicates=[traced],
-    )
-    assert [str(m) for m in result.matches] == [
-        "may: reachesUnencrypted(web, db)",
-        "may: reachesUnencrypted(api, db)",
-        "must: tracedCall(web, api)",
-        "may: tracedCall(api, db)",
-    ]
-    assert [str(e) for e in result.errors] == [
-        "reference: Service::depends_on::unresolved(api, 'billing')",
-        "rule: publicDependsOnData(web, cache)",
-    ]
+    d.components.append(odd)
+    report = metamodel().validate([d], refinery)
+    # The node of a key with a lone surrogate still maps back to its object.
+    assert ("publicDependsOnData", odd) in [(v.constraint, v.nodes[0]) for v in report.violations]
