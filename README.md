@@ -128,6 +128,8 @@ for match in result.matches:
 # must: reachesUnencrypted(api, db)
 # may: reachesUnencrypted(worker, db)
 result.must("reachesUnencrypted"), result.may(), result["reachesUnencrypted"]
+match = result["reachesUnencrypted"][0]
+match["s"], match.arguments   # by parameter name: the Service, {"s": ..., "d": ...}
 ```
 
 Uncertainty can come from three places:
