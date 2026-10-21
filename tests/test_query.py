@@ -11,7 +11,7 @@ import pytest
 
 import pyfinery as pf
 from pyfinery import ClassOptions, Metamodel, Predicate
-from pyfinery.graph import _declared_predicates, _helper_predicates
+from pyfinery.graph import _declared_predicates
 
 from .conftest import Recorder, sse, sse_response
 from .generic_models import OPTIONS, Effect, Endpoint, File, Graph, Path, graph, secret
@@ -62,27 +62,6 @@ def uncertain_graph() -> Graph:
 def test_declared_predicates():
     rules = [*RULES, "error pred 'odd name'(File f) <-> !secretFile(f).", "pred writes(a, b)."]
     assert _declared_predicates(rules) == ["writes", "exfiltration", "removes", "odd name"]
-
-
-def test_helper_predicates():
-    rules = [
-        *RULES,
-        "error pred 'odd name'(File f) <-> !secretFile(f).",
-        "error noBody(File f) <-> !secretFile(f).",
-        "shadow pred hidden(File f) <-> secretFile(f).",
-        "pred 'quoted helper'(File f) subsets File::path <-> secretFile(f).",
-        "pred asserted(File f).",
-    ]
-    assert _helper_predicates(rules, ["exfiltration"]) == [
-        "writes",
-        "writes::computed",
-        "removes",
-        "removes::computed",
-        "hidden",
-        "hidden::computed",
-        "quoted helper",
-        "quoted helper::computed",
-    ]
 
 
 def test_query_problem_closes_the_world():
@@ -197,8 +176,6 @@ MODEL = {
 def test_query_result_certainties():
     result, recorder = _query_with_response(MODEL)
     assert recorder.requests[0].url.path == "/semantics"
-    # Every predicate of RULES is reported, so none is left out.
-    assert "excludedRelations" not in recorder.last_json["format"]["json"]
     assert [str(m) for m in result.matches] == [
         "must: writes(file_1, endpoint_1)",
         "must: exfiltration(file_1, endpoint_1)",
@@ -225,15 +202,8 @@ def test_query_matches_by_parameter_name():
 
 
 def test_query_select():
-    result, recorder = _query_with_response(MODEL, select=["removes"])
+    result, _ = _query_with_response(MODEL, select=["removes"])
     assert [m.predicate for m in result.matches] == ["removes"]
-    # The predicates that aren't selected are helpers, and aren't returned.
-    assert recorder.last_json["format"]["json"]["excludedRelations"] == [
-        "writes",
-        "writes::computed",
-        "exfiltration",
-        "exfiltration::computed",
-    ]
     with pytest.raises(ValueError, match="no relation named 'missing'"):
         _query_with_response(MODEL, select=["missing"])
 

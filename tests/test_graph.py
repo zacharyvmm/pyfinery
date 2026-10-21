@@ -231,7 +231,6 @@ def test_validate_classifies_violations():
 
     assert recorder.requests[0].url.path == "/api/v1/concretize"
     assert recorder.last_json["format"]["source"]["enabled"] is False
-    assert "excludedRelations" not in recorder.last_json["format"]["json"]
     assert [str(v) for v in report.violations] == [
         "containment: builtin::invalidContainer(orphan)",
         "multiplicity: Dir::contents::invalidMultiplicity(home)",

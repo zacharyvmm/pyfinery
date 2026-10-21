@@ -1092,13 +1092,7 @@ class Metamodel:
 
     # -- validation ---------------------------------------------------------
 
-    def _format(self, rules: Sequence[str], reported: Iterable[str]) -> OutputFormats:
-        """Ask for JSON output without the helper predicates of the rules."""
-        excluded = _helper_predicates([*self.rules, *rules], reported)
-        return OutputFormats(
-            json_=JsonOutputFormat(excluded_relations=excluded or None),
-            source=SourceOutputFormat(enabled=False),
-        )
+    _FORMAT = OutputFormats(json_=JsonOutputFormat(), source=SourceOutputFormat(enabled=False))
 
     def _prepare(
         self,
@@ -1140,10 +1134,9 @@ class Metamodel:
         :class:`~pyfinery.InvalidProblemError` if the rules don't compile;
         constraint violations are returned in the report.
         """
-        rules = list(rules)
         source, by_name, errors = self._prepare(objects, rules, predicates)
         try:
-            result = refinery.concretize(source, format=self._format(rules, ()))
+            result = refinery.concretize(source, format=self._FORMAT)
         except RefineryTimeoutError as e:
             raise _timeout_hint(e) from e
         return _report(source, result.json_, by_name, self.identity, errors)
@@ -1157,10 +1150,9 @@ class Metamodel:
         predicates: Iterable[Predicate] = (),
     ) -> ValidationReport:
         """Asynchronous variant of :meth:`validate`."""
-        rules = list(rules)
         source, by_name, errors = self._prepare(objects, rules, predicates)
         try:
-            result = await refinery.concretize(source, format=self._format(rules, ()))
+            result = await refinery.concretize(source, format=self._FORMAT)
         except RefineryTimeoutError as e:
             raise _timeout_hint(e) from e
         return _report(source, result.json_, by_name, self.identity, errors)
@@ -1189,7 +1181,7 @@ class Metamodel:
         """
         prepared = self._prepare_query(objects, rules, predicates, select)
         try:
-            result = refinery.semantics(prepared.source, format=prepared.format)
+            result = refinery.semantics(prepared.source, format=self._FORMAT)
         except RefineryTimeoutError as e:
             raise _timeout_hint(e) from e
         return prepared.result(result.json_)
@@ -1206,7 +1198,7 @@ class Metamodel:
         """Asynchronous variant of :meth:`query`."""
         prepared = self._prepare_query(objects, rules, predicates, select)
         try:
-            result = await refinery.semantics(prepared.source, format=prepared.format)
+            result = await refinery.semantics(prepared.source, format=self._FORMAT)
         except RefineryTimeoutError as e:
             raise _timeout_hint(e) from e
         return prepared.result(result.json_)
@@ -1251,7 +1243,6 @@ class Metamodel:
         by_name = {names[self.identity(node)]: node for node in nodes}
         return _PreparedQuery(
             "\n".join(lines) + "\n",
-            self._format(rules, selected),
             selected,
             by_name,
             exists,
@@ -1580,55 +1571,22 @@ class QueryResult:
 _PRED_DECLARATION = re.compile(r"\bpred\s+([A-Za-z_][A-Za-z0-9_]*|'(?:[^'\\]|\\.)*')")
 
 
-def _unquote(name: str) -> str:
-    if name.startswith("'"):
-        return name[1:-1].replace("\\'", "'").replace("\\\\", "\\")
-    return name
-
-
 def _declared_predicates(rules: Iterable[str]) -> list[str]:
     """Names of the predicates declared in ``rules`` (``error`` predicates included)."""
     names = []
     for rule in rules:
         for match in _PRED_DECLARATION.finditer(rule):
-            name = _unquote(match.group(1))
+            name = match.group(1)
+            if name.startswith("'"):
+                name = name[1:-1].replace("\\'", "'").replace("\\\\", "\\")
             if name not in names:
                 names.append(name)
     return names
 
 
-_HELPER_DEFINITION = re.compile(
-    r"(?:\b(?P<kind>error|shadow)\s+)?\bpred\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*|'(?:[^'\\]|\\.)*')"
-    # Skips an optional ``subsets`` clause; a declaration without a body ends with ``.``.
-    r"\s*\([^)]*\)[^.<]*(?P<body><->)?"
-)
-
-
-def _helper_predicates(rules: Iterable[str], reported: Iterable[str]) -> list[str]:
-    """Relations of the helper predicates declared in ``rules``, to leave out of the output.
-
-    A helper is a predicate with a body (``<->``) that isn't an ``error``
-    predicate and isn't ``reported``. Refinery computes it from other
-    relations, so a contradiction in it also shows as an ``error`` in a
-    relation that is returned. Its ``::computed`` relation is left out too.
-    """
-    reported = set(reported)
-    excluded: list[str] = []
-    for rule in rules:
-        for match in _HELPER_DEFINITION.finditer(rule):
-            name = _unquote(match.group("name"))
-            if match.group("kind") == "error" or match.group("body") is None or name in reported:
-                continue
-            for relation in (name, f"{name}::computed"):
-                if relation not in excluded:
-                    excluded.append(relation)
-    return excluded
-
-
 @dataclass(frozen=True, slots=True)
 class _PreparedQuery:
     source: str
-    format: OutputFormats
     select: list[str]
     by_name: dict[str, BaseModel]
     exists: dict[str, Certainty]
