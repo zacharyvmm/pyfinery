@@ -24,7 +24,7 @@ pyfinery needs Python 3.12+ and a Refinery server. Either let `RefineryServer` s
 docker run --rm -p 8888:8888 ghcr.io/zacharyvmm/refinery
 ```
 
-This image is built from [a fork of Refinery](https://github.com/zacharyvmm/refinery). The fork loads large problems in linear rather than quadratic time, and lets clients leave relations out of the response. On a graph of 3,000 objects, `validate()` takes 1.6 seconds with it and 37 seconds with the upstream image `ghcr.io/graphs4value/refinery`. pyfinery works with either; pass `RefineryServer(image=...)` to choose.
+This image is built from [a fork of Refinery](https://github.com/zacharyvmm/refinery). The fork loads large problems in linear rather than quadratic time, and lets clients leave relations out of the response. On a graph of about 4,000 objects, `validate()` takes 1.6 seconds with it and 37 seconds with the upstream image `ghcr.io/graphs4value/refinery`. pyfinery works with either; pass `RefineryServer(image=...)` to choose.
 
 ## Validating Pydantic models
 
@@ -222,7 +222,7 @@ report = metamodel.validate([Filesystem(root=home), Dir(name="orphan")], refiner
 
 ### Performance
 
-Each `validate()` or `query()` call sends the whole problem. Refinery parses it and computes every relation over every object, both what must and what may hold. It doesn't limit the work to the predicates you report. With the default image, a `validate()` or `query()` over 3,000 objects takes about 2 seconds.
+Each `validate()` or `query()` call sends the whole problem. Refinery parses it and computes every relation over every object, both what must and what may hold. It doesn't limit the work to the predicates you report. With the default image, a `validate()` or `query()` over about 4,000 objects takes about 2 seconds.
 
 - **Keep helper predicates small.** A predicate with three parameters, such as `between(Resource r, Effect a, Effect b)`, can hold for hundreds of thousands of tuples over a few hundred objects. Refinery computes them all and sends them back, because any relation can hold a contradiction that `validate()` and `query()` report. With the default image, a `query()` whose helper holds 300,000 tuples takes about 7 seconds. `result.model.tuple_counts()` lists the largest relations. Declaring helpers `shadow` would leave them out of the response, but Refinery doesn't let a reported predicate use a `shadow` one.
 - **Pass fewer objects.** The number of objects matters more than the number of attribute values. Leave out fields that rules don't need with `exclude=[...]`.
