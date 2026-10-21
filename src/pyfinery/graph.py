@@ -1635,7 +1635,8 @@ def _timeout_hint(error: RefineryTimeoutError) -> RefineryTimeoutError:
         "default); raise it with RefineryServer(semantics_timeout=<ms>) or the "
         "REFINERY_SEMANTICS_TIMEOUT_MS environment variable of the server. Refinery computes "
         "every relation in full, so helper predicates with many tuples (e.g., with three "
-        "parameters) are often what makes it slow; see Performance in pyfinery's README."
+        "parameters) are often what makes it slow, and the upstream Refinery image is much "
+        "slower than pyfinery's default on large graphs; see Performance in pyfinery's README."
     )
 
 

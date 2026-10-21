@@ -20,7 +20,7 @@ import httpx
 from .client import AsyncRefinery, Refinery
 from .errors import InvalidProblemError, RefineryError, RefineryTimeoutError
 
-DEFAULT_IMAGE = "ghcr.io/graphs4value/refinery:latest"
+DEFAULT_IMAGE = "ghcr.io/zacharyvmm/refinery:latest"
 CONTAINER_PORT = 8888
 LIBRARY_MOUNT_ROOT = "/refinery-library"
 

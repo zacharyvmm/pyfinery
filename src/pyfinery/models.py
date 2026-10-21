@@ -54,6 +54,17 @@ class JsonOutputFormat(RefineryModel):
     enabled: bool = True
     non_existing_objects: PartialInterpretationPreservation = "discard"
     shadow_predicates: PartialInterpretationPreservation = "discard"
+    relations: list[str] | None = None
+    """Names of the relations to return; all of them if ``None``."""
+    excluded_relations: list[str] | None = None
+    """Names of the relations to leave out, even if ``relations`` lists them.
+
+    ``relations`` and ``excluded_relations`` need the server of
+    :class:`~pyfinery.RefineryServer`'s default image; other servers ignore
+    them and return every relation. A relation that is left out can't be
+    checked for errors, so :meth:`~pyfinery.Metamodel.validate` and
+    :meth:`~pyfinery.Metamodel.query` don't use them.
+    """
 
 
 class SourceOutputFormat(RefineryModel):
