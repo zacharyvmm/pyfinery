@@ -58,6 +58,19 @@ def test_output_formats_accept_python_names():
         json_=pf.JsonOutputFormat(non_existing_objects="keep"), source={"enabled": False}
     )
     assert formats.model_dump(mode="json") == {
-        "json": {"enabled": True, "nonExistingObjects": "keep", "shadowPredicates": "discard"},
+        "json": {
+            "enabled": True,
+            "nonExistingObjects": "keep",
+            "shadowPredicates": "discard",
+            "relations": None,
+            "excludedRelations": None,
+        },
         "source": {"enabled": False},
+    }
+    formats = pf.OutputFormats(json_=pf.JsonOutputFormat(excluded_relations=["helper"]))
+    assert formats.model_dump(mode="json", exclude_none=True)["json"] == {
+        "enabled": True,
+        "nonExistingObjects": "discard",
+        "shadowPredicates": "discard",
+        "excludedRelations": ["helper"],
     }

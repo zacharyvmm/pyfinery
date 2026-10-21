@@ -21,8 +21,10 @@ uv add git+https://github.com/zacharyvmm/pyfinery
 pyfinery needs Python 3.12+ and a Refinery server. Either let `RefineryServer` start one in Docker for you, or run one yourself:
 
 ```sh
-docker run --rm -p 8888:8888 ghcr.io/graphs4value/refinery
+docker run --rm -p 8888:8888 ghcr.io/zacharyvmm/refinery
 ```
+
+This image is built from [a fork of Refinery](https://github.com/zacharyvmm/refinery). The fork loads large problems in linear rather than quadratic time, and lets clients leave relations out of the response. On a graph of 3,000 objects, `validate()` takes 1.6 seconds with it and 37 seconds with the upstream image `ghcr.io/graphs4value/refinery`. pyfinery works with either; pass `RefineryServer(image=...)` to choose.
 
 ## Validating Pydantic models
 
@@ -215,14 +217,14 @@ report = metamodel.validate([Filesystem(root=home), Dir(name="orphan")], refiner
 ### Things to know
 
 - **Reachability:** `validate()` and `query()` follow only *outgoing* references from the objects you pass. An object that nothing refers to, such as a child that only sets its own `parent`, must be passed too.
-- **Timeouts:** `validate()` and `query()` run under the server's semantics timeout, which is 1 second by default and enough for a few hundred objects. Raise it with `RefineryServer(semantics_timeout=10_000)` or `REFINERY_SEMANTICS_TIMEOUT_MS`. `RefineryServer` warms the server up, so the first call doesn't time out while the JVM starts. See [Performance](#performance) for what makes calls slow.
+- **Timeouts:** `validate()` and `query()` run under the server's semantics timeout, which is 1 second by default and enough for about a thousand objects. Raise it with `RefineryServer(semantics_timeout=10_000)` or `REFINERY_SEMANTICS_TIMEOUT_MS`. `RefineryServer` warms the server up, so the first call doesn't time out while the JVM starts. See [Performance](#performance) for what makes calls slow.
 - **Rule syntax** is Refinery's. See its [language reference](https://refinery.tools/learn/language/). Inside rules, features are written `Class::field`. Boolean attributes are used as literals (`Port::public(p)`), and other attributes are compared with operators (`Service::replicas(s) > 1`).
 
 ### Performance
 
-Each `validate()` or `query()` call sends the whole problem. Refinery parses it, computes every relation over every object, both what must and what may hold, and returns all of them. It doesn't limit the work to the predicates you report, and the time grows faster than the graph. For example, a `query()` over about 1,000 objects takes 3 seconds with no rules, and 8 seconds with a rule that follows data flow transitively.
+Each `validate()` or `query()` call sends the whole problem. Refinery parses it and computes every relation over every object, both what must and what may hold. It doesn't limit the work to the predicates you report. With the default image, a `validate()` or `query()` over 3,000 objects takes about 2 seconds.
 
-- **Keep helper predicates small.** A predicate with three parameters, such as `between(Resource r, Effect a, Effect b)`, can hold for hundreds of thousands of tuples over a few hundred objects. Refinery computes them all and sends them back. In one query, rewriting such a helper as two predicates with two parameters cut the time from 24 to 2 seconds. `result.model.tuple_counts()` lists the largest relations. Declaring helpers `shadow` would leave them out of the response, but Refinery doesn't let a reported predicate use a `shadow` one.
+- **Keep helper predicates small.** A predicate with three parameters, such as `between(Resource r, Effect a, Effect b)`, can hold for hundreds of thousands of tuples over a few hundred objects, and Refinery computes them all. `validate()` and `query()` ask the server not to send back helper predicates: predicates declared in rules with a body (`<->`) that aren't `error` predicates and that `query()` doesn't report. Sending them used to take as long as computing them. Servers other than the default image ignore the request and send every relation. `result.model.tuple_counts()` lists the largest relations that were sent.
 - **Pass fewer objects.** The number of objects matters more than the number of attribute values. Leave out fields that rules don't need with `exclude=[...]`.
 - **Give every owned value its owner in `query()`.** To close the world, `query()` rules out the containers an object isn't in. When each owned value certainly has its owner, Refinery infers that by itself. An object passed without one makes pyfinery close every containment field that could hold it, which takes time proportional to the square of the number of objects.
 
@@ -262,7 +264,7 @@ with RefineryServer(model_generation_timeout=1200, semantics_timeout=5000, libra
         ...
 ```
 
-The container listens on a random free port of `127.0.0.1` and is removed on exit. `library_paths` are mounted read-only, so problems can `import` the `.refinery` modules in them. Other [server settings](https://refinery.tools/learn/docker/#environmental-variables) go in `env={...}`. Pass `warmup=False` to skip the warm-up requests.
+The container runs `ghcr.io/zacharyvmm/refinery:latest` unless you pass `image=...`, and pulls it only if it's missing or you pass `pull=True`. It listens on a random free port of `127.0.0.1` and is removed on exit. `library_paths` are mounted read-only, so problems can `import` the `.refinery` modules in them. Other [server settings](https://refinery.tools/learn/docker/#environmental-variables) go in `env={...}`. Pass `warmup=False` to skip the warm-up requests.
 
 ## Errors
 

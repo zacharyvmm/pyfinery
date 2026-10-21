@@ -50,7 +50,7 @@ from .models import (
 )
 
 DEFAULT_BASE_URL = "http://localhost:8888/api/v1"
-"""API base of a local server, e.g., ``docker run -p 8888:8888 ghcr.io/graphs4value/refinery``."""
+"""API base of a local server, e.g., ``docker run -p 8888:8888 ghcr.io/zacharyvmm/refinery``."""
 
 BASE_URL_ENV = "REFINERY_API_BASE"
 

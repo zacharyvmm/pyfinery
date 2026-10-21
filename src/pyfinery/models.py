@@ -54,6 +54,15 @@ class JsonOutputFormat(RefineryModel):
     enabled: bool = True
     non_existing_objects: PartialInterpretationPreservation = "discard"
     shadow_predicates: PartialInterpretationPreservation = "discard"
+    relations: list[str] | None = None
+    """Names of the relations to return; all of them if ``None``."""
+    excluded_relations: list[str] | None = None
+    """Names of the relations to leave out, even if ``relations`` lists them.
+
+    ``relations`` and ``excluded_relations`` need the server of
+    :class:`~pyfinery.RefineryServer`'s default image; other servers ignore
+    them and return every relation.
+    """
 
 
 class SourceOutputFormat(RefineryModel):
@@ -289,9 +298,11 @@ class JsonOutput(RefineryModel):
     def tuple_counts(self) -> dict[str, int]:
         """The number of tuples of each relation, largest first.
 
-        Refinery computes and returns every relation in full, so a large count,
-        e.g. of a helper predicate with three parameters, usually explains a
-        slow request.
+        Refinery computes every relation in full, so a large count, e.g. of a
+        helper predicate with three parameters, usually explains a slow
+        request. :meth:`~pyfinery.Metamodel.validate` and
+        :meth:`~pyfinery.Metamodel.query` don't ask for the helper predicates
+        of their rules, so those are missing here.
         """
         counts = {name: len(tuples) for name, tuples in self.partial_interpretation.items()}
         return dict(sorted(counts.items(), key=lambda item: item[1], reverse=True))
