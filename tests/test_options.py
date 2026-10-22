@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: EPL-2.0
 
-"""validate() and query() share rules, Python predicates, and certainty options."""
+"""validate() and query() share rules, Python predicates, and logic-value options."""
 
 from __future__ import annotations
 
@@ -22,12 +22,14 @@ FLOATING = Predicate(
 )
 
 
-def metamodel(certainty=None) -> Metamodel:
+def metamodel(logic_value=None) -> Metamodel:
     return Metamodel(
         Deployment,
         options={
             Service: ClassOptions(
-                key=lambda s: s.name, references={"depends_on": "Component"}, certainty=certainty
+                key=lambda s: s.name,
+                references={"depends_on": "Component"},
+                logic_value=logic_value,
             ),
             Database: ClassOptions(key=lambda d: d.name),
         },
@@ -51,11 +53,14 @@ def test_predicate_needs_evaluate_or_tuples():
 
 def test_predicate_tuples_forms():
     d, web, api, db, cache = components()
-    unary = Predicate("u", (Service,), tuples=(s for s in [web, (api,), ((web,), "may")]))
+    unary = Predicate("u", (Service,), tuples=(s for s in [web, (api,), ((web,), "unknown")]))
+    never = Predicate("v", (Service,), tuples=[((web,), "false")])
     binary = Predicate(
-        "b", (Service, "Component"), tuples=[(web, api), ((api, db), "may"), ((web, cache), True)]
+        "b",
+        (Service, "Component"),
+        tuples=[(web, api), ((api, db), "unknown"), ((web, cache), True)],
     )
-    lines = metamodel().query_problem([d], predicates=[unary, binary]).splitlines()
+    lines = metamodel().query_problem([d], predicates=[unary, binary, never]).splitlines()
     assert "pred u(Service p0)." in lines and "pred b(Service p0, Component p1)." in lines
     assert {
         "u(web).",
@@ -65,6 +70,7 @@ def test_predicate_tuples_forms():
         "?b(api, db).",
         "b(web, cache).",
     } <= set(lines)
+    assert "v(web)." not in lines and "?v(web)." not in lines  # "false" is not a fact
 
 
 def test_predicate_tuple_errors():
@@ -79,12 +85,12 @@ def test_predicate_tuple_errors():
         mm.query_problem([d], predicates=[Predicate("u", (Service,), tuples=[stranger])])
 
 
-def test_certainty_option():
+def test_logic_value_option():
     def heuristic(service, field, value):
         if field == "depends_on" and value == "db":
-            return "may"
+            return "unknown"
         if field == "replicas":
-            return "may"
+            return "unknown"
         return True
 
     d = deployment()
@@ -94,7 +100,7 @@ def test_certainty_option():
     assert "Service::depends_on(web, api)." in lines
     assert not any(line.startswith("Service::replicas(api)") for line in lines)  # unknown
 
-    with pytest.raises(ValueError, match="must return 'must', 'may' or True"):
+    with pytest.raises(ValueError, match="must return 'true', 'unknown' or True"):
         metamodel(lambda s, f, v: False).query_problem([deployment()])
 
 

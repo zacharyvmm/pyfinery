@@ -26,7 +26,7 @@ RULES = [
 
 def is_secret(file: File):
     if file.path.anchor == "unknown":
-        return "may"
+        return "unknown"
     return file.path.anchor == "home" and file.path.segments[:1] == [".ssh"]
 
 
@@ -36,7 +36,7 @@ PREDICATES = [Predicate("secretFile", (File,), is_secret)]
 def metamodel() -> Metamodel:
     options = dict(OPTIONS)
     options[Effect] = ClassOptions(
-        exclude=["command", "trace"], exists=lambda e: "must" if e.definite else "may"
+        exclude=["command", "trace"], exists=lambda e: "true" if e.definite else "unknown"
     )
     return Metamodel(
         Graph, options=options, unions={"Resource": [File, Endpoint]}, unsupported="skip"
@@ -124,12 +124,14 @@ def test_query_closes_containment_only_for_orphans():
     uncertain = Metamodel(
         Filesystem,
         options={
-            Dir: ClassOptions(certainty=lambda d, field, value: "may" if value is doc else True)
+            Dir: ClassOptions(
+                logic_value=lambda d, field, value: "unknown" if value is doc else True
+            )
         },
     )
     assert _containment_defaults(uncertain, [fs]) == ["default !Dir::contents(*, *)."]
     doc, fs = graph()
-    ghost = Metamodel(Filesystem, options={Dir: ClassOptions(exists=lambda d: "may")})
+    ghost = Metamodel(Filesystem, options={Dir: ClassOptions(exists=lambda d: "unknown")})
     assert _containment_defaults(ghost, [fs]) == ["default !Dir::contents(*, *)."]
 
 
@@ -173,24 +175,24 @@ MODEL = {
 }
 
 
-def test_query_result_certainties():
+def test_query_result_logic_values():
     result, recorder = _query_with_response(MODEL)
     assert recorder.requests[0].url.path == "/semantics"
     assert [str(m) for m in result.matches] == [
-        "must: writes(file_1, endpoint_1)",
-        "must: exfiltration(file_1, endpoint_1)",
-        "may: exfiltration(file_2, endpoint_1)",  # File::new is skipped, error is not a match
-        "may: removes(effect_4, file_1)",  # effect_4 only may exist
+        "true: writes(file_1, endpoint_1)",
+        "true: exfiltration(file_1, endpoint_1)",
+        "unknown: exfiltration(file_2, endpoint_1)",  # File::new is skipped, error is not a match
+        "unknown: removes(effect_4, file_1)",  # effect_4 only may exist
     ]
-    assert [m.node_names for m in result.must("exfiltration")] == [("file_1", "endpoint_1")]
-    assert [m.predicate for m in result.may()] == ["exfiltration", "removes"]
+    assert [m.node_names for m in result.true("exfiltration")] == [("file_1", "endpoint_1")]
+    assert [m.predicate for m in result.unknown()] == ["exfiltration", "removes"]
     assert isinstance(result["removes"][0].nodes[0], Effect)
     assert [str(e) for e in result.errors] == ["contradiction: exfiltration(file_2, file_2)"]
 
 
 def test_query_matches_by_parameter_name():
     result, _ = _query_with_response(MODEL)
-    exfiltration = result.must("exfiltration")[0]
+    exfiltration = result.true("exfiltration")[0]
     assert exfiltration.parameters == ("key", "net")
     assert exfiltration["key"] is exfiltration.nodes[0]
     assert list(exfiltration.arguments) == ["key", "net"]
@@ -222,7 +224,7 @@ def test_query_input_errors():
         },
         unsupported="skip",
     )
-    with pytest.raises(ValueError, match="must return 'must', 'may' or True"):
+    with pytest.raises(ValueError, match="must return 'true', 'unknown' or True"):
         bad.query_problem([graph()])
 
 

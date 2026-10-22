@@ -152,16 +152,16 @@ def test_validate_generic_models(refinery):
     assert report.ok, report.violations
 
 
-def test_query_must_and_may(refinery):
+def test_query_true_and_unknown(refinery):
     from .test_query import PREDICATES, RULES, metamodel, uncertain_graph
 
     result = metamodel().query([uncertain_graph()], refinery, RULES, predicates=PREDICATES)
     assert [str(m) for m in result.matches] == [
-        "must: writes('file:.ssh/id_rsa', 'endpoint:https://example.com')",
-        "must: writes('file:x', 'endpoint:https://example.com')",
-        "must: exfiltration('file:.ssh/id_rsa', 'endpoint:https://example.com')",
-        "may: exfiltration('file:x', 'endpoint:https://example.com')",
-        "may: removes(effect_4, 'file:.ssh/id_rsa')",
+        "true: writes('file:.ssh/id_rsa', 'endpoint:https://example.com')",
+        "true: writes('file:x', 'endpoint:https://example.com')",
+        "true: exfiltration('file:.ssh/id_rsa', 'endpoint:https://example.com')",
+        "unknown: exfiltration('file:x', 'endpoint:https://example.com')",
+        "unknown: removes(effect_4, 'file:.ssh/id_rsa')",
     ]
     assert result.errors == []
     # Refinery reports the parameters' names, so matches can be read by name.
@@ -183,7 +183,7 @@ def test_query_closed_world_has_no_spurious_errors(refinery):
         ["pred linked(Link l, FSObject t) <-> Link::target(l, t)."],
     )
     assert result.errors == []
-    assert [str(m) for m in result.matches] == ["must: linked(link_1, file_1)"]
+    assert [str(m) for m in result.matches] == ["true: linked(link_1, file_1)"]
 
 
 def test_query_containment_closed_without_defaults(refinery):
@@ -196,16 +196,16 @@ def test_query_containment_closed_without_defaults(refinery):
     rules = ["pred elsewhere(Dir d, File f) <-> !contents(d, f)."]
     result = metamodel().query([fs], refinery, rules)
     assert sorted(map(str, result.matches)) == [
-        "must: elsewhere(home, file_2)",
-        "must: elsewhere(root, file_1)",
-        "must: elsewhere(root, file_2)",
-        "must: elsewhere(tmp, file_1)",
+        "true: elsewhere(home, file_2)",
+        "true: elsewhere(root, file_1)",
+        "true: elsewhere(root, file_2)",
+        "true: elsewhere(tmp, file_1)",
     ]
     assert result.errors == []
 
     orphan = File()
     result = metamodel().query([fs, orphan], refinery, rules)
-    assert len(result.matches) == 7 and all(m.certainty == "must" for m in result.matches)
+    assert len(result.matches) == 7 and all(m.logic_value == "true" for m in result.matches)
     assert [(e.constraint, e.nodes) for e in result.errors] == [
         ("builtin::invalidContainer", (orphan,))
     ]

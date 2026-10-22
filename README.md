@@ -8,7 +8,7 @@
 
 Unofficial Python library for [Refinery](https://refinery.tools), the graph solver for partial models. pyfinery covers two use cases:
 
-- **Validate and query Pydantic models with Refinery.** Load your data (JSON, YAML, an API response, a parse tree) into Pydantic objects, as you already do. pyfinery derives a Refinery metamodel from the classes and checks the objects against it, along with any rules you write in Refinery's logic language. It reports violations, or pattern matches that **must** or only **may** hold.
+- **Validate and query Pydantic models with Refinery.** Load your data (JSON, YAML, an API response, a parse tree) into Pydantic objects, as you already do. pyfinery derives a Refinery metamodel from the classes and checks the objects against it, along with any rules you write in Refinery's logic language. It reports violations, or pattern matches with their value in Refinery's logic: **true**, or **unknown** if they only may hold.
 - **Call Refinery from Python.** This is a typed client for Refinery's HTTP API, ported from the official JavaScript client [`@tools.refinery/client`](https://github.com/graphs4value/refinery/tree/main/subprojects/client-js). It generates models, computes partial-model semantics, and runs a local server in Docker.
 
 ## Installation
@@ -102,9 +102,9 @@ Each `Violation` has a `kind`, the Refinery `constraint` that failed, and the of
 
 `validate()` asserts the objects as facts and closes the world with Refinery's `concretize` operation: anything not asserted is false. `metamodel.problem(objects)` shows exactly what is sent, so you can paste it into the [Refinery web editor](https://refinery.services). `avalidate()` is the async variant.
 
-## Querying with must and may
+## Querying with true and unknown
 
-`query()` asks *which parts of the graph match a pattern*, rather than *does the graph follow the rules*. Patterns are Refinery predicates. When parts of your data are uncertain, Refinery's four-valued logic keeps track of it, and each match either **must** hold (true) or only **may** hold (unknown):
+`query()` asks *which parts of the graph match a pattern*, rather than *does the graph follow the rules*. Patterns are Refinery predicates. When parts of your data are uncertain, Refinery's four-valued logic keeps track of it, and each match is either **true** (it certainly holds) or **unknown** (it only may hold):
 
 ```python
 guessed = Metamodel(
@@ -114,7 +114,7 @@ guessed = Metamodel(
             key=lambda s: s.name,
             references={"depends_on": "Component"},
             # The worker's dependencies were guessed from logs: they only may exist.
-            certainty=lambda s, field, value: "may" if s.name == "worker" else True,
+            logic_value=lambda s, field, value: "unknown" if s.name == "worker" else True,
         ),
         Database: ClassOptions(key=lambda d: d.name),
     },
@@ -126,27 +126,27 @@ result = guessed.query([deployment], refinery, [
 ])
 for match in result.matches:
     print(match)
-# must: reachesUnencrypted(web, db)
-# must: reachesUnencrypted(api, db)
-# may: reachesUnencrypted(worker, db)
-result.must("reachesUnencrypted"), result.may(), result["reachesUnencrypted"]
+# true: reachesUnencrypted(web, db)
+# true: reachesUnencrypted(api, db)
+# unknown: reachesUnencrypted(worker, db)
+result.true("reachesUnencrypted"), result.unknown(), result["reachesUnencrypted"]
 match = result["reachesUnencrypted"][0]
 match["s"], match.arguments   # by parameter name: the Service, {"s": ..., "d": ...}
 ```
 
-Uncertainty can come from three places:
+Uncertainty can come from three places, each given as a logic value, `"true"` (or `True`) or `"unknown"`:
 
 | Source | How |
 | --- | --- |
-| an object that may not exist | `ClassOptions(exists=lambda obj: "must" or "may")` |
-| a reference or attribute value that may not hold | `ClassOptions(certainty=lambda obj, field, value: "must" or "may")` |
-| a fact computed in Python that may hold | a `Predicate` returning `"may"`, or `tuples=[((a, b), "may")]` |
+| an object that may not exist | `ClassOptions(exists=lambda obj: "true" or "unknown")` |
+| a reference or attribute value that may not hold | `ClassOptions(logic_value=lambda obj, field, value: "true" or "unknown")` |
+| a fact computed in Python that may hold | a `Predicate` returning `"unknown"`, or `tuples=[((a, b), "unknown")]` |
 
 - **Closed world:** `query()` asserts that there is nothing beyond what you pass: no other objects, references, subclass memberships or predicate facts. What's uncertain stays unknown.
-- **Certainty:** a match is `must` when Refinery evaluates it to true, and `may` when it's unknown. pyfinery also weakens it to `may` when one of its arguments only may exist, because Refinery doesn't do that for predicate parameters.
+- **Logic values:** `match.logic_value` is what Refinery evaluates the match to, `"true"` or `"unknown"` (`LogicValue` has all four of Refinery's values). pyfinery also makes it `"unknown"` when one of its arguments only may exist, because Refinery doesn't do that for predicate parameters. A match Refinery evaluates to `"error"` is a contradiction, reported in `result.errors`.
 - **What's reported:** every `pred` declared in the query's rules, unless you choose with `select=[...]`. Metamodel violations found along the way are in `result.errors`.
 - **Debugging and async:** `query_problem(...)` shows what is sent, and `aquery()` is the async variant.
-- **`validate()` is two-valued:** facts that only *may* hold count as not holding there, and every object exists.
+- **`validate()` is two-valued:** facts that are `"unknown"` count as not holding there, and every object exists.
 
 ## Mapping Pydantic classes to Refinery
 
@@ -178,7 +178,7 @@ Uncertainty can come from three places:
 | `exclude=[...]` | leave payload fields out |
 | `node_name` | name nodes explicitly |
 | `abstract` | declare the Refinery class `abstract` |
-| `exists`, `certainty` | uncertainty, for `query()` |
+| `exists`, `logic_value` | uncertainty, for `query()` |
 
 Fields with no Refinery counterpart (`list[str]`, `dict`, …) raise `TypeError` by default. Pass `unsupported="skip"` to leave them out instead; they're listed in `metamodel.skipped`.
 
@@ -222,7 +222,7 @@ report = metamodel.validate([Filesystem(root=home), Dir(name="orphan")], refiner
 
 ### Performance
 
-Each `validate()` or `query()` call sends the whole problem. Refinery parses it and computes every relation over every object, both what must and what may hold. It doesn't limit the work to the predicates you report. With the default image, a `validate()` or `query()` over about 4,000 objects takes about 2 seconds.
+Each `validate()` or `query()` call sends the whole problem. Refinery parses it and computes every relation over every object, both what is true and what is unknown. It doesn't limit the work to the predicates you report. With the default image, a `validate()` or `query()` over about 4,000 objects takes about 2 seconds.
 
 - **Keep helper predicates small.** A predicate with three parameters, such as `between(Resource r, Effect a, Effect b)`, can hold for hundreds of thousands of tuples over a few hundred objects. Refinery computes them all and sends them back, because any relation can hold a contradiction that `validate()` and `query()` report. With the default image, a `query()` whose helper holds 300,000 tuples takes about 7 seconds. `result.model.tuple_counts()` lists the largest relations. Declaring helpers `shadow` would leave them out of the response, but Refinery doesn't let a reported predicate use a `shadow` one.
 - **Pass fewer objects.** The number of objects matters more than the number of attribute values. Leave out fields that rules don't need with `exclude=[...]`.

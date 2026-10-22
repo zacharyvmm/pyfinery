@@ -85,7 +85,7 @@ with RefineryServer() as server, server.client() as refinery:
             Service: ClassOptions(
                 key=lambda s: s.name,
                 references={"depends_on": "Component"},
-                certainty=lambda s, field, value: "may" if s.name == "worker" else True,
+                logic_value=lambda s, field, value: "unknown" if s.name == "worker" else True,
             ),
             Database: ClassOptions(key=lambda d: d.name),
         },
