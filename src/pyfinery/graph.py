@@ -13,8 +13,8 @@ and turns instances of them into Refinery facts:
   evaluates to ``error`` as a :class:`Violation`.
 - :meth:`Metamodel.query` evaluates graph patterns written as Refinery
   predicates over a closed world that may hold *uncertain* facts, and
-  reports each :class:`Match` as ``must`` (true in Refinery's four-valued
-  logic) or ``may`` (unknown).
+  reports each :class:`Match` with its value in Refinery's four-valued
+  logic: ``"true"``, or ``"unknown"`` if it only may hold.
 
 How fields map to Refinery:
 
@@ -73,7 +73,9 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 ReferenceKind = Literal["refers", "contains", "container"]
-Certainty = Literal["must", "may"]
+# The values of Refinery's four-valued logic. Facts are asserted, and matches
+# reported, as ``"true"`` or ``"unknown"``; a contradiction is ``"error"``.
+LogicValue = Literal["true", "false", "unknown", "error"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,13 +128,15 @@ class ClassOptions:
         the key, if it is a string or integer, else ``<class>_<n>``.
     :param exclude: Names of fields (declared in this class) to leave out.
     :param abstract: Declare the Refinery class ``abstract``.
-    :param exists: Whether an instance certainly exists (``"must"`` or
-        ``True``) or only may (``"may"``), e.g. something that happens on
-        some paths only. Used by :meth:`Metamodel.query` only.
-    :param certainty: Whether the value of a field certainly holds, called as
-        ``certainty(instance, field_name, value)`` for each reference target
-        and attribute value; ``"may"`` asserts it as unknown, e.g. a
-        dependency found by a heuristic.
+    :param exists: The logic value of ``exists`` for an instance: ``"true"``
+        (or ``True``) if it certainly exists, ``"unknown"`` if it only may,
+        e.g. something that happens on some paths only. Used by
+        :meth:`Metamodel.query` only.
+    :param logic_value: The logic value of a field's value, called as
+        ``logic_value(instance, field_name, value)`` for each reference
+        target and attribute value: ``"true"`` (or ``True``) if it certainly
+        holds, ``"unknown"`` if it only may, e.g. a dependency found by a
+        heuristic.
     """
 
     key: Callable[[Any], Hashable] | None = None
@@ -140,8 +144,8 @@ class ClassOptions:
     node_name: Callable[[Any], str] | None = None
     exclude: frozenset[str] | Sequence[str] = ()
     abstract: bool | None = None
-    exists: Callable[[Any], Certainty | bool] | None = None
-    certainty: Callable[[Any, str, Any], Certainty | bool] | None = None
+    exists: Callable[[Any], LogicValue | bool] | None = None
+    logic_value: Callable[[Any, str, Any], LogicValue | bool] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,10 +159,11 @@ class Predicate:
     its facts come from either:
 
     - ``evaluate``, called on every combination of nodes of the parameter
-      types, returning ``True``/``"must"`` (holds), ``"may"`` (may hold), or
-      ``False``/``None`` (doesn't hold); or
+      types, returning its logic value: ``True``/``"true"`` (holds),
+      ``"unknown"`` (may hold), or ``False``/``"false"``/``None`` (doesn't
+      hold); or
     - ``tuples``: the argument tuples that hold, each optionally paired with
-      a certainty, e.g. ``[((a, b), "may"), (c, d)]``. Use it when the
+      its logic value, e.g. ``[((a, b), "unknown"), (c, d)]``. Use it when the
       relation is already known, or when combinations would be too many.
 
     >>> Predicate("validEmail", (User,), lambda u: EMAIL.fullmatch(u.email) is not None)
@@ -167,7 +172,7 @@ class Predicate:
 
     name: str
     parameters: tuple[type[BaseModel] | str, ...]
-    evaluate: Callable[..., Certainty | bool | None] | None = None
+    evaluate: Callable[..., LogicValue | bool | None] | None = None
     tuples: Iterable[Any] | None = None
 
     def __post_init__(self) -> None:
@@ -969,17 +974,18 @@ class Metamodel:
         return names
 
     def _fact_prefix(self, node: BaseModel, feature: Feature, value: Any) -> str:
-        """``"?"`` if ``ClassOptions.certainty`` says the value only may hold."""
-        decide = self._options(type(node)).certainty
+        """``"?"`` if ``ClassOptions.logic_value`` says the value only may hold."""
+        decide = self._options(type(node)).logic_value
         if decide is None:
             return ""
         answer = decide(node, feature.name, value)
-        if answer in ("must", True):
+        if answer in ("true", True):
             return ""
-        if answer == "may":
+        if answer == "unknown":
             return "?"
         raise ValueError(
-            f"ClassOptions.certainty of {type(node).__name__} must return 'must', 'may' or True, "
+            f"ClassOptions.logic_value of {type(node).__name__} must return 'true', 'unknown' or "
+            f"True, "
             f"not {answer!r} (leave values that don't hold out of the object)"
         )
 
@@ -1124,8 +1130,8 @@ class Metamodel:
         relations computed in Python for them to use.
 
         Validation is two-valued: it checks what certainly holds. Facts that
-        only ``"may"`` hold (from :class:`Predicate` or
-        ``ClassOptions(certainty=...)``) count as not holding, and every
+        are only ``"unknown"`` (from :class:`Predicate` or
+        ``ClassOptions(logic_value=...)``) count as not holding, and every
         object exists (``ClassOptions(exists=...)`` is ignored). Use
         :meth:`query` to reason about what may hold.
 
@@ -1175,9 +1181,9 @@ class Metamodel:
         every ``pred`` they declare is reported unless ``select`` names the
         ones to report. Unlike :meth:`validate`, the world is closed by
         asserting that there is nothing else (no other objects, references,
-        or subclass memberships) while keeping uncertainty: objects that only
-        ``may`` exist and :class:`Predicate` facts that only ``may`` hold make
-        the matches that depend on them ``may``.
+        or subclass memberships) while keeping uncertainty: objects whose
+        ``exists`` is ``"unknown"`` and :class:`Predicate` facts that are
+        ``"unknown"`` make the matches that depend on them ``"unknown"``.
         """
         prepared = self._prepare_query(objects, rules, predicates, select)
         try:
@@ -1230,12 +1236,11 @@ class Metamodel:
         lines += self._closed_world(predicates, nodes)
         lines.append("")
         lines.append(self.facts(nodes, names, canonical_opposites=True))
-        exists: dict[str, Certainty] = {}
+        exists: dict[str, LogicValue] = {}
         for node in nodes:
             name = names[self.identity(node)]
-            certainty = self._exists(node)
-            exists[name] = certainty
-            if certainty == "may":
+            exists[name] = self._exists(node)
+            if exists[name] == "unknown":
                 lines.append(f"?exists({name}).")
             lines += [f"!{self.class_name(sub)}({name})." for sub in self._subclasses(type(node))]
         lines += self._predicate_facts(predicates, nodes, names)
@@ -1250,17 +1255,17 @@ class Metamodel:
             self.reference_errors(nodes, names),
         )
 
-    def _exists(self, node: BaseModel) -> Certainty:
+    def _exists(self, node: BaseModel) -> LogicValue:
         decide = self._options(type(node)).exists
         if decide is None:
-            return "must"
+            return "true"
         answer = decide(node)
-        if answer in ("must", True):
-            return "must"
-        if answer == "may":
-            return "may"
+        if answer in ("true", True):
+            return "true"
+        if answer == "unknown":
+            return "unknown"
         raise ValueError(
-            f"ClassOptions.exists of {type(node).__name__} must return 'must', 'may' or True, "
+            f"ClassOptions.exists of {type(node).__name__} must return 'true', 'unknown' or True, "
             f"not {answer!r} (leave out objects that don't exist)"
         )
 
@@ -1298,14 +1303,14 @@ class Metamodel:
         lines = []
         for predicate in predicates:
             for arguments, answer in self._predicate_tuples(predicate, nodes):
-                if answer in (None, False):
+                if answer in (None, False, "false"):
                     continue
-                if answer not in (True, "must", "may"):
+                if answer not in (True, "true", "unknown"):
                     raise ValueError(
                         f"Predicate {predicate.name!r} returned {answer!r}; expected True, "
-                        "False, None, 'must' or 'may'"
+                        "False, None, 'true', 'false' or 'unknown'"
                     )
-                prefix = "?" if answer == "may" else ""
+                prefix = "?" if answer == "unknown" else ""
                 rendered = []
                 for argument, parameter in zip(arguments, predicate.parameters, strict=True):
                     node_name = names.get(self.identity(argument))
@@ -1328,7 +1333,7 @@ class Metamodel:
                 yield arguments, predicate.evaluate(*arguments)
             return
         for item in predicate.tuples or ():
-            # ((a, b), "may") or (a, b); for arity 1, ((a,), "may"), (a,) or a.
+            # ((a, b), "unknown") or (a, b); for arity 1, ((a,), "unknown"), (a,) or a.
             if (
                 isinstance(item, tuple)
                 and len(item) == 2
@@ -1392,7 +1397,7 @@ class Metamodel:
                 for value in values:
                     owner, child = (node, value) if feature.kind == "contains" else (value, node)
                     certain = not self._fact_prefix(node, feature, value)
-                    if certain and self._exists(owner) == "must":
+                    if certain and self._exists(owner) == "true":
                         owned.add(self.identity(child))
         return [node for node in nodes if self.identity(node) not in owned]
 
@@ -1512,18 +1517,21 @@ class ValidationReport:
 
 @dataclass(frozen=True, slots=True)
 class Match:
-    """A way a query predicate holds: its arguments, and whether it ``must`` or only ``may``."""
+    """A way a query predicate holds: its arguments, and its logic value.
+
+    ``"true"`` if it certainly holds, ``"unknown"`` if it only may.
+    """
 
     predicate: str
     node_names: tuple[str, ...]
     nodes: tuple[BaseModel | None, ...] = field(compare=False)
     """The Python objects, or ``None`` for nodes Refinery added (e.g., enum literals)."""
-    certainty: Certainty = "must"
+    logic_value: LogicValue = "true"
     parameters: tuple[str, ...] = field(default=(), compare=False)
     """The names of the predicate's parameters, as declared."""
 
     def __str__(self) -> str:
-        return f"{self.certainty}: {self.predicate}({', '.join(self.node_names)})"
+        return f"{self.logic_value}: {self.predicate}({', '.join(self.node_names)})"
 
     @property
     def arguments(self) -> dict[str, BaseModel | None]:
@@ -1555,16 +1563,18 @@ class QueryResult:
         """The matches of ``predicate``."""
         return [m for m in self.matches if m.predicate == predicate]
 
-    def must(self, predicate: str | None = None) -> list[Match]:
-        """Matches that certainly hold (of ``predicate``, or of any)."""
+    def true(self, predicate: str | None = None) -> list[Match]:
+        """Matches that are true, that certainly hold (of ``predicate``, or of any)."""
         return [
-            m for m in self.matches if m.certainty == "must" and predicate in (None, m.predicate)
+            m for m in self.matches if m.logic_value == "true" and predicate in (None, m.predicate)
         ]
 
-    def may(self, predicate: str | None = None) -> list[Match]:
-        """Matches that only may hold (of ``predicate``, or of any)."""
+    def unknown(self, predicate: str | None = None) -> list[Match]:
+        """Matches that are unknown, that only may hold (of ``predicate``, or of any)."""
         return [
-            m for m in self.matches if m.certainty == "may" and predicate in (None, m.predicate)
+            m
+            for m in self.matches
+            if m.logic_value == "unknown" and predicate in (None, m.predicate)
         ]
 
 
@@ -1589,7 +1599,7 @@ class _PreparedQuery:
     source: str
     select: list[str]
     by_name: dict[str, BaseModel]
-    exists: dict[str, Certainty]
+    exists: dict[str, LogicValue]
     identity: Callable[[BaseModel], Hashable]
     reference_errors: list[Violation]
 
@@ -1603,20 +1613,19 @@ class _PreparedQuery:
             if relation is None:
                 raise ValueError(f"Refinery returned no relation named {predicate!r}")
             for raw in model.partial_interpretation.get(relation.name, []):
-                value = raw[-1]
+                value: LogicValue = raw[-1]  # type: ignore[assignment]
                 if value not in ("true", "unknown"):
-                    continue
+                    continue  # errors are reported as contradictions
                 names = tuple(model.nodes[i].name for i in raw[: relation.arity])  # type: ignore[index]
                 if any(name.endswith("::new") for name in names):
                     continue  # objects that don't exist in a closed world
-                certainty: Certainty = "must" if value == "true" else "may"
                 # Refinery doesn't weaken a predicate for the existence of
                 # its arguments (only of nodes quantified in its body).
-                if any(self.exists.get(name) == "may" for name in names):
-                    certainty = "may"
+                if any(self.exists.get(name) == "unknown" for name in names):
+                    value = "unknown"
                 nodes = tuple(self.by_name.get(name) for name in names)
                 parameters = tuple(relation.parameter_names or ())
-                matches.append(Match(predicate, names, nodes, certainty, parameters))
+                matches.append(Match(predicate, names, nodes, value, parameters))
         errors = [
             error
             for error in _report(
