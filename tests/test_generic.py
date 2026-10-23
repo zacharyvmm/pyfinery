@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Annotated, Literal
 
 import pytest
@@ -103,7 +104,7 @@ def test_node_name_and_abstract_options():
         unsupported="skip",
     )
     assert "abstract class FileOrEndpoint." in mm.source  # default union name
-    names = set(mm.node_names(mm.collect([graph()])).values())
+    names = {n.name for n in mm._graph([graph()]).nodes}
     assert {"'file:.ssh/id_rsa'", "'https://example.com'"} <= names
 
 
@@ -185,3 +186,17 @@ def test_report_for_node_matches_copies():
 def test_effect_field_type_check():
     # Effects stay owned values (no key): each one is its own node.
     assert len([n for n in metamodel().collect([graph()]) if isinstance(n, Effect)]) == 2
+
+
+def test_one_shot_iterable_fields_are_read_once():
+    # Pydantic validates Iterable fields into one-shot iterators.
+    class Thing(BaseModel):
+        name: str
+
+    class Group(BaseModel):
+        children: Iterable[Thing]
+
+    Group.model_rebuild(_types_namespace={"Thing": Thing})
+    source = Metamodel(Group).problem([Group(children=[Thing(name="a")])])
+    assert "Group::children(group_1, thing_1)." in source
+    assert 'Thing::name(thing_1): "a".' in source

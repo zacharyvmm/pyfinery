@@ -9,7 +9,7 @@ import pytest
 from pydantic import BaseModel
 
 import pyfinery as pf
-from pyfinery import ClassOptions, Metamodel
+from pyfinery import ClassOptions, Metamodel, Predicate
 
 from .conftest import sse, sse_response
 from .deployment_models import Database, Deployment, Service, deployment, metamodel
@@ -24,10 +24,11 @@ def test_reference_by_key_source():
 
 def test_reference_by_key_facts_and_names():
     mm = metamodel()
-    nodes = mm.collect([deployment()])
-    names = mm.node_names(nodes)
-    assert sorted(names.values()) == ["api", "cache", "db", "deployment_1", "port_1", "web"]
-    facts = mm.facts(nodes, names).splitlines()
+    graph = mm._graph([deployment()])
+    assert sorted(n.name for n in graph.nodes) == [
+        *("api", "cache", "db", "deployment_1", "port_1", "web")
+    ]
+    facts = mm._facts(graph).splitlines()
     assert "Service::depends_on(web, api)." in facts
     assert "Service::depends_on(web, cache)." in facts
     assert "Service::depends_on(api, db)." in facts
@@ -38,8 +39,7 @@ def test_reference_errors():
     d = deployment()
     d.components.append(Service(name="db", image="x", tier="backend"))  # clashes with the database
     mm = metamodel()
-    nodes = mm.collect([d])
-    errors = mm.reference_errors(nodes, mm.node_names(nodes))
+    errors = mm._reference_errors(mm._graph([d]))
     assert [str(e) for e in errors] == [
         "reference: Service::depends_on::ambiguous(api, 'db')",
         "reference: Service::depends_on::unresolved(api, 'billing')",
@@ -55,8 +55,8 @@ def test_names_fall_back_when_keys_clash_with_types_or_each_other():
         Database(name="web", engine="redis", encrypted=True),  # another node's name
     ]
     mm = metamodel()
-    names = mm.node_names(mm.collect([d]))
-    assert sorted(names.values()) == [
+    names = [n.name for n in mm._graph([d]).nodes]
+    assert sorted(names) == [
         "api",
         "cache",
         "database_1",
@@ -123,10 +123,52 @@ def test_unencodable_keys_and_strings():
     d = deployment()
     d.components.append(Service(name="w\udcffb", image="i\udcff\u00e9", tier="backend"))
     mm = metamodel()
-    nodes = mm.collect([d])
-    names = mm.node_names(nodes)
+    names = [n.name for n in mm._graph([d]).nodes]
     # Refinery would name the node "'w?b'", which couldn't be mapped back.
-    assert "service_1" in names.values()
+    assert "service_1" in names
     source = mm.problem([d])
     source.encode("utf-8")
     assert 'Service::image(service_1): "i\\udcff\u00e9".' in source
+
+
+def test_options_are_evaluated_once():
+    calls: list[tuple] = []
+
+    def key(s):
+        calls.append(("key", s.name))
+        return s.name
+
+    def exists(s):
+        calls.append(("exists", s.name))
+        return True
+
+    def logic_value(s, field, value):
+        calls.append(("logic_value", s.name, field, str(value)))
+        return True
+
+    mm = Metamodel(
+        Deployment,
+        options={
+            Service: ClassOptions(
+                key=key,
+                references={"depends_on": "Component"},
+                exists=exists,
+                logic_value=logic_value,
+            ),
+            Database: ClassOptions(key=lambda d: d.name),
+        },
+        unions={"Component": [Service, Database]},
+    )
+    d = deployment()
+    pair = Predicate("pair", (Service, Service), lambda a, b: True)
+    # Another instance with the same key stands for the same node.
+    calls_api = Predicate("callsApi", (Service,), tuples=[d.components[1].model_copy()])
+    mm.query_problem([d], predicates=[pair, calls_api])
+    # Once per object: web, api, and the copy of api.
+    assert sorted(c[1] for c in calls if c[0] == "key") == ["api", "api", "web"]
+    values = [c for c in calls if c[0] != "key"]
+    assert len(values) == len(set(values))
+    assert sorted(c[1] for c in calls if c[0] == "exists") == ["api", "web"]
+    # Unresolved keys aren't asserted, so their logic value isn't asked for.
+    assert ("logic_value", "api", "depends_on", "db") in calls
+    assert not any(c[0] == "logic_value" and c[3] == "billing" for c in calls)

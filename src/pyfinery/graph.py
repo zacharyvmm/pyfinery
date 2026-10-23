@@ -55,6 +55,7 @@ import itertools
 import math
 import re
 import types
+from collections import deque
 from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal, Union, get_args, get_origin
@@ -454,6 +455,52 @@ def _camel(name: str) -> str:
 
 class _Unsupported(TypeError):
     """A field type with no Refinery counterpart (skipped with ``unsupported="skip"``)."""
+
+
+# ---------------------------------------------------------------------------
+# Instance graph
+# ---------------------------------------------------------------------------
+
+
+@dataclass(eq=False, slots=True)
+class _Value:
+    """One value of a field of a node: an attribute or enum value, or a reference."""
+
+    feature: Feature
+    value: Any
+    """The attribute or enum value, the key of a reference by key, or the referenced object."""
+    certain: bool = True
+    """Whether the value certainly holds (``ClassOptions.logic_value``), or only may."""
+    target: _Node | None = None
+    """The node a reference resolves to."""
+    unresolved: Literal["unresolved", "ambiguous"] | None = None
+    """Why a key of a reference by key resolves to no node."""
+
+
+@dataclass(eq=False, slots=True)
+class _Node:
+    """One Refinery node: a Python object, or the instances sharing a key."""
+
+    obj: BaseModel
+    """The object representing the node: of instances sharing a key, the first one reached."""
+    identity: Hashable
+    name: str = ""
+    exists: LogicValue = "true"
+    values: list[_Value] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class _Graph:
+    """The nodes reachable from some objects, in the order they were reached."""
+
+    nodes: list[_Node]
+    by_identity: dict[Hashable, _Node]
+    identities: dict[int, tuple[BaseModel, Hashable]]
+    """:meth:`Metamodel.identity` by object, keeping the objects alive so that
+    their ``id`` isn't reused."""
+
+    def objects_by_name(self) -> dict[str, BaseModel]:
+        return {node.name: node.obj for node in self.nodes}
 
 
 class Metamodel:
@@ -889,22 +936,7 @@ class Metamodel:
         nothing (e.g., a child that only sets its own ``parent``) must be
         passed in ``objects`` itself.
         """
-        result: list[BaseModel] = []
-        seen: set[Hashable] = set()
-        pending = list(objects)
-        while pending:
-            node = pending.pop(0)
-            if type(node) not in self.features:
-                raise TypeError(f"{type(node).__name__} is not part of this metamodel")
-            identity = self.identity(node)
-            if identity in seen:
-                continue
-            seen.add(identity)
-            result.append(node)
-            for _, feature, value in self._values(node):
-                if not (feature.is_attribute or feature.is_enum or feature.by_key):
-                    pending.extend(value)
-        return result
+        return [node.obj for node, _ in self._reach(objects, {})]
 
     def identity(self, node: BaseModel) -> Hashable:
         """What makes ``node`` one Refinery node: its key if its class has one, else itself.
@@ -947,16 +979,83 @@ class Metamodel:
                 values = list(value) if feature.many else [value]
                 yield cls, feature, values
 
-    def node_names(self, nodes: Sequence[BaseModel]) -> dict[Hashable, str]:
-        """Refinery node names (as rendered in the problem) by :meth:`identity`."""
-        names: dict[Hashable, str] = {}
+    # -- the instance graph -------------------------------------------------
+
+    def _graph(self, objects: Iterable[BaseModel], *, existence: bool = False) -> _Graph:
+        """The Refinery nodes of the graph reachable from ``objects``, with their values.
+
+        The ``key``, ``node_name``, ``logic_value`` and (with ``existence``)
+        ``exists`` options are evaluated here, once; everything sent to
+        Refinery is rendered from the result. Without ``existence``, every
+        node exists, as :meth:`validate` assumes.
+        """
+        identities: dict[int, tuple[BaseModel, Hashable]] = {}
+        reached = self._reach(objects, identities)
+        nodes = [node for node, _ in reached]
+        graph = _Graph(nodes, {node.identity: node for node in nodes}, identities)
+        self._name(graph.nodes)
+        index: dict[Hashable, list[_Node]] = {}
+        for node in graph.nodes:
+            if self._options(type(node.obj)).key is not None:
+                index.setdefault(node.identity[1], []).append(node)  # type: ignore[index]
+
+        def node_of(obj: BaseModel) -> _Node:
+            # Every followed reference was reached, by the same identity.
+            return graph.by_identity[self._identity(obj, graph.identities)]
+
+        for node, fields in reached:
+            for _, feature, values in fields:
+                for value in values:
+                    node.values.append(self._value(node, feature, value, index, node_of))
+        if existence:
+            for node in graph.nodes:
+                node.exists = self._exists(node.obj)
+        return graph
+
+    def _reach(
+        self, objects: Iterable[BaseModel], identities: dict[int, tuple[BaseModel, Hashable]]
+    ) -> list[tuple[_Node, list[tuple[type, Feature, list[Any]]]]]:
+        """The nodes reachable from ``objects``, each with the values of its fields.
+
+        ``identities`` memoizes :meth:`identity` by object, keeping the
+        objects alive so that their ``id`` isn't reused.
+        """
+        reached = []
+        seen: set[Hashable] = set()
+        pending = deque(objects)
+        while pending:
+            obj = pending.popleft()
+            if type(obj) not in self.features:
+                raise TypeError(f"{type(obj).__name__} is not part of this metamodel")
+            identity = self._identity(obj, identities)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            fields = list(self._values(obj))
+            reached.append((_Node(obj, identity), fields))
+            for _, feature, values in fields:
+                if not (feature.is_attribute or feature.is_enum or feature.by_key):
+                    pending.extend(values)
+        return reached
+
+    def _identity(
+        self, obj: BaseModel, identities: dict[int, tuple[BaseModel, Hashable]]
+    ) -> Hashable:
+        entry = identities.get(id(obj))
+        if entry is None:
+            entry = identities[id(obj)] = (obj, self.identity(obj))
+        return entry[1]
+
+    def _name(self, nodes: Sequence[_Node]) -> None:
+        """Give every node the name it has in the problem."""
         used: set[str] = set()
         counters: dict[type, int] = {}
         for node in nodes:
-            id_field: str | None = getattr(type(node), "__node_id__", None)
-            naming = self._options(type(node)).node_name
+            obj = node.obj
+            id_field: str | None = getattr(type(obj), "__node_id__", None)
+            naming = self._options(type(obj)).node_name
             if naming is not None or id_field is not None:
-                raw = naming(node) if naming is not None else getattr(node, id_field)  # type: ignore[arg-type]
+                raw = naming(obj) if naming is not None else getattr(obj, id_field)  # type: ignore[arg-type]
                 name = quote_id(str(raw))
                 if name in used:
                     source = "node_name" if naming is not None else f"field {id_field!r}"
@@ -965,36 +1064,18 @@ class Metamodel:
                 name = key
             else:
                 while True:
-                    counters[type(node)] = counters.get(type(node), 0) + 1
-                    name = quote_id(f"{type(node).__name__.lower()}_{counters[type(node)]}")
+                    counters[type(obj)] = counters.get(type(obj), 0) + 1
+                    name = quote_id(f"{type(obj).__name__.lower()}_{counters[type(obj)]}")
                     if name not in used:
                         break
             used.add(name)
-            names[self.identity(node)] = name
-        return names
+            node.name = name
 
-    def _fact_prefix(self, node: BaseModel, feature: Feature, value: Any) -> str:
-        """``"?"`` if ``ClassOptions.logic_value`` says the value only may hold."""
-        decide = self._options(type(node)).logic_value
-        if decide is None:
-            return ""
-        answer = decide(node, feature.name, value)
-        if answer in ("true", True):
-            return ""
-        if answer == "unknown":
-            return "?"
-        raise ValueError(
-            f"ClassOptions.logic_value of {type(node).__name__} must return 'true', 'unknown' or "
-            f"True, "
-            f"not {answer!r} (leave values that don't hold out of the object)"
-        )
-
-    def _name_from_key(self, node: BaseModel) -> str | None:
+    def _name_from_key(self, node: _Node) -> str | None:
         """The key as a node name, if it is a string or integer that isn't a type's name."""
-        key_of = self._options(type(node)).key
-        if key_of is None:
+        if self._options(type(node.obj)).key is None:
             return None
-        key = key_of(node)
+        key = node.identity[1]  # type: ignore[index]
         if isinstance(key, bool) or not isinstance(key, str | int) or str(key) == "":
             return None
         if not _encodable(str(key)):
@@ -1004,97 +1085,97 @@ class Metamodel:
         name = quote_id(str(key))
         return None if name in self._type_names or str(key) in _RESERVED_NODE_NAMES else name
 
-    def _key_index(self, nodes: Sequence[BaseModel]) -> dict[Hashable, list[BaseModel]]:
-        index: dict[Hashable, list[BaseModel]] = {}
-        for node in nodes:
-            key_of = self._options(type(node)).key
-            if key_of is not None:
-                index.setdefault(key_of(node), []).append(node)
-        return index
-
-    @staticmethod
-    def _resolve(
-        feature: Feature, key: Hashable, index: Mapping[Hashable, list[BaseModel]]
-    ) -> list[BaseModel]:
-        target = feature.target
-        members = target.members if isinstance(target, UnionClass) else (target,)
-        return [n for n in index.get(key, []) if isinstance(n, members)]  # type: ignore[arg-type]
-
-    def reference_errors(
-        self, nodes: Sequence[BaseModel], names: Mapping[Hashable, str]
-    ) -> list[Violation]:
-        """Keys in reference-by-key fields that match no object, or several."""
-        index = self._key_index(nodes)
-        errors = []
-        for node in nodes:
-            for cls, feature, keys in self._values(node):
-                if not feature.by_key:
-                    continue
-                for key in keys:
-                    found = self._resolve(feature, key, index)
-                    if len(found) == 1:
-                        continue
-                    problem = "unresolved" if not found else "ambiguous"
-                    constraint = f"{self.class_name(cls)}::{quote_id(feature.name)}::{problem}"
-                    node_names = (names[self.identity(node)], repr(key))
-                    errors.append(Violation("reference", constraint, node_names, (node, None)))
-        return errors
-
-    def facts(
+    def _value(
         self,
-        nodes: Sequence[BaseModel],
-        names: Mapping[Hashable, str],
-        *,
-        canonical_opposites: bool = False,
-    ) -> str:
-        """Assertions describing ``nodes`` (which must include every referenced node).
+        node: _Node,
+        feature: Feature,
+        value: Any,
+        index: Mapping[Hashable, list[_Node]],
+        node_of: Callable[[BaseModel], _Node],
+    ) -> _Value:
+        if feature.by_key:
+            target = feature.target
+            members = target.members if isinstance(target, UnionClass) else (target,)
+            found = [n for n in index.get(value, []) if isinstance(n.obj, members)]  # type: ignore[arg-type]
+            if len(found) != 1:
+                problem = "unresolved" if not found else "ambiguous"
+                return _Value(feature, value, unresolved=problem)
+            return _Value(feature, value, self._certain(node.obj, feature, value), found[0])
+        certain = self._certain(node.obj, feature, value)
+        if feature.is_attribute or feature.is_enum:
+            return _Value(feature, value, certain)
+        return _Value(feature, value, certain, node_of(value))
+
+    def _certain(self, node: BaseModel, feature: Feature, value: Any) -> bool:
+        """Whether ``value`` certainly holds, as ``ClassOptions.logic_value`` says."""
+        decide = self._options(type(node)).logic_value
+        if decide is None:
+            return True
+        answer = decide(node, feature.name, value)
+        if answer in ("true", True):
+            return True
+        if answer == "unknown":
+            return False
+        raise ValueError(
+            f"ClassOptions.logic_value of {type(node).__name__} must return 'true', 'unknown' or "
+            f"True, "
+            f"not {answer!r} (leave values that don't hold out of the object)"
+        )
+
+    # -- rendering instances ------------------------------------------------
+
+    def _facts(self, graph: _Graph, *, canonical_opposites: bool = False) -> str:
+        """Assertions describing the nodes of ``graph`` and their values.
 
         With ``canonical_opposites``, a reference on one side of an opposite
         pair is written as the reverse reference on the other side, so that
         closed-world defaults on that side don't contradict it.
         """
         lines = []
-        index = self._key_index(nodes)
-        for node in nodes:
-            name = names[self.identity(node)]
-            lines.append(f"{self.class_name(type(node))}({name}).")
-            for cls, feature, values in self._values(node):
-                symbol = f"{self.class_name(cls)}::{quote_id(feature.name)}"
+        for node in graph.nodes:
+            name = node.name
+            lines.append(f"{self.class_name(type(node.obj))}({name}).")
+            for value in node.values:
+                feature = value.feature
+                symbol = f"{self.class_name(feature.owner)}::{quote_id(feature.name)}"
+                prefix = "" if value.certain else "?"
                 if feature.by_key:
-                    for key in values:
-                        found = self._resolve(feature, key, index)
-                        if len(found) == 1:  # others are reported by reference_errors
-                            prefix = self._fact_prefix(node, feature, key)
-                            target = names[self.identity(found[0])]
-                            lines.append(f"{prefix}{symbol}({name}, {target}).")
-                    continue
-                if canonical_opposites and not self._canonical(feature):
-                    for value in values:
-                        other = self._find_feature(type(value), feature.opposite)  # type: ignore[arg-type]
-                        assert other is not None
-                        prefix = self._fact_prefix(node, feature, value)
-                        reverse = f"{self.class_name(other.owner)}::{quote_id(other.name)}"
-                        lines.append(f"{prefix}{reverse}({names[self.identity(value)]}, {name}).")
-                    continue
-                for value in values:
-                    prefix = self._fact_prefix(node, feature, value)
-                    if feature.is_attribute:
-                        if prefix:
-                            continue  # an uncertain attribute value is simply unknown
-                        literal = _attribute_literal(value, feature.target)  # type: ignore[arg-type]
+                    if value.target is not None:  # others are reported by _reference_errors
+                        lines.append(f"{prefix}{symbol}({name}, {value.target.name}).")
+                elif canonical_opposites and not self._canonical(feature):
+                    assert value.target is not None
+                    other = self._find_feature(type(value.target.obj), feature.opposite)  # type: ignore[arg-type]
+                    assert other is not None
+                    reverse = f"{self.class_name(other.owner)}::{quote_id(other.name)}"
+                    lines.append(f"{prefix}{reverse}({value.target.name}, {name}).")
+                elif feature.is_attribute:
+                    if value.certain:  # an uncertain attribute value is simply unknown
+                        literal = _attribute_literal(value.value, feature.target)  # type: ignore[arg-type]
                         lines.append(f"{symbol}({name}): {literal}.")
-                    elif feature.is_enum:
-                        literal = self._literal(feature.target, value)  # type: ignore[arg-type]
-                        lines.append(f"{prefix}{symbol}({name}, {literal}).")
-                    else:
-                        target = names[self.identity(value)]
-                        lines.append(f"{prefix}{symbol}({name}, {target}).")
+                elif feature.is_enum:
+                    literal = self._literal(feature.target, value.value)  # type: ignore[arg-type]
+                    lines.append(f"{prefix}{symbol}({name}, {literal}).")
+                else:
+                    assert value.target is not None
+                    lines.append(f"{prefix}{symbol}({name}, {value.target.name}).")
         return "\n".join(lines) + "\n"
+
+    def _reference_errors(self, graph: _Graph) -> list[Violation]:
+        """Keys in reference-by-key fields that match no object, or several."""
+        errors = []
+        for node in graph.nodes:
+            for value in node.values:
+                if value.unresolved is None:
+                    continue
+                feature = f"{self.class_name(value.feature.owner)}::{quote_id(value.feature.name)}"
+                constraint = f"{feature}::{value.unresolved}"
+                node_names = (node.name, repr(value.value))
+                errors.append(Violation("reference", constraint, node_names, (node.obj, None)))
+        return errors
 
     def problem(self, objects: Iterable[BaseModel]) -> str:
         """The metamodel, rules, and the facts of the graph reachable from ``objects``."""
-        nodes = self.collect(objects)
-        return self.source + "\n" + self.facts(nodes, self.node_names(nodes))
+        return self.source + "\n" + self._facts(self._graph(objects))
 
     # -- validation ---------------------------------------------------------
 
@@ -1107,13 +1188,11 @@ class Metamodel:
         predicates: Iterable[Predicate] = (),
     ) -> tuple[str, dict[str, BaseModel], list[Violation]]:
         predicates = list(predicates)
-        nodes = self.collect(objects)
-        names = self.node_names(nodes)
+        graph = self._graph(objects)
         lines = [self.source, *rules, *(self._declare_predicate(p) for p in predicates), ""]
-        lines.append(self.facts(nodes, names))
-        lines += self._predicate_facts(predicates, nodes, names)
-        by_name = {names[self.identity(node)]: node for node in nodes}
-        return "\n".join(lines) + "\n", by_name, self.reference_errors(nodes, names)
+        lines.append(self._facts(graph))
+        lines += self._predicate_facts(predicates, graph)
+        return "\n".join(lines) + "\n", graph.objects_by_name(), self._reference_errors(graph)
 
     def validate(
         self,
@@ -1228,31 +1307,27 @@ class Metamodel:
     ) -> _PreparedQuery:
         rules = list(rules)
         predicates = list(predicates)
-        nodes = self.collect(objects)
-        names = self.node_names(nodes)
+        graph = self._graph(objects, existence=True)
         lines = [self.source, *rules, ""]
         lines += [self._declare_predicate(p) for p in predicates]
         lines.append("")
-        lines += self._closed_world(predicates, nodes)
+        lines += self._closed_world(predicates, graph)
         lines.append("")
-        lines.append(self.facts(nodes, names, canonical_opposites=True))
-        exists: dict[str, LogicValue] = {}
-        for node in nodes:
-            name = names[self.identity(node)]
-            exists[name] = self._exists(node)
-            if exists[name] == "unknown":
-                lines.append(f"?exists({name}).")
-            lines += [f"!{self.class_name(sub)}({name})." for sub in self._subclasses(type(node))]
-        lines += self._predicate_facts(predicates, nodes, names)
+        lines.append(self._facts(graph, canonical_opposites=True))
+        for node in graph.nodes:
+            if node.exists == "unknown":
+                lines.append(f"?exists({node.name}).")
+            subclasses = self._subclasses(type(node.obj))
+            lines += [f"!{self.class_name(sub)}({node.name})." for sub in subclasses]
+        lines += self._predicate_facts(predicates, graph)
         selected = list(select) if select is not None else _declared_predicates(rules)
-        by_name = {names[self.identity(node)]: node for node in nodes}
         return _PreparedQuery(
             "\n".join(lines) + "\n",
             selected,
-            by_name,
-            exists,
+            graph.objects_by_name(),
+            {node.name: node.exists for node in graph.nodes},
             self.identity,
-            self.reference_errors(nodes, names),
+            self._reference_errors(graph),
         )
 
     def _exists(self, node: BaseModel) -> LogicValue:
@@ -1294,15 +1369,11 @@ class Metamodel:
             return isinstance(node, union.members)
         return isinstance(node, parameter)
 
-    def _predicate_facts(
-        self,
-        predicates: Sequence[Predicate],
-        nodes: Sequence[BaseModel],
-        names: Mapping[Hashable, str],
-    ) -> list[str]:
+    def _predicate_facts(self, predicates: Sequence[Predicate], graph: _Graph) -> list[str]:
         lines = []
+        objects = [node.obj for node in graph.nodes]
         for predicate in predicates:
-            for arguments, answer in self._predicate_tuples(predicate, nodes):
+            for arguments, answer in self._predicate_tuples(predicate, objects):
                 if answer in (None, False, "false"):
                     continue
                 if answer not in (True, "true", "unknown"):
@@ -1313,13 +1384,13 @@ class Metamodel:
                 prefix = "?" if answer == "unknown" else ""
                 rendered = []
                 for argument, parameter in zip(arguments, predicate.parameters, strict=True):
-                    node_name = names.get(self.identity(argument))
-                    if node_name is None or not self._matches_type(argument, parameter):
+                    node = graph.by_identity.get(self._identity(argument, graph.identities))
+                    if node is None or not self._matches_type(argument, parameter):
                         raise ValueError(
                             f"Predicate {predicate.name!r}: {argument!r} is not a node of type "
                             f"{getattr(parameter, '__name__', parameter)} in this graph"
                         )
-                    rendered.append(node_name)
+                    rendered.append(node.name)
                 lines.append(f"{prefix}{quote_id(predicate.name)}({', '.join(rendered)}).")
         return lines
 
@@ -1359,15 +1430,13 @@ class Metamodel:
         assert other is not None
         return (feature.owner.__name__, feature.name) <= (other.owner.__name__, other.name)
 
-    def _closed_world(
-        self, predicates: Sequence[Predicate], nodes: Sequence[BaseModel]
-    ) -> list[str]:
+    def _closed_world(self, predicates: Sequence[Predicate], graph: _Graph) -> list[str]:
         lines = [
             f"!exists({self.class_name(cls)}::new)."
             for cls in self.classes
             if not self._is_abstract(cls)
         ]
-        orphans = self._orphans(nodes)
+        orphans = [node.obj for node in self._orphans(graph)]
         for cls in self.classes:
             for feature in self.features[cls]:
                 if feature.is_attribute or not self._canonical(feature):
@@ -1387,19 +1456,20 @@ class Metamodel:
             lines.append(f"default !{quote_id(predicate.name)}({wildcards}).")
         return lines
 
-    def _orphans(self, nodes: Sequence[BaseModel]) -> list[BaseModel]:
+    @staticmethod
+    def _orphans(graph: _Graph) -> list[_Node]:
         """Nodes without a container that certainly exists and certainly contains them."""
-        owned: set[Hashable] = set()
-        for node in nodes:
-            for _, feature, values in self._values(node):
-                if feature.kind not in ("contains", "container"):
+        owned: set[_Node] = set()
+        for node in graph.nodes:
+            for value in node.values:
+                kind = value.feature.kind
+                if kind not in ("contains", "container"):
                     continue
-                for value in values:
-                    owner, child = (node, value) if feature.kind == "contains" else (value, node)
-                    certain = not self._fact_prefix(node, feature, value)
-                    if certain and self._exists(owner) == "true":
-                        owned.add(self.identity(child))
-        return [node for node in nodes if self.identity(node) not in owned]
+                assert value.target is not None
+                owner, child = (node, value.target) if kind == "contains" else (value.target, node)
+                if value.certain and owner.exists == "true":
+                    owned.add(child)
+        return [node for node in graph.nodes if node not in owned]
 
 
 _DEFAULT_OPTIONS = ClassOptions()

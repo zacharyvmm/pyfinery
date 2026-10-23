@@ -82,8 +82,8 @@ def test_quote_id():
 
 def test_generated_names_avoid_explicit_ids():
     taken = Dir(name="filesystem_1")
-    names = metamodel().node_names([taken, Filesystem(root=Dir(name="x"))])
-    assert sorted(names.values()) == ["filesystem_1", "filesystem_2"]
+    graph = metamodel()._graph([taken, Filesystem(root=Dir(name="x"))])
+    assert sorted(n.name for n in graph.nodes) == ["filesystem_1", "filesystem_2", "x"]
 
 
 def test_duplicate_ids_rejected():
