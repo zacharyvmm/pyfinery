@@ -45,462 +45,100 @@ depends on the identity of that class:
 :class:`ClassOptions` configure classes from outside, so generated or
 third-party models can be used unchanged; :class:`Predicate` provides
 relations computed in Python (e.g. regular expressions) to rules.
+
+This module holds :class:`Metamodel` and re-exports the rest, which lives in
+private modules: the options in ``_options``, field descriptions in
+``_features``, the graph of nodes built from objects in ``_instances``,
+Refinery syntax in ``_syntax``, and reports in ``_results``.
 """
 
 from __future__ import annotations
 
-import enum
 import inspect
 import itertools
-import math
-import re
-import types
 from collections import deque
 from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal, Union, get_args, get_origin
+from typing import TYPE_CHECKING, Any, Literal, get_args, get_origin
 
 import annotated_types
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
 
-from .errors import RefineryError, RefineryTimeoutError
-from .models import JsonOutput, JsonOutputFormat, OutputFormats, SourceOutputFormat
+from ._features import (
+    _COLLECTIONS,
+    _DATA_TYPES,
+    ClassLike,
+    EnumLike,
+    Feature,
+    LiteralEnum,
+    UnionClass,
+    _camel,
+    _is_enum_class,
+    _is_model_class,
+    _is_union,
+    _strip_annotated,
+    _strip_optional,
+    _Unsupported,
+)
+from ._instances import _Graph, _Node, _Value
+from ._options import (
+    ClassOptions,
+    Container,
+    Contains,
+    LogicValue,
+    Predicate,
+    Ref,
+    ReferenceKind,
+    RefineryNode,
+)
+from ._results import (
+    Match,
+    ModelValidationError,
+    QueryResult,
+    ValidationReport,
+    Violation,
+    ViolationKind,
+    _declared_predicates,
+    _PreparedQuery,
+    _report,
+    _timeout_hint,
+)
+from ._syntax import (
+    _RESERVED_NODE_NAMES,
+    _attribute_literal,
+    _encodable,
+    _multiplicity,
+    _parse_multiplicity,
+    quote_id,
+)
+from .errors import RefineryTimeoutError
+from .models import JsonOutputFormat, OutputFormats, SourceOutputFormat
 
 if TYPE_CHECKING:
     from .client import AsyncRefinery, Refinery
 
-# ---------------------------------------------------------------------------
-# Field markers
-# ---------------------------------------------------------------------------
-
-ReferenceKind = Literal["refers", "contains", "container"]
-# The values of Refinery's four-valued logic. Facts are asserted, and matches
-# reported, as ``"true"`` or ``"unknown"``; a contradiction is ``"error"``.
-LogicValue = Literal["true", "false", "unknown", "error"]
-
-
-@dataclass(frozen=True, slots=True)
-class Ref:
-    """Refinery-specific options of a reference field, used with ``Annotated``.
-
-    :param opposite: Name of the opposite reference in the target class.
-    :param kind: ``"contains"`` for containment, ``"container"`` for the
-        opposite of a containment reference.
-    :param multiplicity: Overrides the multiplicity inferred from the type,
-        e.g. ``"1..*"``, ``"2"`` or ``(1, None)``.
-    """
-
-    opposite: str | None = None
-    kind: ReferenceKind = "refers"
-    multiplicity: str | tuple[int, int | None] | None = None
-
-
-def Contains(  # noqa: N802 - reads like a type annotation
-    opposite: str | None = None,
-    multiplicity: str | tuple[int, int | None] | None = None,
-) -> Ref:
-    """Marks a containment reference (``contains``)."""
-    return Ref(opposite=opposite, kind="contains", multiplicity=multiplicity)
-
-
-def Container(opposite: str) -> Ref:  # noqa: N802
-    """Marks the container side of a containment reference (``container``)."""
-    return Ref(opposite=opposite, kind="container")
-
-
-@dataclass(frozen=True, slots=True)
-class ClassOptions:
-    """How to map a model class, for classes that can't carry the options themselves.
-
-    Passed to :class:`Metamodel` as ``options={cls: ClassOptions(...)}``; the
-    options of the nearest class in the MRO apply, so options given for a
-    base class also apply to its subclasses.
-
-    :param key: Identity of an instance, e.g. ``lambda s: s.name``. Instances
-        with equal keys (and the same class) are the same node, and fields
-        typed as this class are references rather than containment.
-    :param references: Fields holding the *keys* of other objects rather than
-        the objects, e.g. ``{"depends_on": Service}`` for
-        ``depends_on: list[str]``. The target is a keyed class, a sequence of
-        them, or the name of a union given to :class:`Metamodel`. Keys that
-        match no object (or several) are reported as ``"reference"``
-        violations.
-    :param node_name: Name of the Refinery node of an instance. Defaults to
-        the key, if it is a string or integer, else ``<class>_<n>``.
-    :param exclude: Names of fields (declared in this class) to leave out.
-    :param abstract: Declare the Refinery class ``abstract``.
-    :param exists: The logic value of ``exists`` for an instance: ``"true"``
-        (or ``True``) if it certainly exists, ``"unknown"`` if it only may,
-        e.g. something that happens on some paths only. Used by
-        :meth:`Metamodel.query` only.
-    :param logic_value: The logic value of a field's value, called as
-        ``logic_value(instance, field_name, value)`` for each reference
-        target and attribute value: ``"true"`` (or ``True``) if it certainly
-        holds, ``"unknown"`` if it only may, e.g. a dependency found by a
-        heuristic.
-    """
-
-    key: Callable[[Any], Hashable] | None = None
-    references: Mapping[str, type[BaseModel] | Sequence[type[BaseModel]] | str] | None = None
-    node_name: Callable[[Any], str] | None = None
-    exclude: frozenset[str] | Sequence[str] = ()
-    abstract: bool | None = None
-    exists: Callable[[Any], LogicValue | bool] | None = None
-    logic_value: Callable[[Any, str, Any], LogicValue | bool] | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class Predicate:
-    """A relation computed in Python, usable in the rules of :meth:`Metamodel.validate`
-    and :meth:`Metamodel.query`.
-
-    For what Refinery can't express, such as regular expressions, globs, or
-    relations computed elsewhere. It is declared as ``pred <name>(<types>).``,
-    where each parameter type is a model class or the name of a union, and
-    its facts come from either:
-
-    - ``evaluate``, called on every combination of nodes of the parameter
-      types, returning its logic value: ``True``/``"true"`` (holds),
-      ``"unknown"`` (may hold), or ``False``/``"false"``/``None`` (doesn't
-      hold); or
-    - ``tuples``: the argument tuples that hold, each optionally paired with
-      its logic value, e.g. ``[((a, b), "unknown"), (c, d)]``. Use it when the
-      relation is already known, or when combinations would be too many.
-
-    >>> Predicate("validEmail", (User,), lambda u: EMAIL.fullmatch(u.email) is not None)
-    >>> Predicate("calls", (Service, Service), tuples=traced_calls)
-    """
-
-    name: str
-    parameters: tuple[type[BaseModel] | str, ...]
-    evaluate: Callable[..., LogicValue | bool | None] | None = None
-    tuples: Iterable[Any] | None = None
-
-    def __post_init__(self) -> None:
-        if (self.evaluate is None) == (self.tuples is None):
-            raise ValueError(f"Predicate {self.name!r} needs exactly one of evaluate or tuples")
-        if self.tuples is not None:
-            # Allow one-shot iterables (e.g. generators) to be read once.
-            object.__setattr__(self, "tuples", list(self.tuples))
-
-
-# ---------------------------------------------------------------------------
-# Nodes
-# ---------------------------------------------------------------------------
-
-
-class RefineryNode(BaseModel):
-    """Base class of Refinery classes defined in Python.
-
-    Instances are graph nodes: they compare and hash by identity, and
-    references to other nodes are kept as-is (not copied) by Pydantic.
-
-    Class attributes:
-
-    - ``__abstract__ = True`` declares an abstract class (only subclasses
-      may be instantiated).
-    - ``__node_id__ = "name"`` names nodes after the value of a field
-      instead of generated names like ``dir_1``.
-    """
-
-    model_config = ConfigDict(revalidate_instances="never")
-
-    __abstract__: ClassVar[bool] = False
-    __node_id__: ClassVar[str | None] = None
-
-    def model_post_init(self, context: Any, /) -> None:
-        if type(self).__dict__.get("__abstract__", False):
-            raise TypeError(f"Cannot instantiate abstract Refinery class {type(self).__name__}")
-
-    def __eq__(self, other: object) -> bool:
-        return self is other
-
-    def __hash__(self) -> int:
-        return id(self)
-
-    def __repr_args__(self):
-        # Show referenced nodes by class name only to avoid infinite recursion
-        # through opposite references.
-        for name, value in super().__repr_args__():
-            yield name, _short_repr(value)
-
-
-class _Short:
-    def __init__(self, text: str) -> None:
-        self.text = text
-
-    def __repr__(self) -> str:
-        return self.text
-
-
-def _short_repr(value: Any) -> Any:
-    if isinstance(value, RefineryNode):
-        return _Short(f"<{type(value).__name__} at {id(value):#x}>")
-    if isinstance(value, list | tuple):
-        return type(value)(_short_repr(v) for v in value)
-    if isinstance(value, set | frozenset):
-        return [_short_repr(v) for v in value]
-    return value
-
-
-# ---------------------------------------------------------------------------
-# Refinery syntax helpers
-# ---------------------------------------------------------------------------
-
-_ID = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_KEYWORDS = frozenset(
-    [
-        "abstract",
-        "aggregator",
-        "as",
-        "assert",
-        "atom",
-        "candidate",
-        "class",
-        "concretization",
-        "container",
-        "contains",
-        "datatype",
-        "decision",
-        "declare",
-        "default",
-        "e",
-        "E",
-        "enum",
-        "error",
-        "extends",
-        "false",
-        "import",
-        "is",
-        "may",
-        "module",
-        "multi",
-        "must",
-        "opposite",
-        "partial",
-        "pred",
-        "primitive",
-        "problem",
-        "propagation",
-        "refers",
-        "rule",
-        "scope",
-        "shadow",
-        "subsets",
-        "theory",
-        "true",
-        "unknown",
-        "using",
-    ]
-)
-
-
-def quote_id(name: str) -> str:
-    """Render ``name`` as a Refinery identifier, quoting it if necessary."""
-    if _ID.match(name) and name not in _KEYWORDS:
-        return name
-    escaped = name.replace("\\", "\\\\").replace("'", "\\'")
-    return f"'{escaped}'"
-
-
-def _encodable(text: str) -> bool:
-    """Whether ``text`` can be sent as JSON: not if it holds a lone surrogate."""
-    try:
-        text.encode("utf-8")
-    except UnicodeEncodeError:
-        return False
-    return True
-
-
-def _string_literal(value: str) -> str:
-    escaped = (
-        value.replace("\\", "\\\\")
-        .replace('"', '\\"')
-        .replace("\n", "\\n")
-        .replace("\r", "\\r")
-        .replace("\t", "\\t")
-    )
-    if not _encodable(escaped):
-        # Refinery reads ``\uXXXX`` as a UTF-16 code unit, as Java does.
-        escaped = "".join(c if _encodable(c) else f"\\u{ord(c):04x}" for c in escaped)
-    return f'"{escaped}"'
-
-
-def _attribute_literal(value: Any, data_type: str) -> str:
-    match data_type:
-        case "boolean":
-            return "true" if value else "false"
-        case "int":
-            return str(int(value))
-        case "real":
-            number = float(value)
-            if not math.isfinite(number):
-                raise ValueError(f"Refinery cannot represent the real value {number!r}")
-            text = repr(number)
-            return text if ("." in text or "e" in text) else f"{text}.0"
-        case _:
-            return _string_literal(str(value))
-
-
-def _multiplicity(lower: int, upper: int | None) -> str:
-    if upper == lower:
-        return f"[{lower}]"
-    return f"[{lower}..{'*' if upper is None else upper}]"
-
-
-def _parse_multiplicity(value: str | tuple[int, int | None]) -> tuple[int, int | None]:
-    if isinstance(value, tuple):
-        return value
-    text = value.strip().strip("[]")
-    if not text:
-        return 0, None
-    lower_text, _, upper_text = text.partition("..")
-    lower = int(lower_text)
-    if not upper_text:
-        return lower, lower
-    return lower, None if upper_text.strip() == "*" else int(upper_text)
-
-
-# ---------------------------------------------------------------------------
-# Metamodel
-# ---------------------------------------------------------------------------
-
-_DATA_TYPES: dict[type, str] = {bool: "boolean", int: "int", float: "real", str: "string"}
-
-
-@dataclass(frozen=True, slots=True)
-class UnionClass:
-    """An abstract Refinery superclass standing for a union of model classes."""
-
-    name: str
-    members: tuple[type[BaseModel], ...]
-
-
-@dataclass(frozen=True, slots=True)
-class LiteralEnum:
-    """A Refinery enum standing for a ``Literal`` of strings."""
-
-    name: str
-    values: tuple[str, ...]
-
-
-ClassLike = type[BaseModel] | UnionClass
-EnumLike = type[enum.Enum] | LiteralEnum
-
-
-@dataclass(frozen=True, slots=True)
-class Feature:
-    """A field of a Pydantic model class mapped to Refinery."""
-
-    owner: type[BaseModel]
-    name: str
-    target: ClassLike | EnumLike | str
-    """Model class, union, enum, ``Literal`` enum, or data type name for attributes."""
-    many: bool
-    lower: int
-    upper: int | None
-    kind: ReferenceKind
-    opposite: str | None
-    by_key: bool = False
-    """Whether the field holds keys of the target objects rather than the objects."""
-
-    @property
-    def is_attribute(self) -> bool:
-        return isinstance(self.target, str)
-
-    @property
-    def is_enum(self) -> bool:
-        return isinstance(self.target, LiteralEnum) or _is_enum_class(self.target)
-
-
-def _strip_optional(annotation: Any) -> tuple[Any, bool]:
-    if get_origin(annotation) in (Union, types.UnionType):
-        args = [a for a in get_args(annotation) if a is not type(None)]
-        if len(args) == len(get_args(annotation)) - 1:
-            return (args[0] if len(args) == 1 else Union[tuple(args)]), True  # noqa: UP007
-    return annotation, False
-
-
-def _strip_annotated(annotation: Any) -> tuple[Any, list[Any]]:
-    if get_origin(annotation) is Annotated:
-        base, *metadata = get_args(annotation)
-        inner, more = _strip_annotated(base)
-        return inner, [*metadata, *more]
-    return annotation, []
-
-
-_COLLECTIONS = (list, set, frozenset, tuple, Sequence, Iterable)
-
-
-def _is_enum_class(value: Any) -> bool:
-    return isinstance(value, type) and issubclass(value, enum.Enum)
-
-
-def _is_model_class(value: Any) -> bool:
-    """Pydantic model classes that can be mapped to Refinery classes."""
-    return (
-        isinstance(value, type)
-        and issubclass(value, BaseModel)
-        and value not in (BaseModel, RefineryNode)
-    )
-
-
-def _is_union(annotation: Any) -> bool:
-    return get_origin(annotation) in (Union, types.UnionType)
-
-
-def _camel(name: str) -> str:
-    return "".join(part[:1].upper() + part[1:] for part in name.split("_") if part)
-
-
-class _Unsupported(TypeError):
-    """A field type with no Refinery counterpart (skipped with ``unsupported="skip"``)."""
-
-
-# ---------------------------------------------------------------------------
-# Instance graph
-# ---------------------------------------------------------------------------
-
-
-@dataclass(eq=False, slots=True)
-class _Value:
-    """One value of a field of a node: an attribute or enum value, or a reference."""
-
-    feature: Feature
-    value: Any
-    """The attribute or enum value, the key of a reference by key, or the referenced object."""
-    certain: bool = True
-    """Whether the value certainly holds (``ClassOptions.logic_value``), or only may."""
-    target: _Node | None = None
-    """The node a reference resolves to."""
-    unresolved: Literal["unresolved", "ambiguous"] | None = None
-    """Why a key of a reference by key resolves to no node."""
-
-
-@dataclass(eq=False, slots=True)
-class _Node:
-    """One Refinery node: a Python object, or the instances sharing a key."""
-
-    obj: BaseModel
-    """The object representing the node: of instances sharing a key, the first one reached."""
-    identity: Hashable
-    name: str = ""
-    exists: LogicValue = "true"
-    values: list[_Value] = field(default_factory=list)
-
-
-@dataclass(slots=True)
-class _Graph:
-    """The nodes reachable from some objects, in the order they were reached."""
-
-    nodes: list[_Node]
-    by_identity: dict[Hashable, _Node]
-    identities: dict[int, tuple[BaseModel, Hashable]]
-    """:meth:`Metamodel.identity` by object, keeping the objects alive so that
-    their ``id`` isn't reused."""
-
-    def objects_by_name(self) -> dict[str, BaseModel]:
-        return {node.name: node.obj for node in self.nodes}
+__all__ = [
+    "ClassLike",
+    "ClassOptions",
+    "Container",
+    "Contains",
+    "EnumLike",
+    "Feature",
+    "LiteralEnum",
+    "LogicValue",
+    "Match",
+    "Metamodel",
+    "ModelValidationError",
+    "Predicate",
+    "QueryResult",
+    "Ref",
+    "ReferenceKind",
+    "RefineryNode",
+    "UnionClass",
+    "ValidationReport",
+    "Violation",
+    "ViolationKind",
+    "quote_id",
+]
 
 
 class Metamodel:
@@ -1474,15 +1112,6 @@ class Metamodel:
 
 _DEFAULT_OPTIONS = ClassOptions()
 
-# Builtin symbols a node name shouldn't shadow.
-_RESERVED_NODE_NAMES = frozenset(
-    {
-        *("node", "exists", "equals", "count"),
-        *("contains", "contained", "container"),
-        *("int", "real", "string", "boolean"),
-    }
-)
-
 
 def _add_reference(
     node: BaseModel,
@@ -1511,247 +1140,3 @@ def _add_reference(
     else:
         setattr(node, feature.name, (*current, value))
     return True
-
-
-# ---------------------------------------------------------------------------
-# Validation results
-# ---------------------------------------------------------------------------
-
-ViolationKind = Literal["rule", "multiplicity", "containment", "contradiction", "reference"]
-
-
-@dataclass(frozen=True, slots=True)
-class Violation:
-    """A constraint that the graph violates.
-
-    ``kind`` is ``"rule"`` for user-defined error predicates,
-    ``"multiplicity"`` for reference multiplicities, ``"containment"`` for
-    containment hierarchy errors (missing or multiple containers, cycles),
-    ``"contradiction"`` for facts that contradict the metamodel (e.g., a
-    reference to a node of the wrong class), and ``"reference"`` for keys in
-    reference-by-key fields that match no object (``...::unresolved``, with
-    the key as second name) or several (``...::ambiguous``).
-    """
-
-    kind: ViolationKind
-    constraint: str
-    """Refinery relation that reported the error, e.g. ``Dir::contents::invalidMultiplicity``."""
-    node_names: tuple[str, ...]
-    nodes: tuple[BaseModel | None, ...] = field(compare=False)
-    """The Python objects, or ``None`` for nodes Refinery added (e.g., enum literals)."""
-
-    def __str__(self) -> str:
-        return f"{self.kind}: {self.constraint}({', '.join(self.node_names)})"
-
-
-class ModelValidationError(RefineryError):
-    """Raised by :meth:`ValidationReport.raise_for_violations`."""
-
-    result = "modelValidation"
-
-    def __init__(self, violations: Sequence[Violation]) -> None:
-        lines = [f"{len(violations)} Refinery constraint violation(s):"]
-        lines += [f"  {violation}" for violation in violations]
-        super().__init__("\n".join(lines))
-        self.violations = list(violations)
-
-
-@dataclass(frozen=True, slots=True)
-class ValidationReport:
-    violations: list[Violation]
-    source: str
-    """The problem sent to Refinery (metamodel, rules, and facts)."""
-    model: JsonOutput | None
-    identity: Callable[[BaseModel], Hashable] = field(default=id, repr=False, compare=False)
-
-    @property
-    def ok(self) -> bool:
-        return not self.violations
-
-    def __bool__(self) -> bool:
-        return self.ok
-
-    def for_node(self, node: BaseModel) -> list[Violation]:
-        """Violations that involve ``node`` (or another instance with the same key)."""
-        wanted = self.identity(node)
-        return [
-            v
-            for v in self.violations
-            if any(n is not None and self.identity(n) == wanted for n in v.nodes)
-        ]
-
-    def raise_for_violations(self) -> None:
-        if self.violations:
-            raise ModelValidationError(self.violations)
-
-
-@dataclass(frozen=True, slots=True)
-class Match:
-    """A way a query predicate holds: its arguments, and its logic value.
-
-    ``"true"`` if it certainly holds, ``"unknown"`` if it only may.
-    """
-
-    predicate: str
-    node_names: tuple[str, ...]
-    nodes: tuple[BaseModel | None, ...] = field(compare=False)
-    """The Python objects, or ``None`` for nodes Refinery added (e.g., enum literals)."""
-    logic_value: LogicValue = "true"
-    parameters: tuple[str, ...] = field(default=(), compare=False)
-    """The names of the predicate's parameters, as declared."""
-
-    def __str__(self) -> str:
-        return f"{self.logic_value}: {self.predicate}({', '.join(self.node_names)})"
-
-    @property
-    def arguments(self) -> dict[str, BaseModel | None]:
-        """The Python objects by the name of the parameter they are bound to.
-
-        Empty if Refinery didn't report the parameters' names.
-        """
-        return dict(zip(self.parameters, self.nodes, strict=True)) if self.parameters else {}
-
-    def __getitem__(self, parameter: str) -> BaseModel | None:
-        """The Python object bound to ``parameter``."""
-        try:
-            return self.nodes[self.parameters.index(parameter)]
-        except ValueError:
-            raise KeyError(f"{self.predicate} has no parameter named {parameter!r}") from None
-
-
-@dataclass(frozen=True, slots=True)
-class QueryResult:
-    matches: list[Match]
-    errors: list[Violation]
-    """Constraints of the metamodel the graph violates (as reported by :meth:`Metamodel.validate`),
-    and contradictions between facts."""
-    source: str
-    """The problem sent to Refinery."""
-    model: JsonOutput | None
-
-    def __getitem__(self, predicate: str) -> list[Match]:
-        """The matches of ``predicate``."""
-        return [m for m in self.matches if m.predicate == predicate]
-
-    def true(self, predicate: str | None = None) -> list[Match]:
-        """Matches that are true, that certainly hold (of ``predicate``, or of any)."""
-        return [
-            m for m in self.matches if m.logic_value == "true" and predicate in (None, m.predicate)
-        ]
-
-    def unknown(self, predicate: str | None = None) -> list[Match]:
-        """Matches that are unknown, that only may hold (of ``predicate``, or of any)."""
-        return [
-            m
-            for m in self.matches
-            if m.logic_value == "unknown" and predicate in (None, m.predicate)
-        ]
-
-
-_PRED_DECLARATION = re.compile(r"\bpred\s+([A-Za-z_][A-Za-z0-9_]*|'(?:[^'\\]|\\.)*')")
-
-
-def _declared_predicates(rules: Iterable[str]) -> list[str]:
-    """Names of the predicates declared in ``rules`` (``error`` predicates included)."""
-    names = []
-    for rule in rules:
-        for match in _PRED_DECLARATION.finditer(rule):
-            name = match.group(1)
-            if name.startswith("'"):
-                name = name[1:-1].replace("\\'", "'").replace("\\\\", "\\")
-            if name not in names:
-                names.append(name)
-    return names
-
-
-@dataclass(frozen=True, slots=True)
-class _PreparedQuery:
-    source: str
-    select: list[str]
-    by_name: dict[str, BaseModel]
-    exists: dict[str, LogicValue]
-    identity: Callable[[BaseModel], Hashable]
-    reference_errors: list[Violation]
-
-    def result(self, model: JsonOutput | None) -> QueryResult:
-        if model is None:
-            raise RefineryError("Refinery did not return a model to query")
-        relations = {r.name: r for r in model.relations}
-        matches = []
-        for predicate in self.select:
-            relation = relations.get(predicate)
-            if relation is None:
-                raise ValueError(f"Refinery returned no relation named {predicate!r}")
-            for raw in model.partial_interpretation.get(relation.name, []):
-                value: LogicValue = raw[-1]  # type: ignore[assignment]
-                if value not in ("true", "unknown"):
-                    continue  # errors are reported as contradictions
-                names = tuple(model.nodes[i].name for i in raw[: relation.arity])  # type: ignore[index]
-                if any(name.endswith("::new") for name in names):
-                    continue  # objects that don't exist in a closed world
-                # Refinery doesn't weaken a predicate for the existence of
-                # its arguments (only of nodes quantified in its body).
-                if any(self.exists.get(name) == "unknown" for name in names):
-                    value = "unknown"
-                nodes = tuple(self.by_name.get(name) for name in names)
-                parameters = tuple(relation.parameter_names or ())
-                matches.append(Match(predicate, names, nodes, value, parameters))
-        errors = [
-            error
-            for error in _report(
-                self.source, model, self.by_name, self.identity, self.reference_errors
-            ).violations
-            # Refinery still evaluates constraints on the C::new objects the
-            # closed world says don't exist.
-            if not any(name.endswith("::new") for name in error.node_names)
-        ]
-        return QueryResult(matches, errors, self.source, model)
-
-
-def _timeout_hint(error: RefineryTimeoutError) -> RefineryTimeoutError:
-    return RefineryTimeoutError(
-        f"{error.message}. Validation runs under the server's semantics timeout (1 second by "
-        "default); raise it with RefineryServer(semantics_timeout=<ms>) or the "
-        "REFINERY_SEMANTICS_TIMEOUT_MS environment variable of the server. Refinery computes "
-        "every relation in full, so helper predicates with many tuples (e.g., with three "
-        "parameters) are often what makes it slow, and the upstream Refinery image is much "
-        "slower than pyfinery's default on large graphs; see Performance in pyfinery's README."
-    )
-
-
-_MULTIPLICITY_SUFFIX = "::invalidMultiplicity"
-
-
-def _classify(relation: str, is_error_predicate: bool) -> ViolationKind | None:
-    if relation == "builtin::invalidContainer":
-        return "containment"
-    if relation.startswith("builtin::"):
-        # Consequences of other errors (e.g., builtin::contains for a cycle).
-        return None
-    if is_error_predicate:
-        return "multiplicity" if relation.endswith(_MULTIPLICITY_SUFFIX) else "rule"
-    return "contradiction"
-
-
-def _report(
-    source: str,
-    model: JsonOutput | None,
-    by_name: dict[str, BaseModel],
-    identity: Callable[[BaseModel], Hashable] = id,
-    errors: Sequence[Violation] = (),
-) -> ValidationReport:
-    if model is None:
-        raise RefineryError("Refinery did not return a model to validate")
-    violations = list(errors)
-    for relation in model.relations:
-        is_error_predicate = relation.detail.type == "pred" and relation.detail.kind == "error"
-        kind = _classify(relation.name, is_error_predicate)
-        if kind is None:
-            continue
-        for raw in model.partial_interpretation.get(relation.name, []):
-            if raw[-1] != "error":
-                continue
-            names = tuple(model.nodes[i].name for i in raw[: relation.arity])  # type: ignore[index]
-            nodes = tuple(by_name.get(name) for name in names)
-            violations.append(Violation(kind, relation.name, names, nodes))
-    return ValidationReport(violations, source, model, identity)
