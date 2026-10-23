@@ -466,8 +466,6 @@ class _Unsupported(TypeError):
 class _Value:
     """One value of a field of a node: an attribute or enum value, or a reference."""
 
-    owner: type
-    """The class declaring the field, as in ``Owner::field``."""
     feature: Feature
     value: Any
     """The attribute or enum value, the key of a reference by key, or the referenced object."""
@@ -497,6 +495,9 @@ class _Graph:
 
     nodes: list[_Node]
     by_identity: dict[Hashable, _Node]
+    identities: dict[int, tuple[BaseModel, Hashable]]
+    """:meth:`Metamodel.identity` by object, keeping the objects alive so that
+    their ``id`` isn't reused."""
 
     def objects_by_name(self) -> dict[str, BaseModel]:
         return {node.name: node.obj for node in self.nodes}
@@ -991,7 +992,7 @@ class Metamodel:
         identities: dict[int, tuple[BaseModel, Hashable]] = {}
         reached = self._reach(objects, identities)
         nodes = [node for node, _ in reached]
-        graph = _Graph(nodes, {node.identity: node for node in nodes})
+        graph = _Graph(nodes, {node.identity: node for node in nodes}, identities)
         self._name(graph.nodes)
         index: dict[Hashable, list[_Node]] = {}
         for node in graph.nodes:
@@ -1000,12 +1001,12 @@ class Metamodel:
 
         def node_of(obj: BaseModel) -> _Node:
             # Every followed reference was reached, by the same identity.
-            return graph.by_identity[self._identity(obj, identities)]
+            return graph.by_identity[self._identity(obj, graph.identities)]
 
         for node, fields in reached:
-            for owner, feature, values in fields:
+            for _, feature, values in fields:
                 for value in values:
-                    node.values.append(self._value(node, owner, feature, value, index, node_of))
+                    node.values.append(self._value(node, feature, value, index, node_of))
         if existence:
             for node in graph.nodes:
                 node.exists = self._exists(node.obj)
@@ -1087,7 +1088,6 @@ class Metamodel:
     def _value(
         self,
         node: _Node,
-        owner: type,
         feature: Feature,
         value: Any,
         index: Mapping[Hashable, list[_Node]],
@@ -1099,12 +1099,12 @@ class Metamodel:
             found = [n for n in index.get(value, []) if isinstance(n.obj, members)]  # type: ignore[arg-type]
             if len(found) != 1:
                 problem = "unresolved" if not found else "ambiguous"
-                return _Value(owner, feature, value, unresolved=problem)
-            return _Value(owner, feature, value, self._certain(node.obj, feature, value), found[0])
+                return _Value(feature, value, unresolved=problem)
+            return _Value(feature, value, self._certain(node.obj, feature, value), found[0])
         certain = self._certain(node.obj, feature, value)
         if feature.is_attribute or feature.is_enum:
-            return _Value(owner, feature, value, certain)
-        return _Value(owner, feature, value, certain, node_of(value))
+            return _Value(feature, value, certain)
+        return _Value(feature, value, certain, node_of(value))
 
     def _certain(self, node: BaseModel, feature: Feature, value: Any) -> bool:
         """Whether ``value`` certainly holds, as ``ClassOptions.logic_value`` says."""
@@ -1137,7 +1137,7 @@ class Metamodel:
             lines.append(f"{self.class_name(type(node.obj))}({name}).")
             for value in node.values:
                 feature = value.feature
-                symbol = f"{self.class_name(value.owner)}::{quote_id(feature.name)}"
+                symbol = f"{self.class_name(feature.owner)}::{quote_id(feature.name)}"
                 prefix = "" if value.certain else "?"
                 if feature.by_key:
                     if value.target is not None:  # others are reported by _reference_errors
@@ -1167,7 +1167,7 @@ class Metamodel:
             for value in node.values:
                 if value.unresolved is None:
                     continue
-                feature = f"{self.class_name(value.owner)}::{quote_id(value.feature.name)}"
+                feature = f"{self.class_name(value.feature.owner)}::{quote_id(value.feature.name)}"
                 constraint = f"{feature}::{value.unresolved}"
                 node_names = (node.name, repr(value.value))
                 errors.append(Violation("reference", constraint, node_names, (node.obj, None)))
@@ -1384,7 +1384,7 @@ class Metamodel:
                 prefix = "?" if answer == "unknown" else ""
                 rendered = []
                 for argument, parameter in zip(arguments, predicate.parameters, strict=True):
-                    node = graph.by_identity.get(self.identity(argument))
+                    node = graph.by_identity.get(self._identity(argument, graph.identities))
                     if node is None or not self._matches_type(argument, parameter):
                         raise ValueError(
                             f"Predicate {predicate.name!r}: {argument!r} is not a node of type "

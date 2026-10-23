@@ -9,7 +9,7 @@ import pytest
 from pydantic import BaseModel
 
 import pyfinery as pf
-from pyfinery import ClassOptions, Metamodel
+from pyfinery import ClassOptions, Metamodel, Predicate
 
 from .conftest import sse, sse_response
 from .deployment_models import Database, Deployment, Service, deployment, metamodel
@@ -159,9 +159,15 @@ def test_options_are_evaluated_once():
         },
         unions={"Component": [Service, Database]},
     )
-    mm.query_problem([deployment()])
-    assert len(calls) == len(set(calls))
-    assert sorted(c[1] for c in calls if c[0] == "key") == ["api", "web"]
+    d = deployment()
+    pair = Predicate("pair", (Service, Service), lambda a, b: True)
+    # Another instance with the same key stands for the same node.
+    calls_api = Predicate("callsApi", (Service,), tuples=[d.components[1].model_copy()])
+    mm.query_problem([d], predicates=[pair, calls_api])
+    # Once per object: web, api, and the copy of api.
+    assert sorted(c[1] for c in calls if c[0] == "key") == ["api", "api", "web"]
+    values = [c for c in calls if c[0] != "key"]
+    assert len(values) == len(set(values))
     assert sorted(c[1] for c in calls if c[0] == "exists") == ["api", "web"]
     # Unresolved keys aren't asserted, so their logic value isn't asked for.
     assert ("logic_value", "api", "depends_on", "db") in calls
