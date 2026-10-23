@@ -103,7 +103,7 @@ def test_node_name_and_abstract_options():
         unsupported="skip",
     )
     assert "abstract class FileOrEndpoint." in mm.source  # default union name
-    names = set(mm.node_names(mm.collect([graph()])).values())
+    names = {n.name for n in mm._graph([graph()]).nodes}
     assert {"'file:.ssh/id_rsa'", "'https://example.com'"} <= names
 
 
