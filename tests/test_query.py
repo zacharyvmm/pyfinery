@@ -11,7 +11,7 @@ import pytest
 
 import pyfinery as pf
 from pyfinery import ClassOptions, Metamodel, Predicate
-from pyfinery.graph import _declared_predicates
+from pyfinery._results import _declared_predicates
 
 from .conftest import Recorder, sse, sse_response
 from .generic_models import OPTIONS, Effect, Endpoint, File, Graph, Path, graph, secret
