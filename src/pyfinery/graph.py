@@ -48,20 +48,20 @@ relations computed in Python (e.g. regular expressions) to rules.
 
 This module holds :class:`Metamodel` and re-exports the rest, which lives in
 private modules: the options in ``_options``, the types and fields in
-``_schema``, the graph of nodes built from objects in ``_instances``,
-Refinery syntax in ``_syntax``, and reports in ``_results``.
+``_schema``, the graph of nodes built from objects in ``_instances``, the
+problems sent to Refinery in ``_render``, Refinery syntax in ``_syntax``, and
+reports in ``_results``.
 """
 
 from __future__ import annotations
 
-import itertools
-from collections.abc import Hashable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Hashable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel
 
-from ._instances import Graph, Node, build_graph, collect, link_opposites
+from ._instances import build_graph, collect, link_opposites
 from ._options import (
     ClassOptions,
     Container,
@@ -71,6 +71,12 @@ from ._options import (
     Ref,
     ReferenceKind,
     RefineryNode,
+)
+from ._render import (
+    render_facts,
+    render_metamodel,
+    render_query_problem,
+    render_validation_problem,
 )
 from ._results import (
     Match,
@@ -92,11 +98,8 @@ from ._schema import (
     check,
     class_name,
     discover,
-    is_model_class,
 )
 from ._syntax import (
-    attribute_literal,
-    multiplicity,
     quote_id,
 )
 from .errors import RefineryTimeoutError
@@ -164,7 +167,7 @@ class Metamodel:
         self.rules = list(rules)
         self.schema = discover(classes, options, unions, unsupported)
         check(self.schema)
-        self.source = self._render()
+        self.source = render_metamodel(self.schema, self.rules)
 
     @property
     def options(self) -> dict[type, ClassOptions]:
@@ -191,59 +194,10 @@ class Metamodel:
         """Fields left out of the metamodel: ``(class, field, reason)``."""
         return self.schema.skipped
 
-    # -- rendering ----------------------------------------------------------
-
     @staticmethod
     def class_name(node_class: type | UnionClass | LiteralEnum) -> str:
         """The Refinery name of a class, union, or enum."""
         return class_name(node_class)
-
-    def _literal(self, enum_type: EnumLike, value: Any) -> str:
-        """The Refinery name of an enum value, e.g. ``Color::red``."""
-        member = value if isinstance(enum_type, LiteralEnum) else value.name
-        return f"{class_name(enum_type)}::{quote_id(member)}"
-
-    def _render_feature(self, feature: Feature) -> str:
-        name = quote_id(feature.name)
-        if feature.is_attribute:
-            return f"{feature.target} {name}"
-        target = class_name(feature.target)  # type: ignore[arg-type]
-        opposite = f" opposite {quote_id(feature.opposite)}" if feature.opposite else ""
-        if feature.kind == "container":
-            return f"container {target} {name}{opposite}"
-        prefix = "contains " if feature.kind == "contains" else ""
-        return f"{prefix}{target}{multiplicity(feature.lower, feature.upper)} {name}{opposite}"
-
-    def _render(self) -> str:
-        lines: list[str] = []
-        for enum_type in self.schema.enums:
-            if isinstance(enum_type, LiteralEnum):
-                members = enum_type.values
-            else:
-                members = tuple(member.name for member in enum_type)
-            literals = ", ".join(quote_id(member) for member in members)
-            lines.append(f"enum {class_name(enum_type)} {{ {literals} }}")
-        for union in self.schema.unions:
-            lines.append(f"abstract class {class_name(union)}.")
-        for cls in self.schema.classes:
-            header = f"class {class_name(cls)}"
-            if self.schema.is_abstract(cls):
-                header = f"abstract {header}"
-            supers: list[type | UnionClass] = [b for b in cls.__bases__ if is_model_class(b)]
-            supers += [u for u in self.schema.unions if cls in u.members]
-            if supers:
-                header += " extends " + ", ".join(class_name(b) for b in supers)
-            features = self.schema.features[cls]
-            if not features:
-                lines.append(f"{header}.")
-                continue
-            lines.append(f"{header} {{")
-            lines.extend(f"    {self._render_feature(f)}" for f in features)
-            lines.append("}")
-        if self.rules:
-            lines.append("")
-            lines.extend(self.rules)
-        return "\n".join(lines) + "\n"
 
     # -- instances ----------------------------------------------------------
 
@@ -278,47 +232,9 @@ class Metamodel:
         """
         return link_opposites(self.schema, objects)
 
-    # -- rendering instances ------------------------------------------------
-
-    def _facts(self, graph: Graph, *, canonical_opposites: bool = False) -> str:
-        """Assertions describing the nodes of ``graph`` and their values.
-
-        With ``canonical_opposites``, a reference on one side of an opposite
-        pair is written as the reverse reference on the other side, so that
-        closed-world defaults on that side don't contradict it.
-        """
-        lines = []
-        for node in graph.nodes:
-            name = node.name
-            lines.append(f"{class_name(type(node.obj))}({name}).")
-            for value in node.values:
-                feature = value.feature
-                symbol = f"{class_name(feature.owner)}::{quote_id(feature.name)}"
-                prefix = "" if value.certain else "?"
-                if feature.by_key:
-                    if value.target is not None:  # others are reported by _reference_errors
-                        lines.append(f"{prefix}{symbol}({name}, {value.target.name}).")
-                elif canonical_opposites and not self._canonical(feature):
-                    assert value.target is not None
-                    other = self.schema.find_feature(type(value.target.obj), feature.opposite)  # type: ignore[arg-type]
-                    assert other is not None
-                    reverse = f"{class_name(other.owner)}::{quote_id(other.name)}"
-                    lines.append(f"{prefix}{reverse}({value.target.name}, {name}).")
-                elif feature.is_attribute:
-                    if value.certain:  # an uncertain attribute value is simply unknown
-                        literal = attribute_literal(value.value, feature.target)  # type: ignore[arg-type]
-                        lines.append(f"{symbol}({name}): {literal}.")
-                elif feature.is_enum:
-                    literal = self._literal(feature.target, value.value)  # type: ignore[arg-type]
-                    lines.append(f"{prefix}{symbol}({name}, {literal}).")
-                else:
-                    assert value.target is not None
-                    lines.append(f"{prefix}{symbol}({name}, {value.target.name}).")
-        return "\n".join(lines) + "\n"
-
     def problem(self, objects: Iterable[BaseModel]) -> str:
         """The metamodel, rules, and the facts of the graph reachable from ``objects``."""
-        return self.source + "\n" + self._facts(build_graph(self.schema, objects))
+        return self.source + "\n" + render_facts(self.schema, build_graph(self.schema, objects))
 
     # -- validation ---------------------------------------------------------
 
@@ -349,7 +265,7 @@ class Metamodel:
         """
         predicates = list(predicates)
         graph = build_graph(self.schema, objects)
-        source = self._validation_problem(graph, rules, predicates)
+        source = render_validation_problem(self.schema, self.source, graph, rules, predicates)
         with _explain_timeout():
             result = refinery.concretize(source, format=_JSON_ONLY)
         return read_violations(result.json_, graph, source)
@@ -365,18 +281,10 @@ class Metamodel:
         """Asynchronous variant of :meth:`validate`."""
         predicates = list(predicates)
         graph = build_graph(self.schema, objects)
-        source = self._validation_problem(graph, rules, predicates)
+        source = render_validation_problem(self.schema, self.source, graph, rules, predicates)
         with _explain_timeout():
             result = await refinery.concretize(source, format=_JSON_ONLY)
         return read_violations(result.json_, graph, source)
-
-    def _validation_problem(
-        self, graph: Graph, rules: Iterable[str], predicates: Sequence[Predicate]
-    ) -> str:
-        lines = [self.source, *rules, *(self._declare_predicate(p) for p in predicates), ""]
-        lines.append(self._facts(graph))
-        lines += self._predicate_facts(predicates, graph)
-        return "\n".join(lines) + "\n"
 
     # -- queries ------------------------------------------------------------
 
@@ -402,7 +310,7 @@ class Metamodel:
         """
         rules, predicates = list(rules), list(predicates)
         graph = build_graph(self.schema, objects, existence=True)
-        source = self._query_problem(graph, rules, predicates)
+        source = render_query_problem(self.schema, self.source, graph, rules, predicates)
         selected = list(select) if select is not None else declared_predicates(rules)
         with _explain_timeout():
             result = refinery.semantics(source, format=_JSON_ONLY)
@@ -420,7 +328,7 @@ class Metamodel:
         """Asynchronous variant of :meth:`query`."""
         rules, predicates = list(rules), list(predicates)
         graph = build_graph(self.schema, objects, existence=True)
-        source = self._query_problem(graph, rules, predicates)
+        source = render_query_problem(self.schema, self.source, graph, rules, predicates)
         selected = list(select) if select is not None else declared_predicates(rules)
         with _explain_timeout():
             result = await refinery.semantics(source, format=_JSON_ONLY)
@@ -436,148 +344,7 @@ class Metamodel:
         """The problem :meth:`query` would send, e.g. to debug it in the web editor."""
         rules, predicates = list(rules), list(predicates)
         graph = build_graph(self.schema, objects, existence=True)
-        return self._query_problem(graph, rules, predicates)
-
-    def _query_problem(
-        self, graph: Graph, rules: Iterable[str], predicates: Sequence[Predicate]
-    ) -> str:
-        lines = [self.source, *rules, ""]
-        lines += [self._declare_predicate(p) for p in predicates]
-        lines.append("")
-        lines += self._closed_world(predicates, graph)
-        lines.append("")
-        lines.append(self._facts(graph, canonical_opposites=True))
-        for node in graph.nodes:
-            if node.exists == "unknown":
-                lines.append(f"?exists({node.name}).")
-            subclasses = self.schema.subclasses(type(node.obj))
-            lines += [f"!{class_name(sub)}({node.name})." for sub in subclasses]
-        lines += self._predicate_facts(predicates, graph)
-        return "\n".join(lines) + "\n"
-
-    def _parameter_type(self, parameter: type[BaseModel] | str) -> str:
-        if isinstance(parameter, str):
-            if self.schema.union_named(parameter) is None:
-                raise ValueError(f"No union named {parameter!r} in this metamodel")
-            return quote_id(parameter)
-        if parameter not in self.schema.features:
-            raise ValueError(f"{parameter.__name__} is not part of this metamodel")
-        return class_name(parameter)
-
-    def _declare_predicate(self, predicate: Predicate) -> str:
-        parameters = ", ".join(
-            f"{self._parameter_type(t)} p{i}" for i, t in enumerate(predicate.parameters)
-        )
-        return f"pred {quote_id(predicate.name)}({parameters})."
-
-    def _matches_type(self, node: BaseModel, parameter: type[BaseModel] | str) -> bool:
-        if isinstance(parameter, str):
-            union = self.schema.union_named(parameter)
-            assert union is not None  # checked by _parameter_type
-            return isinstance(node, union.members)
-        return isinstance(node, parameter)
-
-    def _predicate_facts(self, predicates: Sequence[Predicate], graph: Graph) -> list[str]:
-        lines = []
-        objects = [node.obj for node in graph.nodes]
-        for predicate in predicates:
-            for arguments, answer in self._predicate_tuples(predicate, objects):
-                if answer in (None, False, "false"):
-                    continue
-                if answer not in (True, "true", "unknown"):
-                    raise ValueError(
-                        f"Predicate {predicate.name!r} returned {answer!r}; expected True, "
-                        "False, None, 'true', 'false' or 'unknown'"
-                    )
-                prefix = "?" if answer == "unknown" else ""
-                rendered = []
-                for argument, parameter in zip(arguments, predicate.parameters, strict=True):
-                    node = graph.node_of(argument)
-                    if node is None or not self._matches_type(argument, parameter):
-                        raise ValueError(
-                            f"Predicate {predicate.name!r}: {argument!r} is not a node of type "
-                            f"{getattr(parameter, '__name__', parameter)} in this graph"
-                        )
-                    rendered.append(node.name)
-                lines.append(f"{prefix}{quote_id(predicate.name)}({', '.join(rendered)}).")
-        return lines
-
-    def _predicate_tuples(
-        self, predicate: Predicate, nodes: Sequence[BaseModel]
-    ) -> Iterator[tuple[tuple[BaseModel, ...], Any]]:
-        arity = len(predicate.parameters)
-        if predicate.evaluate is not None:
-            domains = [[n for n in nodes if self._matches_type(n, t)] for t in predicate.parameters]
-            for arguments in itertools.product(*domains):
-                yield arguments, predicate.evaluate(*arguments)
-            return
-        for item in predicate.tuples or ():
-            # ((a, b), "unknown") or (a, b); for arity 1, ((a,), "unknown"), (a,) or a.
-            if (
-                isinstance(item, tuple)
-                and len(item) == 2
-                and isinstance(item[0], tuple)
-                and (arity != 2 or isinstance(item[1], str | bool))
-            ):
-                arguments, answer = item
-            else:
-                arguments, answer = (item if isinstance(item, tuple) else (item,)), True
-            if len(arguments) != arity:
-                raise ValueError(
-                    f"Predicate {predicate.name!r} takes {arity} argument(s), got {arguments!r}"
-                )
-            yield arguments, answer
-
-    def _canonical(self, feature: Feature) -> bool:
-        """Of an opposite pair, the side facts and closed-world defaults are written on."""
-        if feature.opposite is None:
-            return True
-        if feature.kind != "refers":
-            return feature.kind == "contains"
-        other = self.schema.find_feature(feature.target, feature.opposite)  # type: ignore[arg-type]
-        assert other is not None
-        return (feature.owner.__name__, feature.name) <= (other.owner.__name__, other.name)
-
-    def _closed_world(self, predicates: Sequence[Predicate], graph: Graph) -> list[str]:
-        lines = [
-            f"!exists({class_name(cls)}::new)."
-            for cls in self.schema.classes
-            if not self.schema.is_abstract(cls)
-        ]
-        orphans = [node.obj for node in self._orphans(graph)]
-        for cls in self.schema.classes:
-            for feature in self.schema.features[cls]:
-                if feature.is_attribute or not self._canonical(feature):
-                    continue
-                if feature.kind == "contains":
-                    target: ClassLike = feature.target  # type: ignore[assignment]
-                    members = target.members if isinstance(target, UnionClass) else (target,)
-                    if not any(isinstance(node, members) for node in orphans):
-                        # Refinery already rules out every other container of
-                        # a node that certainly has one. A default would only
-                        # cost time: Refinery refines it for every node pair.
-                        continue
-                symbol = f"{class_name(cls)}::{quote_id(feature.name)}"
-                lines.append(f"default !{symbol}(*, *).")
-        for predicate in predicates:
-            wildcards = ", ".join("*" for _ in predicate.parameters)
-            lines.append(f"default !{quote_id(predicate.name)}({wildcards}).")
-        return lines
-
-    @staticmethod
-    def _orphans(graph: Graph) -> list[Node]:
-        """Nodes without a container that certainly exists and certainly contains them."""
-        owned: set[Node] = set()
-        for node in graph.nodes:
-            for value in node.values:
-                kind = value.feature.kind
-                if kind not in ("contains", "container"):
-                    continue
-                assert value.target is not None
-                owner, child = (node, value.target) if kind == "contains" else (value.target, node)
-                if value.certain and owner.exists == "true":
-                    owned.add(child)
-        return [node for node in graph.nodes if node not in owned]
+        return render_query_problem(self.schema, self.source, graph, rules, predicates)
 
 
 _JSON_ONLY = OutputFormats(json_=JsonOutputFormat(), source=SourceOutputFormat(enabled=False))
