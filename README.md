@@ -249,6 +249,7 @@ print(result.json_.true_tuples("contents"))   # [('dir1', 'file1'), ...]
 | `stream_generate(...)`, `stream_generate_many(...)` | an iterator of status updates, then the result |
 
 - **Inputs:** problems are source strings or `pathlib.Path`s. Without a base URL, the client uses `$REFINERY_API_BASE`, or `http://localhost:8888/api/v1`.
+- **Shared client:** `Refinery.shared(timeout=..., **server_options)` returns the same client to every caller in the process: of the server at `$REFINERY_API_BASE` if it is set, or else of a `RefineryServer(**server_options)` started the first time it is needed and stopped when the process exits. The first call's arguments win.
 - **Async:** `AsyncRefinery` has the same methods as coroutines and async iterators. `RefineryChat` and `AsyncRefineryChat` wrap Refinery's text-to-model chat service.
 - **Scopes** are strings (`"node=10..20"`, `"File=5"`, `"Dir=2..*"`, `"Dir+=1..3"`) or `Scope(...)` objects.
 - **Output:** `OutputFormats` turns the JSON or source output off, or keeps non-existing objects and shadow predicates. `JsonOutput.tuples(relation)` and `true_tuples(relation)` read a model with node names resolved.

@@ -12,8 +12,10 @@ https://github.com/graphs4value/refinery/tree/main/subprojects/client-js/src
 
 from __future__ import annotations
 
+import atexit
 import inspect
 import os
+import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping
 from typing import Any, Self
 
@@ -53,6 +55,9 @@ DEFAULT_BASE_URL = "http://localhost:8888/api/v1"
 """API base of a local server, e.g., ``docker run -p 8888:8888 ghcr.io/zacharyvmm/refinery``."""
 
 BASE_URL_ENV = "REFINERY_API_BASE"
+
+_shared_lock = threading.Lock()
+_shared: Refinery | None = None
 
 type ScopeLike = Scope | str
 type StatusCallback[S] = Callable[[S], object]
@@ -238,6 +243,39 @@ class Refinery(_SyncClient):
             timeout=timeout,
             http_client=http_client,
         )
+
+    @classmethod
+    def shared(
+        cls,
+        *,
+        timeout: httpx.Timeout | float | None = DEFAULT_TIMEOUT,
+        **server_options: Any,
+    ) -> Refinery:
+        """A client shared by the whole process, for code that just needs a server.
+
+        >>> Refinery.shared(semantics_timeout=600_000, timeout=None).semantics(source)
+
+        The server at ``REFINERY_API_BASE`` if it is set; otherwise a
+        :class:`~pyfinery.RefineryServer` started with ``server_options`` (e.g.,
+        ``image=...``, ``semantics_timeout=...``) the first time it is needed,
+        and stopped when the process exits. Set ``REFINERY_API_BASE`` to have
+        processes, such as parallel test workers, share one server.
+
+        Every call returns the same client, from any thread. The first call's
+        arguments win: later calls ignore theirs. Don't close the client.
+        """
+        global _shared
+        with _shared_lock:
+            if _shared is None:
+                base_url = os.environ.get(BASE_URL_ENV)
+                if not base_url:
+                    from .server import RefineryServer  # which imports this module
+
+                    server = RefineryServer(**server_options).start()
+                    atexit.register(server.stop)
+                    base_url = server.base_url
+                _shared = Refinery(base_url, timeout=timeout)
+            return _shared
 
     def stream_generate(
         self,
