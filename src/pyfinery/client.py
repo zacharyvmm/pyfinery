@@ -24,12 +24,11 @@ from pydantic import BaseModel
 
 from ._protocol import (
     DEFAULT_TIMEOUT,
+    Endpoint,
+    EventParser,
     ProblemSource,
-    SSEDecoder,
-    StatusParser,
     error_from_response,
     normalize_base_url,
-    parse_event_data,
     parse_generate_many_status,
     read_source,
     unexpected_end_of_stream,
@@ -58,6 +57,12 @@ BASE_URL_ENV = "REFINERY_API_BASE"
 
 _shared_lock = threading.Lock()
 _shared: Refinery | None = None
+
+_GENERATE = Endpoint("generate", GenerateResult, GenerateStatus.model_validate)
+_GENERATE_MANY = Endpoint("generateMany", GenerateManyResult, parse_generate_many_status)
+_SEMANTICS = Endpoint("semantics", SemanticsResult)
+_CONCRETIZE = Endpoint("concretize", ConcretizationResult)
+_TEXT_TO_MODEL = Endpoint("textToModel", TextToModelResult, ChatMessage.model_validate)
 
 type ScopeLike = Scope | str
 type StatusCallback[S] = Callable[[S], object]
@@ -163,26 +168,21 @@ class _SyncClient(_BaseClient):
 
     def _stream(
         self,
-        endpoint: str,
+        endpoint: Endpoint,
         request: BaseModel,
-        success_model: type[BaseModel],
-        parse_status: StatusParser | None,
     ) -> Iterator[Any]:
         """Yield status updates followed by the final result.
 
         Closing the iterator early disconnects, which cancels the server-side task.
         """
         result: Any = None
-        with self._http.stream(**self._request_args(endpoint, request)) as response:
+        with self._http.stream(**self._request_args(endpoint.path, request)) as response:
             if not response.is_success:
                 response.read()
                 raise error_from_response(response)
-            decoder = SSEDecoder()
+            events = EventParser(endpoint)
             for line in response.iter_lines():
-                data = decoder.feed(line)
-                if data is None:
-                    continue
-                event = parse_event_data(data, success_model, parse_status)
+                event = events.feed(line)
                 if event is None:
                     continue
                 if event.kind == "success":
@@ -190,11 +190,7 @@ class _SyncClient(_BaseClient):
                     break
                 yield event.value
             else:
-                data = decoder.flush()
-                if data is not None:
-                    event = parse_event_data(data, success_model, parse_status)
-                    if event is not None and event.kind == "success":
-                        result = event.value
+                result = events.finish()
         # Yield the result only after the connection was released.
         if result is None:
             raise unexpected_end_of_stream()
@@ -287,7 +283,7 @@ class Refinery(_SyncClient):
     ) -> Iterator[GenerateStatus | GenerateResult]:
         """Generate a model, yielding progress messages and finally the model."""
         request = _generate_request(problem, scopes, random_seed, format)
-        return self._stream("generate", request, GenerateResult, GenerateStatus.model_validate)
+        return self._stream(_GENERATE, request)
 
     def generate(
         self,
@@ -326,7 +322,7 @@ class Refinery(_SyncClient):
         is left empty when streaming).
         """
         request = _generate_many_request(problem, count, scopes, random_seed, format)
-        return self._stream("generateMany", request, GenerateManyResult, parse_generate_many_status)
+        return self._stream(_GENERATE_MANY, request)
 
     def generate_many(
         self,
@@ -361,14 +357,14 @@ class Refinery(_SyncClient):
     ) -> SemanticsResult:
         """Compute the partial model described by the problem, without generation."""
         request = _semantics_request(problem, format)
-        return self._run(self._stream("semantics", request, SemanticsResult, None), None)
+        return self._run(self._stream(_SEMANTICS, request), None)
 
     def concretize(
         self, problem: ProblemSource, *, format: OutputFormats | None = None
     ) -> ConcretizationResult:
         """Turn the partial model into a concrete one by resolving unknowns to false."""
         request = _semantics_request(problem, format)
-        return self._run(self._stream("concretize", request, ConcretizationResult, None), None)
+        return self._run(self._stream(_CONCRETIZE, request), None)
 
 
 class RefineryChat(_SyncClient):
@@ -382,7 +378,7 @@ class RefineryChat(_SyncClient):
         format: OutputFormats | None = None,
     ) -> Iterator[ChatMessage | TextToModelResult]:
         request = _text_to_model_request(metamodel, text, format)
-        return self._stream("textToModel", request, TextToModelResult, ChatMessage.model_validate)
+        return self._stream(_TEXT_TO_MODEL, request)
 
     def text_to_model(
         self,
@@ -426,22 +422,17 @@ class _AsyncClient(_BaseClient):
 
     async def _stream(
         self,
-        endpoint: str,
+        endpoint: Endpoint,
         request: BaseModel,
-        success_model: type[BaseModel],
-        parse_status: StatusParser | None,
     ) -> AsyncIterator[Any]:
         result: Any = None
-        async with self._http.stream(**self._request_args(endpoint, request)) as response:
+        async with self._http.stream(**self._request_args(endpoint.path, request)) as response:
             if not response.is_success:
                 await response.aread()
                 raise error_from_response(response)
-            decoder = SSEDecoder()
+            events = EventParser(endpoint)
             async for line in response.aiter_lines():
-                data = decoder.feed(line)
-                if data is None:
-                    continue
-                event = parse_event_data(data, success_model, parse_status)
+                event = events.feed(line)
                 if event is None:
                     continue
                 if event.kind == "success":
@@ -449,11 +440,7 @@ class _AsyncClient(_BaseClient):
                     break
                 yield event.value
             else:
-                data = decoder.flush()
-                if data is not None:
-                    event = parse_event_data(data, success_model, parse_status)
-                    if event is not None and event.kind == "success":
-                        result = event.value
+                result = events.finish()
         if result is None:
             raise unexpected_end_of_stream()
         yield result
@@ -505,7 +492,7 @@ class AsyncRefinery(_AsyncClient):
         format: OutputFormats | None = None,
     ) -> AsyncIterator[GenerateStatus | GenerateResult]:
         request = _generate_request(problem, scopes, random_seed, format)
-        return self._stream("generate", request, GenerateResult, GenerateStatus.model_validate)
+        return self._stream(_GENERATE, request)
 
     async def generate(
         self,
@@ -531,7 +518,7 @@ class AsyncRefinery(_AsyncClient):
         format: OutputFormats | None = None,
     ) -> AsyncIterator[GenerateStatus | GenerateResult | GenerateManyResult]:
         request = _generate_many_request(problem, count, scopes, random_seed, format)
-        return self._stream("generateMany", request, GenerateManyResult, parse_generate_many_status)
+        return self._stream(_GENERATE_MANY, request)
 
     async def generate_many(
         self,
@@ -562,15 +549,13 @@ class AsyncRefinery(_AsyncClient):
         self, problem: ProblemSource, *, format: OutputFormats | None = None
     ) -> SemanticsResult:
         request = _semantics_request(problem, format)
-        return await self._run(self._stream("semantics", request, SemanticsResult, None), None)
+        return await self._run(self._stream(_SEMANTICS, request), None)
 
     async def concretize(
         self, problem: ProblemSource, *, format: OutputFormats | None = None
     ) -> ConcretizationResult:
         request = _semantics_request(problem, format)
-        return await self._run(
-            self._stream("concretize", request, ConcretizationResult, None), None
-        )
+        return await self._run(self._stream(_CONCRETIZE, request), None)
 
 
 class AsyncRefineryChat(_AsyncClient):
@@ -584,7 +569,7 @@ class AsyncRefineryChat(_AsyncClient):
         format: OutputFormats | None = None,
     ) -> AsyncIterator[ChatMessage | TextToModelResult]:
         request = _text_to_model_request(metamodel, text, format)
-        return self._stream("textToModel", request, TextToModelResult, ChatMessage.model_validate)
+        return self._stream(_TEXT_TO_MODEL, request)
 
     async def text_to_model(
         self,
