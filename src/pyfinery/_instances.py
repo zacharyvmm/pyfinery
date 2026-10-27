@@ -14,8 +14,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
-from ._features import Feature
 from ._options import LogicValue
+from ._schema import Feature
 
 
 @dataclass(eq=False, slots=True)
