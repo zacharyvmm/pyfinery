@@ -11,7 +11,7 @@ import pytest
 
 import pyfinery as pf
 from pyfinery import ClassOptions, Metamodel, Predicate
-from pyfinery._results import _declared_predicates
+from pyfinery._results import declared_predicates
 
 from .conftest import Recorder, sse, sse_response
 from .generic_models import OPTIONS, Effect, Endpoint, File, Graph, Path, graph, secret
@@ -59,9 +59,9 @@ def uncertain_graph() -> Graph:
     return g
 
 
-def test_declared_predicates():
+def testdeclared_predicates():
     rules = [*RULES, "error pred 'odd name'(File f) <-> !secretFile(f).", "pred writes(a, b)."]
-    assert _declared_predicates(rules) == ["writes", "exfiltration", "removes", "odd name"]
+    assert declared_predicates(rules) == ["writes", "exfiltration", "removes", "odd name"]
 
 
 def test_query_problem_closes_the_world():
@@ -251,3 +251,53 @@ def test_aquery():
             )
 
     assert len(asyncio.run(main()).matches) == 4
+
+
+def test_inputs_are_read_in_order():
+    # Generators may depend on each other, e.g. predicates that load objects,
+    # so the order they are read in, and the request is sent, is part of the API.
+    order: list[str] = []
+
+    def read(name, items):
+        order.append(name)
+        yield from items
+
+    def respond(request):
+        order.append("request")
+        return sse_response(sse({"result": "success", "value": {"issues": [], "json": MODEL}}))
+
+    client = pf.Refinery(
+        "http://x", http_client=httpx.Client(transport=httpx.MockTransport(respond))
+    )
+    mm = metamodel()
+
+    def query(**kwargs):
+        order.clear()
+        mm.query(
+            read("objects", [uncertain_graph()]),
+            client,
+            read("rules", RULES),
+            predicates=read("predicates", PREDICATES),
+            **kwargs,
+        )
+        return order
+
+    assert query() == ["rules", "predicates", "objects", "request"]
+    assert query(select=read("select", ["writes"])) == [
+        *("rules", "predicates", "objects", "select", "request")
+    ]
+    order.clear()
+    mm.query_problem(
+        read("objects", [uncertain_graph()]),
+        read("rules", RULES),
+        predicates=read("predicates", PREDICATES),
+    )
+    assert order == ["rules", "predicates", "objects"]
+    order.clear()
+    mm.validate(
+        read("objects", [uncertain_graph()]),
+        client,
+        read("rules", RULES),
+        predicates=read("predicates", PREDICATES),
+    )
+    assert order == ["predicates", "objects", "rules", "request"]

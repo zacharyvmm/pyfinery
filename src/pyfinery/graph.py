@@ -58,6 +58,7 @@ import inspect
 import itertools
 from collections import deque
 from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Literal, get_args, get_origin
 
 import annotated_types
@@ -79,7 +80,7 @@ from ._features import (
     _strip_optional,
     _Unsupported,
 )
-from ._instances import _Graph, _Node, _Value
+from ._instances import Graph, Node, Value
 from ._options import (
     ClassOptions,
     Container,
@@ -97,10 +98,9 @@ from ._results import (
     ValidationReport,
     Violation,
     ViolationKind,
-    _declared_predicates,
-    _PreparedQuery,
-    _report,
-    _timeout_hint,
+    declared_predicates,
+    read_matches,
+    read_violations,
 )
 from ._syntax import (
     _RESERVED_NODE_NAMES,
@@ -619,7 +619,7 @@ class Metamodel:
 
     # -- the instance graph -------------------------------------------------
 
-    def _graph(self, objects: Iterable[BaseModel], *, existence: bool = False) -> _Graph:
+    def _graph(self, objects: Iterable[BaseModel], *, existence: bool = False) -> Graph:
         """The Refinery nodes of the graph reachable from ``objects``, with their values.
 
         The ``key``, ``node_name``, ``logic_value`` and (with ``existence``)
@@ -630,14 +630,14 @@ class Metamodel:
         identities: dict[int, tuple[BaseModel, Hashable]] = {}
         reached = self._reach(objects, identities)
         nodes = [node for node, _ in reached]
-        graph = _Graph(nodes, {node.identity: node for node in nodes}, identities)
+        graph = Graph(nodes, {node.identity: node for node in nodes}, identities, self.identity)
         self._name(graph.nodes)
-        index: dict[Hashable, list[_Node]] = {}
+        index: dict[Hashable, list[Node]] = {}
         for node in graph.nodes:
             if self._options(type(node.obj)).key is not None:
                 index.setdefault(node.identity[1], []).append(node)  # type: ignore[index]
 
-        def node_of(obj: BaseModel) -> _Node:
+        def node_of(obj: BaseModel) -> Node:
             # Every followed reference was reached, by the same identity.
             return graph.by_identity[self._identity(obj, graph.identities)]
 
@@ -652,7 +652,7 @@ class Metamodel:
 
     def _reach(
         self, objects: Iterable[BaseModel], identities: dict[int, tuple[BaseModel, Hashable]]
-    ) -> list[tuple[_Node, list[tuple[type, Feature, list[Any]]]]]:
+    ) -> list[tuple[Node, list[tuple[type, Feature, list[Any]]]]]:
         """The nodes reachable from ``objects``, each with the values of its fields.
 
         ``identities`` memoizes :meth:`identity` by object, keeping the
@@ -670,7 +670,7 @@ class Metamodel:
                 continue
             seen.add(identity)
             fields = list(self._values(obj))
-            reached.append((_Node(obj, identity), fields))
+            reached.append((Node(obj, identity), fields))
             for _, feature, values in fields:
                 if not (feature.is_attribute or feature.is_enum or feature.by_key):
                     pending.extend(values)
@@ -684,7 +684,7 @@ class Metamodel:
             entry = identities[id(obj)] = (obj, self.identity(obj))
         return entry[1]
 
-    def _name(self, nodes: Sequence[_Node]) -> None:
+    def _name(self, nodes: Sequence[Node]) -> None:
         """Give every node the name it has in the problem."""
         used: set[str] = set()
         counters: dict[type, int] = {}
@@ -709,7 +709,7 @@ class Metamodel:
             used.add(name)
             node.name = name
 
-    def _name_from_key(self, node: _Node) -> str | None:
+    def _name_from_key(self, node: Node) -> str | None:
         """The key as a node name, if it is a string or integer that isn't a type's name."""
         if self._options(type(node.obj)).key is None:
             return None
@@ -725,24 +725,24 @@ class Metamodel:
 
     def _value(
         self,
-        node: _Node,
+        node: Node,
         feature: Feature,
         value: Any,
-        index: Mapping[Hashable, list[_Node]],
-        node_of: Callable[[BaseModel], _Node],
-    ) -> _Value:
+        index: Mapping[Hashable, list[Node]],
+        node_of: Callable[[BaseModel], Node],
+    ) -> Value:
         if feature.by_key:
             target = feature.target
             members = target.members if isinstance(target, UnionClass) else (target,)
             found = [n for n in index.get(value, []) if isinstance(n.obj, members)]  # type: ignore[arg-type]
             if len(found) != 1:
                 problem = "unresolved" if not found else "ambiguous"
-                return _Value(feature, value, unresolved=problem)
-            return _Value(feature, value, self._certain(node.obj, feature, value), found[0])
+                return Value(feature, value, unresolved=problem)
+            return Value(feature, value, self._certain(node.obj, feature, value), found[0])
         certain = self._certain(node.obj, feature, value)
         if feature.is_attribute or feature.is_enum:
-            return _Value(feature, value, certain)
-        return _Value(feature, value, certain, node_of(value))
+            return Value(feature, value, certain)
+        return Value(feature, value, certain, node_of(value))
 
     def _certain(self, node: BaseModel, feature: Feature, value: Any) -> bool:
         """Whether ``value`` certainly holds, as ``ClassOptions.logic_value`` says."""
@@ -762,7 +762,7 @@ class Metamodel:
 
     # -- rendering instances ------------------------------------------------
 
-    def _facts(self, graph: _Graph, *, canonical_opposites: bool = False) -> str:
+    def _facts(self, graph: Graph, *, canonical_opposites: bool = False) -> str:
         """Assertions describing the nodes of ``graph`` and their values.
 
         With ``canonical_opposites``, a reference on one side of an opposite
@@ -798,39 +798,11 @@ class Metamodel:
                     lines.append(f"{prefix}{symbol}({name}, {value.target.name}).")
         return "\n".join(lines) + "\n"
 
-    def _reference_errors(self, graph: _Graph) -> list[Violation]:
-        """Keys in reference-by-key fields that match no object, or several."""
-        errors = []
-        for node in graph.nodes:
-            for value in node.values:
-                if value.unresolved is None:
-                    continue
-                feature = f"{self.class_name(value.feature.owner)}::{quote_id(value.feature.name)}"
-                constraint = f"{feature}::{value.unresolved}"
-                node_names = (node.name, repr(value.value))
-                errors.append(Violation("reference", constraint, node_names, (node.obj, None)))
-        return errors
-
     def problem(self, objects: Iterable[BaseModel]) -> str:
         """The metamodel, rules, and the facts of the graph reachable from ``objects``."""
         return self.source + "\n" + self._facts(self._graph(objects))
 
     # -- validation ---------------------------------------------------------
-
-    _FORMAT = OutputFormats(json_=JsonOutputFormat(), source=SourceOutputFormat(enabled=False))
-
-    def _prepare(
-        self,
-        objects: Iterable[BaseModel],
-        rules: Iterable[str] = (),
-        predicates: Iterable[Predicate] = (),
-    ) -> tuple[str, dict[str, BaseModel], list[Violation]]:
-        predicates = list(predicates)
-        graph = self._graph(objects)
-        lines = [self.source, *rules, *(self._declare_predicate(p) for p in predicates), ""]
-        lines.append(self._facts(graph))
-        lines += self._predicate_facts(predicates, graph)
-        return "\n".join(lines) + "\n", graph.objects_by_name(), self._reference_errors(graph)
 
     def validate(
         self,
@@ -857,12 +829,12 @@ class Metamodel:
         :class:`~pyfinery.InvalidProblemError` if the rules don't compile;
         constraint violations are returned in the report.
         """
-        source, by_name, errors = self._prepare(objects, rules, predicates)
-        try:
-            result = refinery.concretize(source, format=self._FORMAT)
-        except RefineryTimeoutError as e:
-            raise _timeout_hint(e) from e
-        return _report(source, result.json_, by_name, self.identity, errors)
+        predicates = list(predicates)
+        graph = self._graph(objects)
+        source = self._validation_problem(graph, rules, predicates)
+        with _explain_timeout():
+            result = refinery.concretize(source, format=_JSON_ONLY)
+        return read_violations(result.json_, graph, source)
 
     async def avalidate(
         self,
@@ -873,12 +845,20 @@ class Metamodel:
         predicates: Iterable[Predicate] = (),
     ) -> ValidationReport:
         """Asynchronous variant of :meth:`validate`."""
-        source, by_name, errors = self._prepare(objects, rules, predicates)
-        try:
-            result = await refinery.concretize(source, format=self._FORMAT)
-        except RefineryTimeoutError as e:
-            raise _timeout_hint(e) from e
-        return _report(source, result.json_, by_name, self.identity, errors)
+        predicates = list(predicates)
+        graph = self._graph(objects)
+        source = self._validation_problem(graph, rules, predicates)
+        with _explain_timeout():
+            result = await refinery.concretize(source, format=_JSON_ONLY)
+        return read_violations(result.json_, graph, source)
+
+    def _validation_problem(
+        self, graph: Graph, rules: Iterable[str], predicates: Sequence[Predicate]
+    ) -> str:
+        lines = [self.source, *rules, *(self._declare_predicate(p) for p in predicates), ""]
+        lines.append(self._facts(graph))
+        lines += self._predicate_facts(predicates, graph)
+        return "\n".join(lines) + "\n"
 
     # -- queries ------------------------------------------------------------
 
@@ -902,12 +882,13 @@ class Metamodel:
         ``exists`` is ``"unknown"`` and :class:`Predicate` facts that are
         ``"unknown"`` make the matches that depend on them ``"unknown"``.
         """
-        prepared = self._prepare_query(objects, rules, predicates, select)
-        try:
-            result = refinery.semantics(prepared.source, format=self._FORMAT)
-        except RefineryTimeoutError as e:
-            raise _timeout_hint(e) from e
-        return prepared.result(result.json_)
+        rules, predicates = list(rules), list(predicates)
+        graph = self._graph(objects, existence=True)
+        source = self._query_problem(graph, rules, predicates)
+        selected = list(select) if select is not None else declared_predicates(rules)
+        with _explain_timeout():
+            result = refinery.semantics(source, format=_JSON_ONLY)
+        return read_matches(result.json_, graph, source, selected)
 
     async def aquery(
         self,
@@ -919,12 +900,13 @@ class Metamodel:
         select: Iterable[str] | None = None,
     ) -> QueryResult:
         """Asynchronous variant of :meth:`query`."""
-        prepared = self._prepare_query(objects, rules, predicates, select)
-        try:
-            result = await refinery.semantics(prepared.source, format=self._FORMAT)
-        except RefineryTimeoutError as e:
-            raise _timeout_hint(e) from e
-        return prepared.result(result.json_)
+        rules, predicates = list(rules), list(predicates)
+        graph = self._graph(objects, existence=True)
+        source = self._query_problem(graph, rules, predicates)
+        selected = list(select) if select is not None else declared_predicates(rules)
+        with _explain_timeout():
+            result = await refinery.semantics(source, format=_JSON_ONLY)
+        return read_matches(result.json_, graph, source, selected)
 
     def query_problem(
         self,
@@ -934,18 +916,12 @@ class Metamodel:
         predicates: Iterable[Predicate] = (),
     ) -> str:
         """The problem :meth:`query` would send, e.g. to debug it in the web editor."""
-        return self._prepare_query(objects, rules, predicates, None).source
+        rules, predicates = list(rules), list(predicates)
+        return self._query_problem(self._graph(objects, existence=True), rules, predicates)
 
-    def _prepare_query(
-        self,
-        objects: Iterable[BaseModel],
-        rules: Iterable[str],
-        predicates: Iterable[Predicate],
-        select: Iterable[str] | None,
-    ) -> _PreparedQuery:
-        rules = list(rules)
-        predicates = list(predicates)
-        graph = self._graph(objects, existence=True)
+    def _query_problem(
+        self, graph: Graph, rules: Iterable[str], predicates: Sequence[Predicate]
+    ) -> str:
         lines = [self.source, *rules, ""]
         lines += [self._declare_predicate(p) for p in predicates]
         lines.append("")
@@ -958,15 +934,7 @@ class Metamodel:
             subclasses = self._subclasses(type(node.obj))
             lines += [f"!{self.class_name(sub)}({node.name})." for sub in subclasses]
         lines += self._predicate_facts(predicates, graph)
-        selected = list(select) if select is not None else _declared_predicates(rules)
-        return _PreparedQuery(
-            "\n".join(lines) + "\n",
-            selected,
-            graph.objects_by_name(),
-            {node.name: node.exists for node in graph.nodes},
-            self.identity,
-            self._reference_errors(graph),
-        )
+        return "\n".join(lines) + "\n"
 
     def _exists(self, node: BaseModel) -> LogicValue:
         decide = self._options(type(node)).exists
@@ -1007,7 +975,7 @@ class Metamodel:
             return isinstance(node, union.members)
         return isinstance(node, parameter)
 
-    def _predicate_facts(self, predicates: Sequence[Predicate], graph: _Graph) -> list[str]:
+    def _predicate_facts(self, predicates: Sequence[Predicate], graph: Graph) -> list[str]:
         lines = []
         objects = [node.obj for node in graph.nodes]
         for predicate in predicates:
@@ -1068,7 +1036,7 @@ class Metamodel:
         assert other is not None
         return (feature.owner.__name__, feature.name) <= (other.owner.__name__, other.name)
 
-    def _closed_world(self, predicates: Sequence[Predicate], graph: _Graph) -> list[str]:
+    def _closed_world(self, predicates: Sequence[Predicate], graph: Graph) -> list[str]:
         lines = [
             f"!exists({self.class_name(cls)}::new)."
             for cls in self.classes
@@ -1095,9 +1063,9 @@ class Metamodel:
         return lines
 
     @staticmethod
-    def _orphans(graph: _Graph) -> list[_Node]:
+    def _orphans(graph: Graph) -> list[Node]:
         """Nodes without a container that certainly exists and certainly contains them."""
-        owned: set[_Node] = set()
+        owned: set[Node] = set()
         for node in graph.nodes:
             for value in node.values:
                 kind = value.feature.kind
@@ -1111,6 +1079,24 @@ class Metamodel:
 
 
 _DEFAULT_OPTIONS = ClassOptions()
+_JSON_ONLY = OutputFormats(json_=JsonOutputFormat(), source=SourceOutputFormat(enabled=False))
+
+
+@contextmanager
+def _explain_timeout() -> Iterator[None]:
+    """Add what to do about it to a timeout of validation or a query."""
+    try:
+        yield
+    except RefineryTimeoutError as e:
+        raise RefineryTimeoutError(
+            f"{e.message}. Validation runs under the server's semantics timeout (1 second by "
+            "default); raise it with RefineryServer(semantics_timeout=<ms>) or the "
+            "REFINERY_SEMANTICS_TIMEOUT_MS environment variable of the server. Refinery "
+            "computes every relation in full, so helper predicates with many tuples (e.g., "
+            "with three parameters) are often what makes it slow, and the upstream Refinery "
+            "image is much slower than pyfinery's default on large graphs; see Performance in "
+            "pyfinery's README."
+        ) from e
 
 
 def _add_reference(

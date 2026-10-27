@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 import pyfinery as pf
 from pyfinery import ClassOptions, Metamodel, Predicate
+from pyfinery._results import reference_errors
 
 from .conftest import sse, sse_response
 from .deployment_models import Database, Deployment, Service, deployment, metamodel
@@ -39,7 +40,7 @@ def test_reference_errors():
     d = deployment()
     d.components.append(Service(name="db", image="x", tier="backend"))  # clashes with the database
     mm = metamodel()
-    errors = mm._reference_errors(mm._graph([d]))
+    errors = reference_errors(mm._graph([d]))
     assert [str(e) for e in errors] == [
         "reference: Service::depends_on::ambiguous(api, 'db')",
         "reference: Service::depends_on::unresolved(api, 'billing')",
