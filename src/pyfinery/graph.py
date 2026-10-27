@@ -55,14 +55,13 @@ Refinery syntax in ``_syntax``, and reports in ``_results``.
 from __future__ import annotations
 
 import itertools
-from collections import deque
-from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Hashable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel
 
-from ._instances import Graph, Node, Value
+from ._instances import Graph, Node, build_graph, collect, link_opposites
 from ._options import (
     ClassOptions,
     Container,
@@ -96,9 +95,7 @@ from ._schema import (
     is_model_class,
 )
 from ._syntax import (
-    RESERVED_NODE_NAMES,
     attribute_literal,
-    encodable,
     multiplicity,
     quote_id,
 )
@@ -257,7 +254,7 @@ class Metamodel:
         nothing (e.g., a child that only sets its own ``parent``) must be
         passed in ``objects`` itself.
         """
-        return [node.obj for node, _ in self._reach(objects, {})]
+        return collect(self.schema, objects)
 
     def identity(self, node: BaseModel) -> Hashable:
         """What makes ``node`` one Refinery node: its key if its class has one, else itself.
@@ -279,172 +276,7 @@ class Metamodel:
         unchanged; :meth:`validate` reports such conflicts. Returns the number
         of references added.
         """
-        added = 0
-        for node in self.collect(objects):
-            for _, feature, values in self._values(node):
-                if feature.opposite is None:
-                    continue
-                for target in values:
-                    other = self.schema.find_feature(type(target), feature.opposite)
-                    if other is not None and _add_reference(
-                        target, other, node, self.schema.identity
-                    ):
-                        added += 1
-        return added
-
-    def _values(self, node: BaseModel) -> Iterator[tuple[type, Feature, list[Any]]]:
-        for cls in type(node).__mro__:
-            for feature in self.schema.features.get(cls, []):  # type: ignore[call-overload]
-                value = getattr(node, feature.name)
-                if value is None:
-                    continue
-                values = list(value) if feature.many else [value]
-                yield cls, feature, values
-
-    # -- the instance graph -------------------------------------------------
-
-    def _graph(self, objects: Iterable[BaseModel], *, existence: bool = False) -> Graph:
-        """The Refinery nodes of the graph reachable from ``objects``, with their values.
-
-        The ``key``, ``node_name``, ``logic_value`` and (with ``existence``)
-        ``exists`` options are evaluated here, once; everything sent to
-        Refinery is rendered from the result. Without ``existence``, every
-        node exists, as :meth:`validate` assumes.
-        """
-        identities: dict[int, tuple[BaseModel, Hashable]] = {}
-        reached = self._reach(objects, identities)
-        nodes = [node for node, _ in reached]
-        graph = Graph(
-            nodes, {node.identity: node for node in nodes}, identities, self.schema.identity
-        )
-        self._name(graph.nodes)
-        index: dict[Hashable, list[Node]] = {}
-        for node in graph.nodes:
-            if self.schema.options_for(type(node.obj)).key is not None:
-                index.setdefault(node.identity[1], []).append(node)  # type: ignore[index]
-
-        def node_of(obj: BaseModel) -> Node:
-            # Every followed reference was reached, by the same identity.
-            return graph.by_identity[self._identity(obj, graph.identities)]
-
-        for node, fields in reached:
-            for _, feature, values in fields:
-                for value in values:
-                    node.values.append(self._value(node, feature, value, index, node_of))
-        if existence:
-            for node in graph.nodes:
-                node.exists = self._exists(node.obj)
-        return graph
-
-    def _reach(
-        self, objects: Iterable[BaseModel], identities: dict[int, tuple[BaseModel, Hashable]]
-    ) -> list[tuple[Node, list[tuple[type, Feature, list[Any]]]]]:
-        """The nodes reachable from ``objects``, each with the values of its fields.
-
-        ``identities`` memoizes :meth:`identity` by object, keeping the
-        objects alive so that their ``id`` isn't reused.
-        """
-        reached = []
-        seen: set[Hashable] = set()
-        pending = deque(objects)
-        while pending:
-            obj = pending.popleft()
-            if type(obj) not in self.schema.features:
-                raise TypeError(f"{type(obj).__name__} is not part of this metamodel")
-            identity = self._identity(obj, identities)
-            if identity in seen:
-                continue
-            seen.add(identity)
-            fields = list(self._values(obj))
-            reached.append((Node(obj, identity), fields))
-            for _, feature, values in fields:
-                if not (feature.is_attribute or feature.is_enum or feature.by_key):
-                    pending.extend(values)
-        return reached
-
-    def _identity(
-        self, obj: BaseModel, identities: dict[int, tuple[BaseModel, Hashable]]
-    ) -> Hashable:
-        entry = identities.get(id(obj))
-        if entry is None:
-            entry = identities[id(obj)] = (obj, self.identity(obj))
-        return entry[1]
-
-    def _name(self, nodes: Sequence[Node]) -> None:
-        """Give every node the name it has in the problem."""
-        used: set[str] = set()
-        counters: dict[type, int] = {}
-        for node in nodes:
-            obj = node.obj
-            id_field: str | None = getattr(type(obj), "__node_id__", None)
-            naming = self.schema.options_for(type(obj)).node_name
-            if naming is not None or id_field is not None:
-                raw = naming(obj) if naming is not None else getattr(obj, id_field)  # type: ignore[arg-type]
-                name = quote_id(str(raw))
-                if name in used:
-                    source = "node_name" if naming is not None else f"field {id_field!r}"
-                    raise ValueError(f"Duplicate node id {name} (from {source})")
-            elif (key := self._name_from_key(node)) is not None and key not in used:
-                name = key
-            else:
-                while True:
-                    counters[type(obj)] = counters.get(type(obj), 0) + 1
-                    name = quote_id(f"{type(obj).__name__.lower()}_{counters[type(obj)]}")
-                    if name not in used:
-                        break
-            used.add(name)
-            node.name = name
-
-    def _name_from_key(self, node: Node) -> str | None:
-        """The key as a node name, if it is a string or integer that isn't a type's name."""
-        if self.schema.options_for(type(node.obj)).key is None:
-            return None
-        key = node.identity[1]  # type: ignore[index]
-        if isinstance(key, bool) or not isinstance(key, str | int) or str(key) == "":
-            return None
-        if not encodable(str(key)):
-            # Escaped, Refinery would name the node with "?" for each lone
-            # surrogate, so the name couldn't be mapped back to the node.
-            return None
-        name = quote_id(str(key))
-        return None if name in self.schema.type_names or str(key) in RESERVED_NODE_NAMES else name
-
-    def _value(
-        self,
-        node: Node,
-        feature: Feature,
-        value: Any,
-        index: Mapping[Hashable, list[Node]],
-        node_of: Callable[[BaseModel], Node],
-    ) -> Value:
-        if feature.by_key:
-            target = feature.target
-            members = target.members if isinstance(target, UnionClass) else (target,)
-            found = [n for n in index.get(value, []) if isinstance(n.obj, members)]  # type: ignore[arg-type]
-            if len(found) != 1:
-                problem = "unresolved" if not found else "ambiguous"
-                return Value(feature, value, unresolved=problem)
-            return Value(feature, value, self._certain(node.obj, feature, value), found[0])
-        certain = self._certain(node.obj, feature, value)
-        if feature.is_attribute or feature.is_enum:
-            return Value(feature, value, certain)
-        return Value(feature, value, certain, node_of(value))
-
-    def _certain(self, node: BaseModel, feature: Feature, value: Any) -> bool:
-        """Whether ``value`` certainly holds, as ``ClassOptions.logic_value`` says."""
-        decide = self.schema.options_for(type(node)).logic_value
-        if decide is None:
-            return True
-        answer = decide(node, feature.name, value)
-        if answer in ("true", True):
-            return True
-        if answer == "unknown":
-            return False
-        raise ValueError(
-            f"ClassOptions.logic_value of {type(node).__name__} must return 'true', 'unknown' or "
-            f"True, "
-            f"not {answer!r} (leave values that don't hold out of the object)"
-        )
+        return link_opposites(self.schema, objects)
 
     # -- rendering instances ------------------------------------------------
 
@@ -486,7 +318,7 @@ class Metamodel:
 
     def problem(self, objects: Iterable[BaseModel]) -> str:
         """The metamodel, rules, and the facts of the graph reachable from ``objects``."""
-        return self.source + "\n" + self._facts(self._graph(objects))
+        return self.source + "\n" + self._facts(build_graph(self.schema, objects))
 
     # -- validation ---------------------------------------------------------
 
@@ -516,7 +348,7 @@ class Metamodel:
         constraint violations are returned in the report.
         """
         predicates = list(predicates)
-        graph = self._graph(objects)
+        graph = build_graph(self.schema, objects)
         source = self._validation_problem(graph, rules, predicates)
         with _explain_timeout():
             result = refinery.concretize(source, format=_JSON_ONLY)
@@ -532,7 +364,7 @@ class Metamodel:
     ) -> ValidationReport:
         """Asynchronous variant of :meth:`validate`."""
         predicates = list(predicates)
-        graph = self._graph(objects)
+        graph = build_graph(self.schema, objects)
         source = self._validation_problem(graph, rules, predicates)
         with _explain_timeout():
             result = await refinery.concretize(source, format=_JSON_ONLY)
@@ -569,7 +401,7 @@ class Metamodel:
         ``"unknown"`` make the matches that depend on them ``"unknown"``.
         """
         rules, predicates = list(rules), list(predicates)
-        graph = self._graph(objects, existence=True)
+        graph = build_graph(self.schema, objects, existence=True)
         source = self._query_problem(graph, rules, predicates)
         selected = list(select) if select is not None else declared_predicates(rules)
         with _explain_timeout():
@@ -587,7 +419,7 @@ class Metamodel:
     ) -> QueryResult:
         """Asynchronous variant of :meth:`query`."""
         rules, predicates = list(rules), list(predicates)
-        graph = self._graph(objects, existence=True)
+        graph = build_graph(self.schema, objects, existence=True)
         source = self._query_problem(graph, rules, predicates)
         selected = list(select) if select is not None else declared_predicates(rules)
         with _explain_timeout():
@@ -603,7 +435,8 @@ class Metamodel:
     ) -> str:
         """The problem :meth:`query` would send, e.g. to debug it in the web editor."""
         rules, predicates = list(rules), list(predicates)
-        return self._query_problem(self._graph(objects, existence=True), rules, predicates)
+        graph = build_graph(self.schema, objects, existence=True)
+        return self._query_problem(graph, rules, predicates)
 
     def _query_problem(
         self, graph: Graph, rules: Iterable[str], predicates: Sequence[Predicate]
@@ -621,20 +454,6 @@ class Metamodel:
             lines += [f"!{class_name(sub)}({node.name})." for sub in subclasses]
         lines += self._predicate_facts(predicates, graph)
         return "\n".join(lines) + "\n"
-
-    def _exists(self, node: BaseModel) -> LogicValue:
-        decide = self.schema.options_for(type(node)).exists
-        if decide is None:
-            return "true"
-        answer = decide(node)
-        if answer in ("true", True):
-            return "true"
-        if answer == "unknown":
-            return "unknown"
-        raise ValueError(
-            f"ClassOptions.exists of {type(node).__name__} must return 'true', 'unknown' or True, "
-            f"not {answer!r} (leave out objects that don't exist)"
-        )
 
     def _parameter_type(self, parameter: type[BaseModel] | str) -> str:
         if isinstance(parameter, str):
@@ -673,7 +492,7 @@ class Metamodel:
                 prefix = "?" if answer == "unknown" else ""
                 rendered = []
                 for argument, parameter in zip(arguments, predicate.parameters, strict=True):
-                    node = graph.by_identity.get(self._identity(argument, graph.identities))
+                    node = graph.node_of(argument)
                     if node is None or not self._matches_type(argument, parameter):
                         raise ValueError(
                             f"Predicate {predicate.name!r}: {argument!r} is not a node of type "
@@ -779,32 +598,3 @@ def _explain_timeout() -> Iterator[None]:
             "image is much slower than pyfinery's default on large graphs; see Performance in "
             "pyfinery's README."
         ) from e
-
-
-def _add_reference(
-    node: BaseModel,
-    feature: Feature,
-    value: BaseModel,
-    identity: Callable[[BaseModel], Hashable],
-) -> bool:
-    """Add ``value`` to ``node.<feature>`` unless already present or the slot is taken."""
-    current = getattr(node, feature.name)
-    if not feature.many:
-        if current is not None:
-            return False
-        setattr(node, feature.name, value)
-        return True
-    if current is None:
-        setattr(node, feature.name, [value])
-        return True
-    if any(identity(item) == identity(value) for item in current):
-        return False
-    if isinstance(current, list):
-        current.append(value)
-    elif isinstance(current, set):
-        current.add(value)
-    elif isinstance(current, frozenset):
-        setattr(node, feature.name, frozenset((*current, value)))
-    else:
-        setattr(node, feature.name, (*current, value))
-    return True

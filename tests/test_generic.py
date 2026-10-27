@@ -11,6 +11,7 @@ import pytest
 from pydantic import BaseModel
 
 from pyfinery import ClassOptions, Metamodel, Ref, RefineryNode
+from pyfinery._instances import build_graph
 
 from .generic_models import (
     OPTIONS,
@@ -116,7 +117,7 @@ def test_node_name_and_abstract_options():
         unsupported="skip",
     )
     assert "abstract class FileOrEndpoint." in mm.source  # default union name
-    names = {n.name for n in mm._graph([graph()]).nodes}
+    names = {n.name for n in build_graph(mm.schema, [graph()]).nodes}
     assert {"'file:.ssh/id_rsa'", "'https://example.com'"} <= names
 
 

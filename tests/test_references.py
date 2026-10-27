@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 import pyfinery as pf
 from pyfinery import ClassOptions, Metamodel, Predicate
+from pyfinery._instances import build_graph
 from pyfinery._results import reference_errors
 
 from .conftest import sse, sse_response
@@ -25,7 +26,7 @@ def test_reference_by_key_source():
 
 def test_reference_by_key_facts_and_names():
     mm = metamodel()
-    graph = mm._graph([deployment()])
+    graph = build_graph(mm.schema, [deployment()])
     assert sorted(n.name for n in graph.nodes) == [
         *("api", "cache", "db", "deployment_1", "port_1", "web")
     ]
@@ -40,7 +41,7 @@ def test_reference_errors():
     d = deployment()
     d.components.append(Service(name="db", image="x", tier="backend"))  # clashes with the database
     mm = metamodel()
-    errors = reference_errors(mm._graph([d]))
+    errors = reference_errors(build_graph(mm.schema, [d]))
     assert [str(e) for e in errors] == [
         "reference: Service::depends_on::ambiguous(api, 'db')",
         "reference: Service::depends_on::unresolved(api, 'billing')",
@@ -56,7 +57,7 @@ def test_names_fall_back_when_keys_clash_with_types_or_each_other():
         Database(name="web", engine="redis", encrypted=True),  # another node's name
     ]
     mm = metamodel()
-    names = [n.name for n in mm._graph([d]).nodes]
+    names = [n.name for n in build_graph(mm.schema, [d]).nodes]
     assert sorted(names) == [
         "api",
         "cache",
@@ -124,7 +125,7 @@ def test_unencodable_keys_and_strings():
     d = deployment()
     d.components.append(Service(name="w\udcffb", image="i\udcff\u00e9", tier="backend"))
     mm = metamodel()
-    names = [n.name for n in mm._graph([d]).nodes]
+    names = [n.name for n in build_graph(mm.schema, [d]).nodes]
     # Refinery would name the node "'w?b'", which couldn't be mapped back.
     assert "service_1" in names
     source = mm.problem([d])
