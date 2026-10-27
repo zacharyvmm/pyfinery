@@ -11,6 +11,7 @@ from pydantic import BaseModel
 import pyfinery as pf
 from pyfinery import ClassOptions, Metamodel, Predicate
 from pyfinery._instances import build_graph
+from pyfinery._render import render_facts
 from pyfinery._results import reference_errors
 
 from .conftest import sse, sse_response
@@ -30,7 +31,7 @@ def test_reference_by_key_facts_and_names():
     assert sorted(n.name for n in graph.nodes) == [
         *("api", "cache", "db", "deployment_1", "port_1", "web")
     ]
-    facts = mm._facts(graph).splitlines()
+    facts = render_facts(mm.schema, graph).splitlines()
     assert "Service::depends_on(web, api)." in facts
     assert "Service::depends_on(web, cache)." in facts
     assert "Service::depends_on(api, db)." in facts
