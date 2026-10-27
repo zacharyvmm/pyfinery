@@ -66,7 +66,7 @@ def quote_id(name: str) -> str:
     return f"'{escaped}'"
 
 
-def _encodable(text: str) -> bool:
+def encodable(text: str) -> bool:
     """Whether ``text`` can be sent as JSON: not if it holds a lone surrogate."""
     try:
         text.encode("utf-8")
@@ -83,13 +83,13 @@ def _string_literal(value: str) -> str:
         .replace("\r", "\\r")
         .replace("\t", "\\t")
     )
-    if not _encodable(escaped):
+    if not encodable(escaped):
         # Refinery reads ``\uXXXX`` as a UTF-16 code unit, as Java does.
-        escaped = "".join(c if _encodable(c) else f"\\u{ord(c):04x}" for c in escaped)
+        escaped = "".join(c if encodable(c) else f"\\u{ord(c):04x}" for c in escaped)
     return f'"{escaped}"'
 
 
-def _attribute_literal(value: Any, data_type: str) -> str:
+def attribute_literal(value: Any, data_type: str) -> str:
     match data_type:
         case "boolean":
             return "true" if value else "false"
@@ -105,13 +105,13 @@ def _attribute_literal(value: Any, data_type: str) -> str:
             return _string_literal(str(value))
 
 
-def _multiplicity(lower: int, upper: int | None) -> str:
+def multiplicity(lower: int, upper: int | None) -> str:
     if upper == lower:
         return f"[{lower}]"
     return f"[{lower}..{'*' if upper is None else upper}]"
 
 
-def _parse_multiplicity(value: str | tuple[int, int | None]) -> tuple[int, int | None]:
+def parse_multiplicity(value: str | tuple[int, int | None]) -> tuple[int, int | None]:
     if isinstance(value, tuple):
         return value
     text = value.strip().strip("[]")
@@ -125,7 +125,7 @@ def _parse_multiplicity(value: str | tuple[int, int | None]) -> tuple[int, int |
 
 
 # Builtin symbols a node name shouldn't shadow.
-_RESERVED_NODE_NAMES = frozenset(
+RESERVED_NODE_NAMES = frozenset(
     {
         *("node", "exists", "equals", "count"),
         *("contains", "contained", "container"),
