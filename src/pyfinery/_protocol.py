@@ -52,6 +52,16 @@ def normalize_base_url(base_url: str) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class Endpoint:
+    """An endpoint of the API, and how to read the events it streams."""
+
+    path: str
+    success_model: type[BaseModel]
+    parse_status: StatusParser | None = None
+    """How to read status updates; ``None`` to drop them."""
+
+
+@dataclass(frozen=True, slots=True)
 class Event:
     kind: Literal["status", "success"]
     value: Any
@@ -80,6 +90,28 @@ class SSEDecoder:
     def flush(self) -> str | None:
         data, self._data = self._data, None
         return None if data is None else "\n".join(data)
+
+
+class EventParser:
+    """Turns the lines of an endpoint's server-sent event stream into events."""
+
+    def __init__(self, endpoint: Endpoint) -> None:
+        self._endpoint = endpoint
+        self._decoder = SSEDecoder()
+
+    def feed(self, line: str) -> Event | None:
+        """Process one line; return the event it ends, unless that is a dropped status."""
+        data = self._decoder.feed(line)
+        return None if data is None else self._parse(data)
+
+    def finish(self) -> Any:
+        """The result in an event left unterminated at the end of the stream, if any."""
+        data = self._decoder.flush()
+        event = None if data is None else self._parse(data)
+        return event.value if event is not None and event.kind == "success" else None
+
+    def _parse(self, data: str) -> Event | None:
+        return parse_event_data(data, self._endpoint.success_model, self._endpoint.parse_status)
 
 
 def _validate[T](parse: Callable[[Any], T], value: Any) -> T:

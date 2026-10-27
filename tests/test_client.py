@@ -159,6 +159,30 @@ def test_error_at_end_of_stream():
         client.generate("class A.")
 
 
+def test_result_in_unterminated_last_event():
+    # The stream ends without the blank line that ends the last event.
+    body = sse(status({"message": "Generating"}), GENERATE_SUCCESS).rstrip(b"\n")
+    statuses = []
+    client, _ = sync_client(lambda _: sse_response(body))
+    assert client.generate("class A.", on_status=statuses.append).source == "Dir(dir1)."
+    assert [s.message for s in statuses] == ["Generating"]
+
+    async_refinery, _ = async_client(lambda _: sse_response(body))
+    result = asyncio.run(async_refinery.generate("class A."))
+    assert result.source == "Dir(dir1)."
+
+
+def test_status_in_unterminated_last_event():
+    body = sse(status({"message": "Generating"})).rstrip(b"\n")
+    client, _ = sync_client(lambda _: sse_response(body))
+    with pytest.raises(pf.ProtocolError, match="without sending a result"):
+        client.generate("class A.")
+
+    async_refinery, _ = async_client(lambda _: sse_response(body))
+    with pytest.raises(pf.ProtocolError, match="without sending a result"):
+        asyncio.run(async_refinery.generate("class A."))
+
+
 def test_error_with_http_status():
     issue = {
         "description": "Bad",
