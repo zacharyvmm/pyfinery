@@ -829,6 +829,7 @@ class Metamodel:
         :class:`~pyfinery.InvalidProblemError` if the rules don't compile;
         constraint violations are returned in the report.
         """
+        predicates = list(predicates)
         graph = self._graph(objects)
         source = self._validation_problem(graph, rules, predicates)
         with _explain_timeout():
@@ -844,6 +845,7 @@ class Metamodel:
         predicates: Iterable[Predicate] = (),
     ) -> ValidationReport:
         """Asynchronous variant of :meth:`validate`."""
+        predicates = list(predicates)
         graph = self._graph(objects)
         source = self._validation_problem(graph, rules, predicates)
         with _explain_timeout():
@@ -851,9 +853,8 @@ class Metamodel:
         return read_violations(result.json_, graph, source)
 
     def _validation_problem(
-        self, graph: Graph, rules: Iterable[str], predicates: Iterable[Predicate]
+        self, graph: Graph, rules: Iterable[str], predicates: Sequence[Predicate]
     ) -> str:
-        predicates = list(predicates)
         lines = [self.source, *rules, *(self._declare_predicate(p) for p in predicates), ""]
         lines.append(self._facts(graph))
         lines += self._predicate_facts(predicates, graph)
@@ -881,12 +882,12 @@ class Metamodel:
         ``exists`` is ``"unknown"`` and :class:`Predicate` facts that are
         ``"unknown"`` make the matches that depend on them ``"unknown"``.
         """
-        rules = list(rules)
+        rules, predicates = list(rules), list(predicates)
         graph = self._graph(objects, existence=True)
         source = self._query_problem(graph, rules, predicates)
+        selected = list(select) if select is not None else declared_predicates(rules)
         with _explain_timeout():
             result = refinery.semantics(source, format=_JSON_ONLY)
-        selected = list(select) if select is not None else declared_predicates(rules)
         return read_matches(result.json_, graph, source, selected)
 
     async def aquery(
@@ -899,12 +900,12 @@ class Metamodel:
         select: Iterable[str] | None = None,
     ) -> QueryResult:
         """Asynchronous variant of :meth:`query`."""
-        rules = list(rules)
+        rules, predicates = list(rules), list(predicates)
         graph = self._graph(objects, existence=True)
         source = self._query_problem(graph, rules, predicates)
+        selected = list(select) if select is not None else declared_predicates(rules)
         with _explain_timeout():
             result = await refinery.semantics(source, format=_JSON_ONLY)
-        selected = list(select) if select is not None else declared_predicates(rules)
         return read_matches(result.json_, graph, source, selected)
 
     def query_problem(
@@ -915,12 +916,12 @@ class Metamodel:
         predicates: Iterable[Predicate] = (),
     ) -> str:
         """The problem :meth:`query` would send, e.g. to debug it in the web editor."""
+        rules, predicates = list(rules), list(predicates)
         return self._query_problem(self._graph(objects, existence=True), rules, predicates)
 
     def _query_problem(
-        self, graph: Graph, rules: Iterable[str], predicates: Iterable[Predicate]
+        self, graph: Graph, rules: Iterable[str], predicates: Sequence[Predicate]
     ) -> str:
-        predicates = list(predicates)
         lines = [self.source, *rules, ""]
         lines += [self._declare_predicate(p) for p in predicates]
         lines.append("")
