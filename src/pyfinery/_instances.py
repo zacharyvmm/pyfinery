@@ -8,7 +8,7 @@ written from.
 
 from __future__ import annotations
 
-from collections.abc import Hashable
+from collections.abc import Callable, Hashable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -19,7 +19,7 @@ from ._options import LogicValue
 
 
 @dataclass(eq=False, slots=True)
-class _Value:
+class Value:
     """One value of a field of a node: an attribute or enum value, or a reference."""
 
     feature: Feature
@@ -27,14 +27,14 @@ class _Value:
     """The attribute or enum value, the key of a reference by key, or the referenced object."""
     certain: bool = True
     """Whether the value certainly holds (``ClassOptions.logic_value``), or only may."""
-    target: _Node | None = None
+    target: Node | None = None
     """The node a reference resolves to."""
     unresolved: Literal["unresolved", "ambiguous"] | None = None
     """Why a key of a reference by key resolves to no node."""
 
 
 @dataclass(eq=False, slots=True)
-class _Node:
+class Node:
     """One Refinery node: a Python object, or the instances sharing a key."""
 
     obj: BaseModel
@@ -42,18 +42,20 @@ class _Node:
     identity: Hashable
     name: str = ""
     exists: LogicValue = "true"
-    values: list[_Value] = field(default_factory=list)
+    values: list[Value] = field(default_factory=list)
 
 
 @dataclass(slots=True)
-class _Graph:
+class Graph:
     """The nodes reachable from some objects, in the order they were reached."""
 
-    nodes: list[_Node]
-    by_identity: dict[Hashable, _Node]
+    nodes: list[Node]
+    by_identity: dict[Hashable, Node]
     identities: dict[int, tuple[BaseModel, Hashable]]
     """:meth:`Metamodel.identity` by object, keeping the objects alive so that
     their ``id`` isn't reused."""
+    identity: Callable[[BaseModel], Hashable]
+    """:meth:`Metamodel.identity`, which reports use to find a node's instances."""
 
     def objects_by_name(self) -> dict[str, BaseModel]:
         return {node.name: node.obj for node in self.nodes}

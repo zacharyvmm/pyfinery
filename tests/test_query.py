@@ -11,7 +11,7 @@ import pytest
 
 import pyfinery as pf
 from pyfinery import ClassOptions, Metamodel, Predicate
-from pyfinery._results import _declared_predicates
+from pyfinery._results import declared_predicates
 
 from .conftest import Recorder, sse, sse_response
 from .generic_models import OPTIONS, Effect, Endpoint, File, Graph, Path, graph, secret
@@ -59,9 +59,9 @@ def uncertain_graph() -> Graph:
     return g
 
 
-def test_declared_predicates():
+def testdeclared_predicates():
     rules = [*RULES, "error pred 'odd name'(File f) <-> !secretFile(f).", "pred writes(a, b)."]
-    assert _declared_predicates(rules) == ["writes", "exfiltration", "removes", "odd name"]
+    assert declared_predicates(rules) == ["writes", "exfiltration", "removes", "odd name"]
 
 
 def test_query_problem_closes_the_world():
