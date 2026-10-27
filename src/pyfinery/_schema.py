@@ -227,7 +227,7 @@ def _feature(schema: Schema, cls: type[BaseModel], name: str) -> Feature | None:
     annotation = shape.type
     metadata = [*shape.metadata, *shape.inner_metadata]
     if shape.many:
-        if annotation is None:
+        if annotation is _NO_ITEM_TYPE:
             raise TypeError(f"{where}: collections must have exactly one item type")
     elif get_origin(annotation) not in (None, Literal) and not _is_union(annotation):
         raise _Unsupported(f"{where}: unsupported field type {info.annotation!r}")
@@ -325,13 +325,16 @@ def _key_reference(
     return Feature(cls, name, target, shape.many, lower, upper, "refers", None, by_key=True)
 
 
+_NO_ITEM_TYPE: Any = object()
+
+
 @dataclass(frozen=True, slots=True)
 class _Shape:
     """A field's annotation with ``Annotated``, ``Optional`` and a collection taken off."""
 
     type: Any
-    """The type of the value, or of each item; ``None`` for a collection without
-    exactly one item type."""
+    """The type of the value, or of each item; :data:`_NO_ITEM_TYPE` for a
+    collection without exactly one item type (``None`` is a type: ``list[None]``)."""
     optional: bool
     many: bool
     metadata: list[Any]
@@ -348,7 +351,7 @@ class _Shape:
         many = get_origin(annotation) in _COLLECTIONS or annotation in (list, set, frozenset, tuple)
         if many:
             args = [a for a in get_args(annotation) if a is not Ellipsis]
-            annotation = None
+            annotation = _NO_ITEM_TYPE
             if len(args) == 1:
                 annotation, more = _strip_annotated(args[0])
                 inner_metadata += more

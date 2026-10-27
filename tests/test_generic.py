@@ -59,6 +59,18 @@ def test_generic_source():
     assert [(c.__name__, f) for c, f, _ in mm.skipped] == [("Path", "segments")]
 
 
+def test_skip_collections_of_none():
+    class Holder(BaseModel):
+        name: str
+        nothing: list[None]
+        empty: tuple[None, ...]
+
+    mm = Metamodel(Holder, unsupported="skip")
+    assert [field for _, field, _ in mm.skipped] == ["nothing", "empty"]
+    with pytest.raises(TypeError, match="Holder.nothing: unsupported field type None"):
+        Metamodel(Holder)
+
+
 def test_keyed_copies_are_one_node():
     g = graph()
     mm = metamodel()
