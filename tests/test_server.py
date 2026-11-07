@@ -49,3 +49,16 @@ def test_warm_up_gives_up(monkeypatch):
     server, _ = _server_with_responses(monkeypatch, [TIMEOUT] * 100)
     with pytest.raises(pf.ServerStartError, match="semantics_timeout"):
         server._warm_up(time.monotonic() + 60)
+
+
+def test_threads_apply_to_every_kind_of_request():
+    # validate() and query() send semantics and concretize requests, which the
+    # server runs on its semantics threads, not its model generation threads.
+    server = pf.RefineryServer(threads=4)
+    assert server._env["REFINERY_MODEL_GENERATION_THREAD_COUNT"] == "4"
+    assert server._env["REFINERY_XTEXT_SEMANTICS_THREAD_COUNT"] == "4"
+
+
+def test_env_overrides_threads():
+    server = pf.RefineryServer(threads=4, env={"REFINERY_XTEXT_SEMANTICS_THREAD_COUNT": "0"})
+    assert server._env["REFINERY_XTEXT_SEMANTICS_THREAD_COUNT"] == "0"
