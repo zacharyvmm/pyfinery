@@ -68,8 +68,18 @@ class RefineryServer:
         (``REFINERY_MODEL_GENERATION_TIMEOUT_SEC``, server default 600).
     :param semantics_timeout: Milliseconds before partial model semantics
         times out (``REFINERY_SEMANTICS_TIMEOUT_MS``, server default 1000).
-    :param threads: Number of concurrent model generation tasks
-        (``REFINERY_MODEL_GENERATION_THREAD_COUNT``).
+    :param threads: Size of each of the server's two pools of request
+        threads: one for ``generate`` and ``generate_many``
+        (``REFINERY_MODEL_GENERATION_THREAD_COUNT``), and one for
+        ``semantics`` and ``concretize``, which ``Metamodel.query`` and
+        ``Metamodel.validate`` send (``REFINERY_XTEXT_SEMANTICS_THREAD_COUNT``).
+        With ``threads=4``, the server works on up to 4 requests of each pool
+        at once; ``0`` leaves both unbounded. By default, it works on one of
+        each at a time. A larger ``REFINERY_XTEXT_THREAD_COUNT`` in ``env``
+        also raises the semantics pool to that size. More than one semantics
+        thread needs an image from zacharyvmm/refinery#7 on: older ones cancel
+        some concurrent requests. Pass ``pull=True`` once if an older
+        ``latest`` is cached.
     :param env: Additional environment variables for the container, see
         https://refinery.tools/learn/docker/#environmental-variables
     :param warmup: Send a few small requests after startup, retrying until they
@@ -123,6 +133,7 @@ class RefineryServer:
             result["REFINERY_SEMANTICS_TIMEOUT_MS"] = str(semantics_timeout)
         if threads is not None:
             result["REFINERY_MODEL_GENERATION_THREAD_COUNT"] = str(threads)
+            result["REFINERY_XTEXT_SEMANTICS_THREAD_COUNT"] = str(threads)
         result.update(env or {})
         return result
 
