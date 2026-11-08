@@ -76,7 +76,10 @@ class RefineryServer:
         With ``threads=4``, the server works on up to 4 requests of each pool
         at once; ``0`` leaves both unbounded. By default, it works on one of
         each at a time. A larger ``REFINERY_XTEXT_THREAD_COUNT`` in ``env``
-        also raises the semantics pool to that size.
+        also raises the semantics pool to that size. More than one semantics
+        thread needs an image from zacharyvmm/refinery#7 on: older ones cancel
+        some concurrent requests. Pass ``pull=True`` once if an older
+        ``latest`` is cached.
     :param env: Additional environment variables for the container, see
         https://refinery.tools/learn/docker/#environmental-variables
     :param warmup: Send a few small requests after startup, retrying until they
