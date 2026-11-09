@@ -1,0 +1,202 @@
+# SPDX-FileCopyrightText: 2026 zacharyvmm <58368863+zacharyvmm@users.noreply.github.com>
+#
+# SPDX-License-Identifier: EPL-2.0
+
+"""The bits engine's API: models built by hand, rules, results and errors.
+
+What it computes is checked against Refinery in ``tests/conformance/test_bits.py``.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from pyfinery.bits import (
+    Attribute,
+    Node,
+    PartialModel,
+    Relation,
+    RuleError,
+    UnsupportedRuleError,
+    evaluate,
+)
+from pyfinery.bits._syntax import parse
+
+
+def model() -> PartialModel:
+    """alice -> bob -> carl, bob only may exist, carl may follow alice back."""
+    nodes = [
+        Node("alice", "alice"),
+        Node("bob", "bob"),
+        Node("carl", "carl"),
+        Node("E::x", "x", "atom"),
+    ]
+    people = [((i,), "true") for i in range(3)]
+    return PartialModel(
+        nodes,
+        [
+            Relation.of("Person", 1, people),
+            Relation.of(
+                "Person::friend", 2, [((0, 1), "true"), ((1, 2), "true"), ((2, 0), "unknown")]
+            ),
+            Relation.of(
+                "builtin::exists",
+                1,
+                [((0,), "true"), ((1,), "unknown"), ((2,), "true"), ((3,), "true")],
+            ),
+        ],
+        [Attribute.of("Person::age", "int", 4, [(0, 30), (1, "10..20"), (2, None)])],
+    )
+
+
+def values(result) -> dict:
+    return {key: value for key, value in result.items()}
+
+
+def test_evaluates_every_predicate_with_a_body():
+    results = evaluate(
+        [
+            "pred reaches(Person p, Person q) <-> friend+(p, q).",
+            "pred adult(Person p) <-> age(p) >= 18.",
+            "pred trusted(Person p).",  # no body: not evaluated
+        ],
+        model(),
+    )
+    assert set(results) == {"reaches", "adult"}
+    reaches = results["reaches"]
+    assert reaches.value((0, 1)) == "true"
+    assert reaches.value((0, 2)) == "unknown"  # through bob, who only may exist
+    assert reaches.value((1, 1)) == "unknown"
+    assert reaches.value((3, 0)) == "false"
+    assert values(results["adult"]) == {(0,): "true", (1,): "unknown", (2,): "unknown"}
+
+
+def test_select_and_sources_with_other_statements():
+    source = (
+        "class Person { Person[] friend }\nPerson(alice).\n"
+        "pred self(Person p) <-> p == p.\npred other(Person p) <-> !self(p)."
+    )
+    results = evaluate(source, model(), select=["other"])
+    assert set(results) == {"other"}
+    with pytest.raises(RuleError, match="no predicate named 'missing'"):
+        evaluate(source, model(), select=["missing"])
+
+
+def test_error_predicates_are_errors_where_they_must_hold():
+    results = evaluate("error pred befriends(Person p) <-> friend(p, _).", model())
+    # alice's only friend, bob, only may exist: the body must hold for bob alone.
+    assert values(results["befriends"]) == {(1,): "error"}
+    assert results["befriends"].kind == "error"
+
+
+@pytest.mark.parametrize(
+    ("rules", "message"),
+    [
+        ("pred p(Person x) <-> nothing(x).", "no relation named 'nothing'"),
+        ("pred p(Person x) <-> friend(x).", "friend has 2 parameters, given 1"),
+        ("pred p(x) <-> !friend(x, _).", "parameter x of p is bound by no literal"),
+        ("pred p(Person x) <-> age(y) > 3.", "unbound input variables: y"),
+        ("pred p(Person x) <-> !friend(x, y), x != y.", "appears in several literals"),
+        ("pred p(Person x) <-> q(x).\npred q(Person x) <-> p(x).", "recursive predicates"),
+        ("pred p(Person x) <-> friend(x, nope::thing).", "no atom named 'nope::thing'"),
+        ("pred p(Person x) <-> !(x == x).", "negated comparison of nodes"),
+        ("pred p(Person x) <-> name(x) == 3.", "no attribute named 'name'"),
+        ("pred p(Person x, Person x) <-> friend(x, x).", "two parameters named x"),
+        ("pred p(Person x) <-> friend(x, y).\npred p(Person x) <-> friend(y, x).", "defined twice"),
+    ],
+)
+def test_rule_errors(rules, message):
+    with pytest.raises(RuleError, match=message):
+        evaluate(rules, model())
+
+
+@pytest.mark.parametrize(
+    ("rules", "feature"),
+    [
+        ("pred p(Person x) <-> count { friend(x, _) } > 1.", "aggregation"),
+        ("pred p(Person x) <-> age(x) + 1 > 3.", "arithmetic"),
+        ("shadow pred p(Person x) <-> candidate must friend(x, x).", "candidate"),
+        (
+            "pred p(Person x) subsets q <-> friend(x, x).\npred q(Person x).",
+            "subsets on a predicate",
+        ),
+        (
+            "pred p(Person x) <-> friend(x, x).\npred q(Person x) subsets p.",
+            "subsets of a predicate",
+        ),
+        ("pred p(Person x) <-> friend(x, x).\n!p(alice).", "assertions about a predicate"),
+        ("class A { p[] r }\npred p(Person x) <-> friend(x, x).", "type of a reference"),
+        ("pred p(Person x) <-> vip(x) < true.", "ordering booleans"),
+    ],
+)
+def test_unsupported(rules, feature):
+    m = model()
+    if "vip" in rules:
+        m = PartialModel(
+            m.nodes, m.relations, [Attribute.of("Person::vip", "boolean", 4, [(0, True)])]
+        )
+        m = PartialModel(
+            m.nodes, [*m.relations, Relation.of("Person::vip", 1, [((0,), "true")])], m.attributes
+        )
+    with pytest.raises(UnsupportedRuleError, match=feature):
+        evaluate(rules, m)
+
+
+def test_parser_skips_other_statements_and_reads_kinds():
+    source = """
+    class A { int n  A[] r }
+    enum E { x, y }
+    A(a). n(a): 1..2. scope A = 1..5.
+    propagation rule r1(A a) <-> r(a, a) ==> !r(a, a).
+    error pred e(A a) <-> r(a, a).
+    shadow pred s(a) <-> must r(a, _).
+    error short(A a) <-> r(a, _).
+    pred 'odd name'(A a, b) <-> r(a, b) ; r(b, a).
+    pred base(A a).
+    """
+    predicates = parse(source).predicates
+    assert [(p.name, p.kind) for p in predicates] == [
+        ("e", "error"),
+        ("s", "shadow"),
+        ("short", "error"),
+        ("odd name", "pred"),
+        ("base", "pred"),
+    ]
+    assert len(predicates[3].body) == 2 and predicates[4].body is None
+    assert [(p.type, p.name) for p in predicates[3].parameters] == [("A", "a"), (None, "b")]
+
+
+def test_rule_errors_have_positions():
+    with pytest.raises(RuleError) as raised:
+        evaluate("pred p(Person x) <->\n    friend(x, ).", model())
+    assert raised.value.position is not None and raised.value.position.line == 2
+
+
+def test_partial_models_check_their_input():
+    with pytest.raises(ValueError, match="arity"):
+        Relation.of("r", 2, [((0,), "true")])
+    with pytest.raises(ValueError, match="two relations"):
+        PartialModel([Node("a", "a")], [Relation.of("r", 1, []), Relation.of("r", 1, [])])
+    # Without builtin::exists, every node exists; without equals, each equals itself.
+    bare = PartialModel([Node("a", "a"), Node("b", "b")], [Relation.of("R", 1, [((0,), "true")])])
+    results = evaluate("pred p(R x) <-> R(y), x == y.", bare)
+    assert dict(results["p"].items()) == {(0,): "true"}
+
+
+def test_predicates_without_a_body_are_unknown_on_their_types():
+    rules = [
+        "pred trusted(Person p).",
+        "pred pair(Person p, q).",
+        "pred vouched(Person p, Person q) <-> friend(p, q), trusted(q).",
+    ]
+    results = evaluate(rules, model(), select=["trusted", "pair", "vouched"])
+    assert values(results["trusted"]) == {(0,): "unknown", (1,): "unknown", (2,): "unknown"}
+    assert len(values(results["pair"])) == 3 * 4 and set(values(results["pair"]).values()) == {
+        "unknown"
+    }
+    assert values(results["vouched"]) == {(0, 1): "unknown", (1, 2): "unknown", (2, 0): "unknown"}
+    # Values the model has for one are its own.
+    given = PartialModel(
+        model().nodes, [*model().relations, Relation.of("trusted", 1, [((2,), "true")])]
+    )
+    assert values(evaluate(rules, given, select=["trusted"])["trusted"]) == {(2,): "true"}
