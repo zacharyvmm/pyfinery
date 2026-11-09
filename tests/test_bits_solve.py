@@ -12,8 +12,9 @@ import random
 import numpy as np
 import pytest
 
-from pyfinery.bits._solve import Factor, Node, Var, bind, make_factor, solve
-from pyfinery.bits._values import from_tuples, to_tuples
+from pyfinery.bits import solve as solve_module
+from pyfinery.bits.solve import Factor, Node, Var, bind, make_factor, solve
+from pyfinery.bits.values import from_tuples, to_tuples
 
 
 def _brute_force(factors, head, variables, n):
@@ -57,6 +58,16 @@ def _draw(rng: random.Random, n: int):
 
 @pytest.mark.parametrize("seed", range(300))
 def test_solve_matches_enumeration(seed):
+    _check_against_enumeration(seed)
+
+
+@pytest.mark.parametrize("seed", range(50))
+def test_bulk_joins_in_chunks_match_enumeration(seed, monkeypatch):
+    monkeypatch.setattr(solve_module, "CHUNK_WORDS", 3)  # a few rows at a time
+    _check_against_enumeration(seed)
+
+
+def _check_against_enumeration(seed):
     rng = random.Random(seed)
     n = rng.randint(1, 5)
     variables, specs, head = _draw(rng, n)

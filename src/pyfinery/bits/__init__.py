@@ -24,24 +24,46 @@ Needs NumPy: ``pip install 'pyfinery[bits]'``.
 
 from __future__ import annotations
 
+# The modules, in the order data flows through them:
+#
+#   metamodel   BitsEngine.query_graph: Graph -> PartialModel -> PackedModel -> QueryResult
+#   syntax      Refinery source -> Source (the pred declarations, as written)
+#   packed      PackedModel: a PartialModel's relations as bits; evaluate(), combine(), connect()
+#   rules       Rules: rules compiled once (read, checked), to evaluate on PackedModels
+#   evaluation  plan, then run each step, building its must and may matrices
+#   plan        the steps: closures and predicates, each after the relations it reads
+#   clauses     a clause, checked and rewritten as Refinery's ClausePostProcessor does
+#   compare     comparisons of attribute values (IntInterval, RealInterval, StringValue)
+#   solve       a clause's factors -> its parameters' tuples: matrix products, bulk joins
+#   values      sets of tuples of nodes: packed bits up to two nodes, arrays beyond
+#   kernels     packed-bit vectors and matrices: product, transitive closure, ...
+#   model       PartialModel: nodes, and the must/may tuples of base relations
+#
+# Only the names below are the API; the modules' other names may change.
+
 try:
     import numpy  # noqa: F401
 except ImportError as e:  # pragma: no cover
     raise ImportError("pyfinery.bits needs NumPy: pip install 'pyfinery[bits]'") from e
 
-from ._errors import RuleError, UnsupportedRuleError
-from ._evaluate import PredicateValues, evaluate
-from ._metamodel import BitsEngine
-from ._model import Attribute, LogicValue, Node, PartialModel, Relation
+from .errors import RuleError, UnsupportedRuleError
+from .evaluation import PredicateValues
+from .metamodel import BitsEngine
+from .model import Attribute, LogicValue, Node, PartialModel, Relation
+from .packed import PackedModel, PackedRelation, evaluate
+from .rules import Rules
 
 __all__ = [
     "Attribute",
     "BitsEngine",
     "LogicValue",
     "Node",
+    "PackedModel",
+    "PackedRelation",
     "PartialModel",
     "PredicateValues",
     "Relation",
+    "Rules",
     "RuleError",
     "UnsupportedRuleError",
     "evaluate",

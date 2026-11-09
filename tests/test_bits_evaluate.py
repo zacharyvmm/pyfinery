@@ -20,7 +20,7 @@ from pyfinery.bits import (
     UnsupportedRuleError,
     evaluate,
 )
-from pyfinery.bits._syntax import parse
+from pyfinery.bits.syntax import parse
 
 
 def model() -> PartialModel:
@@ -256,7 +256,7 @@ def test_strings_are_values_even_when_spelled_like_logic_values():
     ],
 )
 def test_string_literals_decode_java_escapes(literal, value):
-    from pyfinery.bits._syntax import string_literal
+    from pyfinery.bits.syntax import string_literal
 
     assert string_literal(literal) == value
 
@@ -277,7 +277,7 @@ def test_string_literals_decode_java_escapes(literal, value):
 )
 def test_names_are_written_as_refinery_writes_them(value, name):
     """As checked against the pinned image: these are the names of its JSON output."""
-    from pyfinery.bits._syntax import refinery_name
+    from pyfinery.bits.syntax import refinery_name
 
     assert refinery_name(value) == name
 
@@ -304,7 +304,7 @@ def test_quoted_parameters_are_the_variables_their_bodies_name():
 
 
 def test_only_reference_types_count_as_predicates_typing_references():
-    from pyfinery.bits._syntax import parse
+    from pyfinery.bits.syntax import parse
 
     source = "class A { contains bar[0..1] foo opposite baz  refers B b; int n }"
     assert set(parse(source).in_classes) == {"bar", "B", "int"}
