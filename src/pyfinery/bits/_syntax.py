@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Literal
 
 from ._errors import RuleError, UnsupportedRuleError
@@ -61,7 +62,7 @@ class Atom:
 
 @dataclass(frozen=True)
 class Constant:
-    value: int | float | str | bool
+    value: int | Decimal | str | bool
 
 
 @dataclass(frozen=True)
@@ -516,8 +517,9 @@ def _negate(literal: Literal_) -> Literal_:
             )
 
 
-def _number(text: str) -> int | float:
+def _number(text: str) -> int | Decimal:
+    """A number as written: an int, or a real as a decimal (BigInteger and BigDecimal)."""
     try:
         return int(text)
     except ValueError:
-        return float(text)
+        return Decimal(text)

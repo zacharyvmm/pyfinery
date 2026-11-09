@@ -30,6 +30,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
+from decimal import Decimal
 
 import numpy as np
 from numpy.typing import NDArray
@@ -37,7 +38,7 @@ from numpy.typing import NDArray
 from . import _kernels as k
 from ._clauses import CallLiteral, Clause, CompareLiteral, Context, Operand, normalize
 from ._errors import RuleError, UnsupportedRuleError
-from ._model import Attribute, LogicValue, PartialModel, Relation
+from ._model import Attribute, LogicValue, PartialModel, Relation, real_interval
 from ._solve import Factor, Var, bind, make_factor, solve
 from ._syntax import (
     Atom,
@@ -395,16 +396,31 @@ def _bounds(operand: _Operand, variables: tuple[int, ...]) -> tuple[NDArray, NDA
     if operand.attribute is None:
         value = operand.constant
         if isinstance(value, bool):
-            value = float(value)
-        if not isinstance(value, int | float):
+            value = int(value)
+        if isinstance(value, Decimal):
+            low, high = real_interval(value)  # a real constant, as RealInterval.of rounds it
+        elif isinstance(value, int):
+            low = high = value
+        else:
             raise RuleError(f"not a number: {value!r}")
-        number = np.asarray(float(value))
-        return number, number
+        # Floats, unless they can't hold the numbers exactly.
+        if float(low) == low and float(high) == high:
+            return np.asarray(float(low)), np.asarray(float(high))
+        return np.asarray(low, dtype=object), np.asarray(high, dtype=object)
     lower, upper = operand.attribute.lower, operand.attribute.upper
     if operand.node is not None:
-        return np.asarray(lower[operand.node]), np.asarray(upper[operand.node])
+        return lower[operand.node : operand.node + 1].reshape(()), upper[
+            operand.node : operand.node + 1
+        ].reshape(())
     shape = _shape(operand, variables)
     return lower.reshape(shape), upper.reshape(shape)
+
+
+def _exact_together(*arrays: NDArray) -> tuple[NDArray, ...]:
+    """The arrays, as exact Python numbers if any of them needs to be."""
+    if any(array.dtype == object for array in arrays):
+        return tuple(array.astype(object) for array in arrays)
+    return arrays
 
 
 def _compare_numbers(
@@ -417,10 +433,13 @@ def _compare_numbers(
     ``a == b`` is ``a <= b`` and ``b <= a``; ``a < b`` is ``not (b <= a)``, and
     ``not`` turns ``(must, may)`` into ``(not may, not must)``.
     """
-    a, b = _bounds(left, variables), _bounds(right, variables)
+    a_low, a_high, b_low, b_high = _exact_together(
+        *_bounds(left, variables), *_bounds(right, variables)
+    )
+    a, b = (a_low, a_high), (b_low, b_high)
 
     def less_eq(x: tuple[NDArray, NDArray], y: tuple[NDArray, NDArray]) -> tuple[NDArray, NDArray]:
-        return x[1] <= y[0], x[0] <= y[1]
+        return np.asarray(x[1] <= y[0], bool), np.asarray(x[0] <= y[1], bool)
 
     def negation(value: tuple[NDArray, NDArray]) -> tuple[NDArray, NDArray]:
         return ~value[1], ~value[0]

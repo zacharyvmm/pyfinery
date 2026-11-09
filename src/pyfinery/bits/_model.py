@@ -10,6 +10,7 @@ import math
 import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
+from decimal import ROUND_CEILING, ROUND_FLOOR, Context, Decimal
 from typing import Literal
 
 import numpy as np
@@ -73,21 +74,47 @@ class Relation:
         )
 
 
-@dataclass(frozen=True)
+class _Error:
+    def __repr__(self) -> str:
+        return "Attribute.ERROR"
+
+
+Number = int | Decimal | float
+"""Exact, as Refinery's BigInteger and BigDecimal bounds; ``float`` only for infinities,
+or values a float holds exactly."""
+
+
 class Attribute:
     """The values of an attribute, as an interval per node: for booleans, ``false``
     is 0 and ``true`` 1; for strings, a known value is ``[0, 0]`` and in ``strings``.
 
     An unknown value is ``[-inf, inf]``. A node outside the attribute's class
     has no value, which Refinery treats as an error: the empty ``[inf, -inf]``.
+    Bounds are float64 arrays when every value is a float exactly, and object
+    arrays of exact ``int`` and ``Fraction`` otherwise.
     """
 
-    name: str
-    data_type: DataType
-    lower: NDArray[np.float64]
-    upper: NDArray[np.float64]
-    strings: tuple[str | None, ...] = ()
-    simple_name: str = ""
+    ERROR = _Error()
+    """The value of an attribute that is an error, for :meth:`of`."""
+
+    def __init__(
+        self,
+        name: str,
+        data_type: DataType,
+        lower: NDArray,
+        upper: NDArray,
+        strings: tuple[str | None, ...] = (),
+        simple_name: str = "",
+    ) -> None:
+        self.name = name
+        self.data_type = data_type
+        self.lower = lower
+        self.upper = upper
+        self.strings = strings
+        self.simple_name = simple_name or _simple(name)
+
+    def __repr__(self) -> str:
+        return f"Attribute({self.name!r}, {self.data_type!r})"
 
     @classmethod
     def of(
@@ -100,54 +127,87 @@ class Attribute:
     ) -> Attribute:
         """An attribute from ``(node, value)`` pairs, given for the nodes of its class.
 
-        A value is a number, a bool, a string, ``None`` or ``"unknown"`` for
-        unknown, ``"error"``, or for numbers an interval as Refinery writes it,
-        e.g. ``"3..9"`` or ``"*..5"``. Nodes not given have no value (error).
+        A value is ``None`` for unknown, :attr:`ERROR`, or else: a string for a
+        string attribute; a bool for a boolean one; and for numbers an ``int``,
+        a ``float`` or ``Decimal`` (reals), or text as Refinery writes it:
+        ``"5"``, ``"0.25"``, an interval ``"3..9"`` or ``"*..5"``,
+        ``"unknown"`` or ``"error"``. As in Refinery, a real is a decimal (a
+        ``float``, the one its ``repr`` writes, which is what Refinery is sent)
+        rounded outward to 16 significant digits. Nodes not given have no
+        value (error).
         """
-        lower = np.full(n, math.inf)
-        upper = np.full(n, -math.inf)
+        lower: list[Number] = [math.inf] * n
+        upper: list[Number] = [-math.inf] * n
         strings: list[str | None] = [None] * n
         for node, value in values:
-            if data_type == "string" and value not in (None, "unknown", "error"):
-                strings[node] = str(value)
-                lower[node] = upper[node] = 0.0
+            if data_type == "string" and isinstance(value, str):
+                strings[node] = value
+                lower[node] = upper[node] = 0
                 continue
-            low, high = _interval(value, data_type)
-            lower[node], upper[node] = low, high
+            lower[node], upper[node] = _interval(value, data_type)
+        bounds = [b for b in (*lower, *upper) if not isinstance(b, float)]
+        dtype = np.float64 if all(float(b) == b for b in bounds) else object
         return cls(
             name,
             data_type,
-            lower,
-            upper,
+            np.array(lower, dtype=dtype),
+            np.array(upper, dtype=dtype),
             tuple(strings) if data_type == "string" else (),
             simple_name or _simple(name),
         )
 
 
-def _interval(value: object, data_type: DataType) -> tuple[float, float]:
+_FLOOR = Context(prec=16, rounding=ROUND_FLOOR)
+_CEILING = Context(prec=16, rounding=ROUND_CEILING)
+
+
+def real_interval(value: Decimal) -> tuple[Decimal, Decimal]:
+    """A real as Refinery's ``RealInterval.of`` holds it: rounded outward to 16 digits."""
+    return _FLOOR.plus(value), _CEILING.plus(value)
+
+
+def _decimal(value: object) -> Decimal:
+    if isinstance(value, bool):
+        raise ValueError(f"not a number: {value!r}")
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"Refinery cannot represent the number {value!r}")
+        return Decimal(repr(value))
+    if isinstance(value, int | Decimal):
+        return Decimal(value)
+    return Decimal(str(value).strip())
+
+
+def _integer(value: object) -> int:
+    if isinstance(value, bool | float | Decimal):
+        raise ValueError(f"not an integer: {value!r}")
+    return int(value) if isinstance(value, int) else int(str(value).strip())
+
+
+def _interval(value: object, data_type: DataType) -> tuple[Number, Number]:
     if value is None or value == "unknown":
         return -math.inf, math.inf
-    if value == "error":
+    if value is Attribute.ERROR or value == "error":
         return math.inf, -math.inf
     if data_type == "boolean":
         if value in (True, "true"):
-            return 1.0, 1.0
+            return 1, 1
         if value in (False, "false"):
-            return 0.0, 0.0
+            return 0, 0
         raise ValueError(f"not a boolean: {value!r}")
-    if isinstance(value, bool):
-        raise ValueError(f"not a number: {value!r}")
-    if isinstance(value, int | float):
-        return float(value), float(value)
-    text = str(value)
-    lower, separator, upper = text.partition("..")
-    if not separator:
-        number = float(text)
-        return number, number
-    return (
-        -math.inf if lower.strip() == "*" else float(lower),
-        math.inf if upper.strip() == "*" else float(upper),
-    )
+    if data_type == "string":
+        raise ValueError(f"not a string: {value!r}")
+    lower: object = value
+    upper: object = value
+    if isinstance(value, str) and ".." in value:
+        lower, _, upper = value.partition("..")
+    if data_type == "int":
+        low = -math.inf if str(lower).strip() == "*" else _integer(lower)
+        high = math.inf if str(upper).strip() == "*" else _integer(upper)
+        return low, high
+    low = -math.inf if str(lower).strip() == "*" else real_interval(_decimal(lower))[0]
+    high = math.inf if str(upper).strip() == "*" else real_interval(_decimal(upper))[1]
+    return low, high
 
 
 def _simple(name: str) -> str:
@@ -274,6 +334,10 @@ def _attribute_value(value: object, data_type: str) -> object:
             return "error"
         case str() if data_type == "string" and value.startswith('"'):
             return _unquote(value)  # strings are quoted; ``unknown`` and ``error`` aren't
+        case "unknown":
+            return None
+        case "error":
+            return Attribute.ERROR
         case _:
             return value
 

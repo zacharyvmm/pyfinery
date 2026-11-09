@@ -200,3 +200,45 @@ def test_predicates_without_a_body_are_unknown_on_their_types():
         model().nodes, [*model().relations, Relation.of("trusted", 1, [((2,), "true")])]
     )
     assert values(evaluate(rules, given, select=["trusted"])["trusted"]) == {(2,): "true"}
+
+
+def test_numbers_are_exact_and_reals_rounded_as_refinery_does():
+    nodes = [Node(f"n{i}", f"n{i}") for i in range(3)]
+    big = 2**53
+    numbers = PartialModel(
+        nodes,
+        [Relation.of("A", 1, [((i,), "true") for i in range(3)])],
+        [
+            Attribute.of("A::n", "int", 3, [(0, big), (1, big + 1), (2, "3..9")]),
+            # 0.30000000000000004 has 17 significant digits: an interval of two.
+            Attribute.of("A::x", "real", 3, [(0, 0.1), (1, 0.30000000000000004), (2, "2.5")]),
+        ],
+    )
+    results = evaluate(
+        [
+            "pred same(A p, A q) <-> n(p) == n(q).",
+            f"pred above(A p) <-> n(p) > {big}.",
+            "pred third(A p) <-> x(p) == 0.3.",
+            "pred tenth(A p) <-> x(p) == 0.1.",
+        ],
+        numbers,
+    )
+    assert results["same"].value((0, 1)) == "false"
+    assert values(results["above"]) == {(1,): "true"}
+    assert results["third"].value((1,)) == "unknown"
+    assert values(results["tenth"]) == {(0,): "true"}
+
+
+def test_strings_are_values_even_when_spelled_like_logic_values():
+    nodes = [Node(f"n{i}", f"n{i}") for i in range(4)]
+    strings = [(0, "unknown"), (1, "error"), (2, None), (3, Attribute.ERROR)]
+    model = PartialModel(
+        nodes,
+        [Relation.of("A", 1, [((i,), "true") for i in range(4)])],
+        [Attribute.of("A::s", "string", 4, strings)],
+    )
+    results = evaluate(
+        ['pred word(A p) <-> s(p) == "unknown".', 'pred err(A p) <-> s(p) == "error".'], model
+    )
+    assert values(results["word"]) == {(0,): "true", (2,): "unknown", (3,): "error"}
+    assert values(results["err"]) == {(1,): "true", (2,): "unknown", (3,): "error"}
