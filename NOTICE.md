@@ -45,6 +45,14 @@ SPDX-License-Identifier: EPL-2.0
 
 `tests/conformance/upstream/` holds Refinery's file-based semantics tests (`src/test/resources/tools/refinery/generator`), unchanged. `tests/conformance/problems.py` and `tests/conformance/interpretation.py` port the code that reads them (`ProblemSplitter`, `SemanticsTestBuilder`, `SemanticsTestCaseBuilder`, `SemanticsExpectation` and `FilteredInterpretation`) from Java to Python. `tests/conformance/recorded/` holds the Refinery server's answers to them.
 
+### Refinery's partial-model semantics
+
+- Source: <https://github.com/graphs4value/refinery/tree/main/subprojects/logic/src/main/java/tools/refinery/logic>, from commit [`7470710`](https://github.com/graphs4value/refinery/tree/747071004a969288113bb09d85299bbd28c9f9df/subprojects/logic/src/main/java/tools/refinery/logic)
+- Copyright (c) 2021-2025 The Refinery Authors
+- License: EPL-2.0
+
+`src/pyfinery/bits/` evaluates Refinery predicates as Refinery does. `_clauses.py` ports the checks and rewrites of `ClausePostProcessor` (`logic/dnf`). `_evaluate.py` follows `DnfLifter` (`store-reasoning`) in reading literals in the *must* and *may* modalities, and ports the comparisons of `IntInterval`, `RealInterval`, `StringValue` and `TruthValue` (`logic/term`).
+
 ### Refinery documentation
 
 The API behaviour, Docker image (`ghcr.io/graphs4value/refinery`) and server environment variables used by `src/pyfinery/server.py` are described in the [Refinery documentation](https://refinery.tools/learn/docker/). This project doesn't redistribute the Docker image.
