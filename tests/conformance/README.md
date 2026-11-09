@@ -56,6 +56,8 @@ uv run python -m tests.conformance.recording [FILE.problem ...]
 
 This starts `recording.IMAGE` in Docker, or uses the server at `REFINERY_API_BASE`. Each recording holds the digest of its file, and a test fails if they don't match.
 
+Names in assertions are compared as Refinery writes them in its output: quoted only where they must be, escapes decoded (`'a\u0041'` is `aA`). A string holding a lone UTF-16 surrogate (`"\uD83D"`) comes back from the server as `"?"`, so it can't be expected as written.
+
 `PROPAGATION FAILURE` and `CONCRETIZATION FAILURE` cases can't be checked over the HTTP API, which doesn't say which step failed; no file uses them.
 
 ## Known Refinery issues

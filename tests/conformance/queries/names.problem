@@ -1,0 +1,46 @@
+% SPDX-FileCopyrightText: 2026 zacharyvmm <58368863+zacharyvmm@users.noreply.github.com>
+%
+% SPDX-License-Identifier: EPL-2.0
+
+% Quoted names: classes, references, predicates, atoms, enum literals and
+% objects. Refinery writes them in its output as they must be written in a
+% problem: quoted only when they must be, escapes decoded ('aA' is aA).
+
+class 'My Class' {
+    'My Class'[] 'odd ref'
+    Kind kind
+}
+
+enum Kind { 'a-b', plain }
+
+atom 'my atom', 'aA'.
+
+'My Class'('Jane Doe').
+'My Class'('my atom').
+'My Class'('aA').
+!exists('My Class'::new).
+default !'odd ref'(*, *).
+default !kind(*, *).
+'odd ref'('Jane Doe', 'my atom').
+?'odd ref'(aA, 'Jane Doe').
+kind('Jane Doe', Kind::'a-b').
+
+% TEST: quoted names as constants, relations and predicates
+
+pred 'odd pred'('My Class' x) <-> 'odd ref'(x, 'my atom').
+pred qualified('My Class' x) <-> 'My Class'::'odd ref'(x, 'my atom').
+pred toJane('My Class' x) <-> 'odd ref'(x, 'Jane Doe').
+pred dashed('My Class' x) <-> kind(x, Kind::'a-b').
+pred viaEscape('My Class' x) <-> 'odd ref'('aA', x).
+
+% EXPECT EXACTLY:
+'odd pred'('Jane Doe').
+!'odd pred'('my atom').
+qualified('Jane Doe').
+?toJane(aA).
+?toJane('aA').
+toJane('Jane Doe').
+dashed('Jane Doe').
+!dashed(aA).
+?viaEscape('Jane Doe').
+'My Class'::'odd ref'('Jane Doe', 'my atom').

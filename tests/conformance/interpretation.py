@@ -14,7 +14,6 @@ it refines the expected one (or, for ``EXPECT EXACTLY``, equals it).
 from __future__ import annotations
 
 import math
-import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 from decimal import ROUND_CEILING, ROUND_FLOOR, Context, Decimal
@@ -22,7 +21,7 @@ from fractions import Fraction
 
 from pyfinery.models import ErrorValue, JsonOutput, RelationMetadata, TupleElement, UnknownValue
 
-from .problems import Assertion, Expectation
+from .problems import Assertion, Expectation, java_unescape
 
 _TRUTH_VALUES = ("true", "false", "unknown", "error")
 
@@ -146,19 +145,7 @@ def _string(value: str) -> str | None:
     if it isn't one."""
     if len(value) < 2 or value[0] != '"' or value[-1] != '"':
         return None
-    escapes = {"n": "\n", "r": "\r", "t": "\t", "b": "\b", "f": "\f"}
-
-    def replace(match: re.Match[str]) -> str:
-        escaped = match.group(1)
-        if escaped.startswith("u"):
-            return chr(int(escaped[1:], 16))
-        return escapes.get(escaped, escaped)
-
-    decoded = re.sub(r"\\(u[0-9a-fA-F]{4}|.)", replace, value[1:-1], flags=re.DOTALL)
-    try:  # \uXXXX escapes are UTF-16 code units: join surrogate pairs
-        return decoded.encode("utf-16", "surrogatepass").decode("utf-16")
-    except UnicodeDecodeError:
-        return decoded
+    return java_unescape(value[1:-1])
 
 
 def _text(value: TupleElement) -> str:

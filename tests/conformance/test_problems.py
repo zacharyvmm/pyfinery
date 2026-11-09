@@ -66,7 +66,7 @@ def test_assertions():
     assert [(a.relation, a.arguments, a.value) for a in assertions] == [
         ("P", ("a",), "true"),
         ("P", ("b",), "false"),
-        ("odd name", ("x", None), "unknown"),
+        ("'odd name'", ("x", None), "unknown"),
         ("P::age", ("a",), "1..5"),
         ("age", ("b",), "*..3"),
         ("age", ("c",), "-2"),
@@ -222,3 +222,19 @@ def test_an_attribute_without_a_value_is_an_error():
     )
     interpretation = Interpretation(model)
     assert check(_expect(("n", ("a",), "error")), interpretation) == []
+
+
+@pytest.mark.parametrize(
+    ("written", "name"),
+    [
+        ("'My Class'::'odd ref'", "'My Class'::'odd ref'"),
+        ("'a\\u0041'", "aA"),
+        ("'atom'", "atom"),  # a keyword Refinery also takes as a name
+        ("'pred'", "'pred'"),
+        ("'e'", "e"),
+        ("'it\\'s'", "'it\\'s'"),
+    ],
+)
+def test_names_are_written_as_refinery_writes_them(written, name):
+    (case,) = split(f"% EXPECT:\nA({written}).\n")
+    assert case.expectations[0].assertions[0].arguments == (name,)

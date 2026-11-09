@@ -63,8 +63,9 @@ class Assertion:
     """An assertion of an ``EXPECT`` chunk, e.g. ``?friend(a, b).`` or ``age(a): 1..5.``"""
 
     relation: str
+    """As Refinery writes it, e.g. ``'My Class'::name``."""
     arguments: tuple[str | None, ...]
-    """Node names; ``None`` for the wildcard ``*``."""
+    """Node names as Refinery writes them; ``None`` for the wildcard ``*``."""
     value: str
     """``"true"``, ``"false"``, ``"unknown"`` or ``"error"``, or an attribute value
     as written, e.g. ``"20"``, ``"10..30"``, ``"*..5"`` or ``'"text"'``."""
@@ -362,11 +363,16 @@ def _parse_assertion(tokens: list[_Token], line: int, source: str) -> Assertion:
 
 
 def _qualified_name(tokens: list[_Token], position: int) -> tuple[str | None, int]:
-    """A name such as ``Person::friend``, with quoted parts unquoted."""
+    """A name such as ``Person::friend``, as Refinery writes it in its output: each part
+    unquoted, its escapes decoded, and quoted again if Refinery quotes it, e.g.
+    ``'My Class'::name`` for ``'My Class'::'name'``, ``atom`` for ``'atom'``, or ``aA``
+    for ``'a\\u0041'``."""
     parts = []
     while position < len(tokens) and tokens[position].kind in ("name", "quoted"):
         token = tokens[position]
-        parts.append(_unquote(token.text) if token.kind == "quoted" else token.text)
+        parts.append(
+            refinery_name(java_unescape(token.text[1:-1])) if token.kind == "quoted" else token.text
+        )
         position += 1
         if position < len(tokens) and tokens[position].text == "::":
             position += 1
@@ -375,8 +381,45 @@ def _qualified_name(tokens: list[_Token], position: int) -> tuple[str | None, in
     return ("::".join(parts) if parts else None), position
 
 
-def _unquote(text: str) -> str:
-    return re.sub(r"\\(.)", r"\1", text[1:-1])
+# The keywords Refinery quotes when it writes a name: its grammar's keywords, but those
+# its Identifier rule also takes as names (IdentifierValueConverter, Problem.xtext).
+_QUOTED_KEYWORDS = frozenset(
+    {
+        *("abstract", "candidate", "class", "declare", "default", "enum", "error"),
+        *("extends", "false", "import", "is", "may", "must", "partial", "pred"),
+        *("refers", "rule", "scope", "true", "unknown", "__proto__"),
+    }
+)
+_JAVA_ESCAPES = {"\\": "\\\\", "'": "\\'", '"': '\\"', "\n": "\\n", "\t": "\\t", "\r": "\\r"}
+_JAVA_ESCAPES |= {"\b": "\\b", "\f": "\\f"}
+
+
+def refinery_name(value: str) -> str:
+    """A name as Refinery writes it in its output: as it is if it is an identifier and
+    not a keyword it quotes, else quoted and Java-escaped."""
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value) and value not in _QUOTED_KEYWORDS:
+        return value
+    return "'" + "".join(_JAVA_ESCAPES.get(c, c) for c in value) + "'"
+
+
+_ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "b": "\b", "f": "\f"}
+
+
+def java_unescape(body: str) -> str:
+    """Decode Java's escapes (Refinery's lexer is Xtext's): ``\\uXXXX`` are UTF-16 code
+    units, so a surrogate pair is one character; a lone surrogate stays."""
+
+    def replace(match: re.Match[str]) -> str:
+        escaped = match.group(1)
+        if escaped.startswith("u"):
+            return chr(int(escaped[1:], 16))
+        return _ESCAPES.get(escaped, escaped)
+
+    decoded = re.sub(r"\\(u[0-9a-fA-F]{4}|.)", replace, body, flags=re.DOTALL)
+    try:
+        return decoded.encode("utf-16", "surrogatepass").decode("utf-16")
+    except UnicodeDecodeError:
+        return decoded
 
 
 def is_logic_value(value: str) -> bool:
