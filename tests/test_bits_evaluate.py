@@ -159,7 +159,7 @@ def test_parser_skips_other_statements_and_reads_kinds():
         ("e", "error"),
         ("s", "shadow"),
         ("short", "error"),
-        ("odd name", "pred"),
+        ("'odd name'", "pred"),
         ("base", "pred"),
     ]
     assert len(predicates[3].body) == 2 and predicates[4].body is None
@@ -259,3 +259,38 @@ def test_string_literals_decode_java_escapes(literal, value):
     from pyfinery.bits._syntax import string_literal
 
     assert string_literal(literal) == value
+
+
+@pytest.mark.parametrize(
+    ("value", "name"),
+    [
+        ("plain", "plain"),
+        ("e", "e"),
+        ("atom", "atom"),  # keywords Refinery also takes as names aren't quoted
+        ("contains", "contains"),
+        ("pred", "'pred'"),
+        ("true", "'true'"),
+        ("my atom", "'my atom'"),
+        ("it's", "'it\\'s'"),
+        ("x\\y", "'x\\\\y'"),
+    ],
+)
+def test_names_are_written_as_refinery_writes_them(value, name):
+    """As checked against the pinned image: these are the names of its JSON output."""
+    from pyfinery.bits._syntax import refinery_name
+
+    assert refinery_name(value) == name
+
+
+def test_quoted_names_resolve_to_the_models_names():
+    nodes = [Node("'Jane Doe'", "'Jane Doe'"), Node("'my atom'", "'my atom'", "atom")]
+    model = PartialModel(
+        nodes,
+        [
+            Relation.of("'My Class'", 1, [((0,), "true"), ((1,), "true")]),
+            Relation.of("'My Class'::'odd ref'", 2, [((0, 1), "true")], "'odd ref'"),
+        ],
+    )
+    rules = "pred 'odd pred'('My Class' x) <-> 'My Class'::'odd ref'(x, 'my atom')."
+    results = evaluate(rules, model, select=["odd pred"])
+    assert values(results["'odd pred'"]) == {(0,): "true"}

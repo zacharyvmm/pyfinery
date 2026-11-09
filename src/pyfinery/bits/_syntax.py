@@ -143,10 +143,16 @@ class _Token:
 
     @property
     def value(self) -> str:
-        """The text, unquoted for quoted names."""
+        """The text, unquoted (and its escapes decoded) for quoted names."""
         if self.kind == "quoted":
-            return re.sub(r"\\(.)", r"\1", self.text[1:-1])
+            return string_literal(self.text)
         return self.text
+
+    @property
+    def name(self) -> str:
+        """The name as Refinery writes it in its output: quoted only if it must be,
+        e.g. ``'My Class'``, or ``aA`` for ``'a\\u0041'``."""
+        return refinery_name(self.value)
 
 
 _EOF = "<end of input>"
@@ -222,10 +228,11 @@ class _Parser:
         return self.next()
 
     def qualified_name(self) -> str:
-        parts = [self.identifier().value]
+        """A name as Refinery writes it in its output, e.g. ``'My Class'::name``."""
+        parts = [self.identifier().name]
         while self.peek().text == "::" and self.peek(1).kind in ("name", "quoted"):
             self.next()
-            parts.append(self.identifier().value)
+            parts.append(self.identifier().name)
         return "::".join(parts)
 
     # -- statements --
@@ -253,7 +260,7 @@ class _Parser:
                 if _is_class(statement):
                     for token in statement:
                         if token.kind in ("name", "quoted"):
-                            in_classes.setdefault(token.value, token.position)
+                            in_classes.setdefault(token.name, token.position)
         return Source(tuple(predicates), asserted, in_classes)
 
     def skip_statement(self) -> None:
@@ -474,13 +481,13 @@ def _asserted(statement: list[_Token]) -> str | None:
         at += 1
     parts = []
     while at < len(statement) and statement[at].kind in ("name", "quoted"):
-        parts.append(statement[at].value)
+        parts.append(statement[at].name)
         at += 1
         if at < len(statement) and statement[at].text == "::":
             at += 1
         else:
             break
-    if not parts or parts[0] in _STATEMENT_KEYWORDS:
+    if not parts or (statement[0].kind == "name" and parts[0] in _STATEMENT_KEYWORDS):
         return None
     if at < len(statement) and statement[at].text == "(":
         return "::".join(parts)
@@ -514,6 +521,28 @@ def _negate(literal: Literal_) -> Literal_:
             return Comparison(
                 literal.left, literal.operator, literal.right, not literal.negated, literal.position
             )
+
+
+# The keywords Refinery quotes when it writes a name: its grammar's keywords, but those
+# its Identifier rule also takes as names (IdentifierValueConverter, Problem.xtext).
+_QUOTED_KEYWORDS = frozenset(
+    {
+        *("abstract", "candidate", "class", "declare", "default", "enum", "error"),
+        *("extends", "false", "import", "is", "may", "must", "partial", "pred"),
+        *("refers", "rule", "scope", "true", "unknown", "__proto__"),
+    }
+)
+_SIMPLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+_JAVA_ESCAPES = {"\\": "\\\\", "'": "\\'", '"': '\\"', "\n": "\\n", "\t": "\\t", "\r": "\\r"}
+_JAVA_ESCAPES |= {"\b": "\\b", "\f": "\\f"}
+
+
+def refinery_name(value: str) -> str:
+    """A name as Refinery writes it in its output (``IdentifierValueConverter``):
+    as it is if it is an identifier and not a keyword, else quoted, Java-escaped."""
+    if _SIMPLE_NAME.match(value) and value not in _QUOTED_KEYWORDS:
+        return value
+    return "'" + "".join(_JAVA_ESCAPES.get(c, c) for c in value) + "'"
 
 
 _ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "b": "\b", "f": "\f"}

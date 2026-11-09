@@ -49,6 +49,7 @@ from ._syntax import (
     PredicateKind,
     Source,
     parse,
+    refinery_name,
 )
 from ._values import Value, difference, empty, from_tuples, intersection, to_tuples, union
 
@@ -114,12 +115,13 @@ def evaluate(
     names = list(select) if select is not None else list(evaluator.defined)
     results = {}
     for name in names:
-        predicate = evaluator.defined.get(name) or evaluator.declared.get(name)
+        predicate = evaluator.predicate(name)
         if predicate is None:
             raise RuleError(f"no predicate named {name!r} in the rules")
-        must = evaluator.relation(name, "must", predicate.position)
-        may = evaluator.relation(name, "may", predicate.position)
-        results[name] = PredicateValues(name, predicate.kind, len(predicate.parameters), must, may)
+        must = evaluator.relation(predicate.name, "must", predicate.position)
+        may = evaluator.relation(predicate.name, "may", predicate.position)
+        arity = len(predicate.parameters)
+        results[predicate.name] = PredicateValues(predicate.name, predicate.kind, arity, must, may)
     return results
 
 
@@ -186,6 +188,15 @@ class _Evaluator:
         if relation is None:
             raise RuleError(f"no relation named {name!r}", position)
         return relation
+
+    def predicate(self, name: str) -> Predicate | None:
+        """A predicate of the rules by name, as Refinery writes it or (if it needs
+        quotes) unquoted, e.g. ``'odd name'`` or ``odd name``."""
+        for candidate in (name, refinery_name(name)):
+            found = self.defined.get(candidate) or self.declared.get(candidate)
+            if found is not None:
+                return found
+        return None
 
     def base(self, relation: Relation, modality: Modality) -> Value:
         key = (relation.name, modality)
