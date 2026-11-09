@@ -57,3 +57,7 @@ uv run python -m tests.conformance.recording [FILE.problem ...]
 This starts `recording.IMAGE` in Docker, or uses the server at `REFINERY_API_BASE`. Each recording holds the digest of its file, and a test fails if they don't match.
 
 `PROPAGATION FAILURE` and `CONCRETIZATION FAILURE` cases can't be checked over the HTTP API, which doesn't say which step failed; no file uses them.
+
+## Known Refinery issues
+
+On the pinned image, a call that repeats a variable no other literal of its clause has is evaluated as true: `pred cyc() <-> r+(z, z).` holds even when `r` has no cycles, and `pred loop() <-> r(z, z).` is true when every loop is only unknown. With a parameter instead (`pred cycP(A x) <-> r+(x, x).`), the answer is right. `generate.py` doesn't draw such clauses, and no other file has one.
