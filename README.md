@@ -161,7 +161,7 @@ result = guessed.query([deployment], BitsEngine(), [
 ])
 ```
 
-The matches are the ones Refinery computes, with the same logic values. Relations are packed bit matrices, and only the predicates you report (and those they call) are computed. A query over 4,000 objects takes well under a second. The engine is checked against Refinery's answers in `tests/conformance` and on random graphs.
+The matches are the ones Refinery computes, with the same logic values. Relations are packed bit matrices, and only the rules' predicates are computed, not every relation of the metamodel. A query over 4,000 objects takes well under a second. The engine is checked against Refinery's answers in `tests/conformance` and on random graphs.
 
 - **Rules:** classes, references, attributes and predicates, `+`, `!`, `==` and `!=`, comparisons of attribute values, `must` and `may` in `shadow` predicates, and `error` predicates. Aggregation (`count`, `sum`, ...), arithmetic, `candidate` and assertions in rules raise `pyfinery.bits.UnsupportedRuleError`; use Refinery for those.
 - **Refinement:** Refinery refines uncertain facts from what must hold: a required reference whose only value is uncertain must hold, an object has at most one container, and an `error` predicate must not hold. The bits engine doesn't, so where that would change the answer, it raises `UnsupportedRuleError` rather than answer differently. Graphs without uncertainty are never refused.
