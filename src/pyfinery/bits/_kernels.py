@@ -42,16 +42,19 @@ def empty_matrix(n: int) -> Bits:
 
 def vector_of(n: int, indices: NDArray[np.integer] | list[int]) -> Bits:
     """The set of ``indices``."""
-    dense = np.zeros(words(n) * 64, bool)
-    dense[np.asarray(indices, dtype=np.int64)] = True
-    return pack(dense)
+    found = np.asarray(indices, dtype=np.int64)
+    vector = empty_vector(n)
+    np.bitwise_or.at(vector, found >> 6, _ONE << (found & 63).astype(np.uint64))
+    return vector
 
 
 def matrix_of(n: int, rows: NDArray[np.integer], cols: NDArray[np.integer]) -> Bits:
-    """The relation of the pairs ``(rows[k], cols[k])``."""
-    dense = np.zeros((n, words(n) * 64), bool)
-    dense[np.asarray(rows, dtype=np.int64), np.asarray(cols, dtype=np.int64)] = True
-    return pack(dense)
+    """The relation of the pairs ``(rows[k], cols[k])``: work in the number of pairs."""
+    rows = np.asarray(rows, dtype=np.int64)
+    cols = np.asarray(cols, dtype=np.int64)
+    matrix = empty_matrix(n)
+    np.bitwise_or.at(matrix, (rows, cols >> 6), _ONE << (cols & 63).astype(np.uint64))
+    return matrix
 
 
 def pack(dense: NDArray[np.bool_]) -> Bits:
@@ -67,12 +70,25 @@ def unpack(bits: Bits, n: int) -> NDArray[np.bool_]:
 
 
 def indices(vector: Bits, n: int) -> NDArray[np.intp]:
-    return np.flatnonzero(unpack(vector, n))
+    """The members of a vector, in order: work in the number of nonzero words."""
+    (word,) = np.nonzero(vector)
+    bits = _bits_of(vector[word])
+    at, bit = np.nonzero(bits)
+    return (word[at] * 64 + bit).astype(np.intp)
 
 
 def pairs(matrix: Bits, n: int) -> tuple[NDArray[np.intp], NDArray[np.intp]]:
-    rows, cols = np.nonzero(unpack(matrix, n))
-    return rows, cols
+    """The pairs of a matrix, by row then column: work in the number of nonzero words."""
+    row, word = np.nonzero(matrix)
+    bits = _bits_of(matrix[row, word])
+    at, bit = np.nonzero(bits)
+    return row[at].astype(np.intp), (word[at] * 64 + bit).astype(np.intp)
+
+
+def _bits_of(values: NDArray[np.uint64]) -> NDArray[np.uint8]:
+    """The 64 bits of each word, least significant first: shape ``(len(values), 64)``."""
+    raw = np.ascontiguousarray(values).view(np.uint8).reshape(-1, 8)
+    return np.unpackbits(raw, axis=1, bitorder="little")
 
 
 def count(bits: Bits) -> int:
@@ -88,10 +104,8 @@ def complement_matrix(matrix: Bits, n: int) -> Bits:
 
 
 def transpose(matrix: Bits, n: int) -> Bits:
-    dense = unpack(matrix, n)
-    padded = np.zeros((n, words(n) * 64), bool)
-    padded[:, :n] = dense.T
-    return pack(padded)
+    rows, cols = pairs(matrix, n)
+    return matrix_of(n, cols, rows)
 
 
 def row_any(matrix: Bits, n: int) -> Bits:
@@ -125,8 +139,9 @@ def outer(rows: Bits, columns: Bits, n: int) -> Bits:
 
 def diagonal(matrix: Bits, n: int) -> Bits:
     """``{i | (i, i)}``."""
-    dense = unpack(matrix, n)
-    return vector_of(n, np.flatnonzero(np.diagonal(dense)))
+    nodes = np.arange(n)
+    on = (matrix[nodes, nodes >> 6] >> (nodes & 63).astype(np.uint64)) & _ONE
+    return vector_of(n, nodes[on.astype(bool)])
 
 
 def identity(n: int) -> Bits:
@@ -182,7 +197,9 @@ def closure(matrix: Bits, n: int) -> Bits:
     reach. Each component is visited once, so the cost grows with the edges
     and the size of the result, whatever order the nodes are in.
     """
-    successors = [np.flatnonzero(r).tolist() for r in unpack(matrix, n)]
+    rows, cols = pairs(matrix, n)
+    starts = np.searchsorted(rows, np.arange(n + 1))
+    successors = [cols[starts[i] : starts[i + 1]].tolist() for i in range(n)]
     result = empty_matrix(n)
     for component in _components(successors):
         members = np.asarray(component)

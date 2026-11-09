@@ -63,15 +63,20 @@ class PredicateValues:
     must: Value
     may: Value
 
+    def tuples(self) -> dict[LogicValue, NDArray[np.intp]]:
+        """The tuples that are ``true``, ``unknown`` and ``error``, as arrays of shape
+        ``(m, arity)``, in no particular order."""
+        return {
+            "true": to_tuples(intersection(self.must, self.may)),
+            "unknown": to_tuples(difference(self.may, self.must)),
+            "error": to_tuples(difference(self.must, self.may)),
+        }
+
     def items(self) -> Iterator[tuple[tuple[int, ...], LogicValue]]:
         """The tuples that aren't false, and their values, ordered by tuple."""
         found: list[tuple[tuple[int, ...], LogicValue]] = []
-        for value, logic_value in (
-            (intersection(self.must, self.may), "true"),
-            (difference(self.may, self.must), "unknown"),
-            (difference(self.must, self.may), "error"),
-        ):
-            found += [(tuple(int(i) for i in t), logic_value) for t in to_tuples(value)]
+        for logic_value, tuples in self.tuples().items():
+            found += [(key, logic_value) for key in map(tuple, tuples.tolist())]
         return iter(sorted(found))
 
     def value(self, key: tuple[int, ...]) -> LogicValue:
