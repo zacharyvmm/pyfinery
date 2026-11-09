@@ -22,6 +22,7 @@ what is uncertain stays unknown. The partial model that follows has:
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Iterator, Sequence
 from typing import TYPE_CHECKING
 
@@ -31,13 +32,12 @@ from .._instances import Graph, Value
 from .._options import LogicValue, Predicate
 from .._render import _declare_predicate, predicate_facts
 from .._results import Match, QueryResult, Violation, reference_errors
-from .._schema import EnumLike, Feature, LiteralEnum, Schema, UnionClass, class_name
-from .._syntax import quote_id
+from .._schema import EnumLike, Feature, LiteralEnum, Schema, UnionClass
 from . import _kernels as k
 from ._errors import UnsupportedRuleError
 from ._evaluate import PredicateValues, evaluate
 from ._model import Attribute, DataType, Node, PartialModel, Relation
-from ._syntax import Atom, Call, parse
+from ._syntax import Atom, Call, parse, refinery_name
 from ._syntax import Predicate as Predicate_
 
 if TYPE_CHECKING:
@@ -89,9 +89,11 @@ class BitsEngine:
             raise UnsupportedRuleError(abstract)
         model, objects = partial_model(schema, graph, predicates)
         kinds = {p.name: p for p in parsed.predicates}
+        # The names as selected, by the names the rules give them (e.g. 'odd name').
+        selected = {(n if n in kinds else refinery_name(n)): n for n in select}
         # Every predicate with a body is evaluated, as Refinery does: its error
         # tuples are reported, whatever is selected.
-        names = list(dict.fromkeys([*select, *(p.name for p in parsed.predicates if p.body)]))
+        names = list(dict.fromkeys([*selected, *(p.name for p in parsed.predicates if p.body)]))
         used = _dependencies(kinds, names, model)
         for reason, relations in _refined_by_containment(schema, graph, model):
             if relations is None or relations & used:
@@ -116,7 +118,7 @@ class BitsEngine:
             for key in _sorted(by_value["error"]).tolist():
                 names_, nodes = _named(key, node_names, objects)
                 violations.append(Violation(kind, name, names_, nodes))
-            if name not in select:
+            if name not in selected:
                 continue
             parameters = tuple(p.name for p in kinds[name].parameters)
             true, unknown = by_value["true"], by_value["unknown"]
@@ -128,7 +130,7 @@ class BitsEngine:
             order = np.lexsort(keys.T[::-1]) if keys.shape[1] else np.arange(len(keys))
             for key, value in zip(keys[order].tolist(), logic_values[order].tolist(), strict=True):
                 names_, nodes = _named(key, node_names, objects)
-                matches.append(Match(name, names_, nodes, value, parameters))
+                matches.append(Match(selected[name], names_, nodes, value, parameters))
         return QueryResult(matches, violations, source, None)
 
 
@@ -168,13 +170,13 @@ def _refined_by_containment(
 
     With ``c`` values certain and ``u`` uncertain, against ``[lower..upper]``:
     the uncertain ones must hold if ``c + u <= lower``, and can't if
-    ``c >= upper``; an object that only may exist can't if ``c + u < lower``.
-    An object has one container at most, and exactly one if a containment can
-    hold its class; containment has no cycles.
+    ``c >= upper``; an object that only may exist can't if ``c + u < lower`` or
+    ``c > upper``. An object has one container at most, and exactly one if a
+    containment can hold its class; containment has no cycles.
     """
     exists = {i: node.exists for i, node in enumerate(graph.nodes)}
     counts: dict[tuple[str, int], list[int]] = {}
-    containers: dict[int, list[int]] = {}
+    containers: dict[int, list[tuple[int, bool]]] = {}  # child: (container, certain)
     features = [f for fs in schema.features.values() for f in fs if not f.is_attribute]
     contains = {_feature_name(f) for f in features if f.kind == "contains"}
     for relation in model.relations:
@@ -185,7 +187,7 @@ def _refined_by_containment(
             certain = key in must
             counts.setdefault((relation.name, key[0]), [0, 0])[0 if certain else 1] += 1
             if relation.name in contains:
-                containers.setdefault(key[1], [0, 0])[0 if certain else 1] += 1
+                containers.setdefault(key[1], []).append((key[0], certain))
     for feature in features:
         name = _feature_name(feature)
         changed = {name} | ({_opposite_name(schema, feature)} if feature.opposite else set())
@@ -208,6 +210,12 @@ def _refined_by_containment(
                     "Refinery would conclude it doesn't exist",
                     None,
                 )
+            if upper is not None and certain > upper and exists[i] == "unknown":
+                yield (
+                    f"{node.name}, which only may exist and has more values of {name} than "
+                    f"[{feature.lower}..{upper}] allows: Refinery would conclude it doesn't exist",
+                    None,
+                )
     every_containment = contains | {
         _opposite_name(schema, f) for f in features if f.kind == "contains" and f.opposite
     }
@@ -215,7 +223,18 @@ def _refined_by_containment(
     held = tuple(_classes(f.target) for f in features if f.kind == "contains")
     contained = tuple(c for classes in held for c in classes)
     for child, node in enumerate(graph.nodes):
-        certain, uncertain = containers.get(child, [0, 0])
+        found = containers.get(child, [])
+        holders = [parent for parent, sure in found if sure]
+        certain, uncertain = len(holders), len(found) - len(holders)
+        if certain > 1:
+            # A contradiction: Refinery makes the containment links errors, and rules
+            # out the objects involved that only may exist.
+            involved = [child, *holders]
+            uncertain_objects = any(exists.get(i) == "unknown" for i in involved)
+            yield (
+                f"{node.name}, in {certain} containers at once: Refinery contradicts it",
+                None if uncertain_objects else every_containment,
+            )
         if uncertain and certain:
             yield (
                 f"uncertain containers of {node.name}, which has a certain one: "
@@ -334,9 +353,9 @@ def partial_model(
     for enum_type in schema.enums:
         model.enum(enum_type)
     for cls in schema.classes:
-        model.class_(cls.__name__, cls)
+        model.class_(refinery_name(cls.__name__), cls)
     for union in schema.unions:
-        model.class_(union.name, union.members)
+        model.class_(refinery_name(union.name), union.members)
     for cls in schema.classes:
         for feature in schema.features[cls]:
             model.feature(feature)
@@ -344,16 +363,18 @@ def partial_model(
         for value in node.values:
             model.value(schema, i, value)
     for predicate in predicates:
-        model.relation(predicate.name, len(predicate.parameters))
+        model.relation(refinery_name(predicate.name), len(predicate.parameters))
     for predicate, arguments, answer in predicate_facts(schema, graph, predicates):
-        model.holds(predicate.name, tuple(model.index[id(node)] for node in arguments), answer)
+        key = tuple(model.index[id(node)] for node in arguments)
+        model.holds(refinery_name(predicate.name), key, answer)
     return model.build(), model.objects
 
 
 class _Builder:
     def __init__(self, graph: Graph) -> None:
         self.graph = graph
-        self.nodes = [Node(node.name, node.name) for node in graph.nodes]
+        names = [_output_name(node.name) for node in graph.nodes]
+        self.nodes = [Node(name, name) for name in names]
         self.objects: list[BaseModel | None] = [node.obj for node in graph.nodes]
         self.index = {id(node): i for i, node in enumerate(graph.nodes)}
         self.literals: dict[tuple[str, str], int] = {}
@@ -382,7 +403,8 @@ class _Builder:
         for member in members:
             index = len(self.nodes)
             self.literals[(name, member)] = index
-            self.nodes.append(Node(f"{class_name(enum_type)}::{quote_id(member)}", member, "atom"))
+            literal = refinery_name(member)
+            self.nodes.append(Node(f"{name}::{literal}", literal, "atom"))
             self.objects.append(None)
             literals[(index,)] = "true"
             self.holds("builtin::exists", (index,), "true")
@@ -447,11 +469,19 @@ class _Builder:
 
 
 def _type_name(node_class: object) -> str:
-    """The name of a class, union or enum, as rules name it (unquoted)."""
+    """The name of a class, union or enum, as Refinery's output writes it."""
     if isinstance(node_class, LiteralEnum):
-        return node_class.name
-    return node_class.__name__  # type: ignore[attr-defined]
+        return refinery_name(node_class.name)
+    return refinery_name(node_class.__name__)  # type: ignore[attr-defined]
 
 
 def _feature_name(feature: Feature) -> str:
-    return f"{feature.owner.__name__}::{feature.name}"
+    return f"{refinery_name(feature.owner.__name__)}::{refinery_name(feature.name)}"
+
+
+def _output_name(rendered: str) -> str:
+    """A node's name as Refinery's output writes it, from the name pyfinery gives it in
+    the problem (``quote_id``, which quotes some names Refinery's output doesn't)."""
+    if len(rendered) >= 2 and rendered[0] == rendered[-1] == "'":
+        return refinery_name(re.sub(r"\\(.)", r"\1", rendered[1:-1]))
+    return refinery_name(rendered)

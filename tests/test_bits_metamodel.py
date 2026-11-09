@@ -260,7 +260,12 @@ class Plain(BaseModel):
     pass
 
 
+class Odd(BaseModel):
+    error: bool = False  # a keyword Refinery quotes: Odd::'error'
+
+
 class Pair(BaseModel):
+    odd: list[Odd] = []
     a: list[Flagged] = []
     b: list[Plain] = []
     texts: list[Text] = []
@@ -295,6 +300,21 @@ EDGE_CASES = {
         [],
         [Predicate("chosen", (Plain,), lambda x: True)],
         ["chosen"],
+    ),
+    # Names Refinery's output writes differently from pyfinery's problem ('e' is e),
+    # and a field named after a keyword.
+    "names": lambda: (
+        fs.metamodel(),
+        [fs.Filesystem(root=fs.Dir(name="e", contents=[fs.Dir(name="my dir")]))],
+        ["pred d(Dir x) <-> Dir(x).", "pred inside(Dir x, Dir y) <-> contents(x, y)."],
+        [],
+        None,
+    ),
+    "keyword field": lambda: (
+        *_pair(odd=[Odd(error=True), Odd()]),
+        ["pred bad(Odd x) <-> Odd::'error'(x)."],
+        [],
+        None,
     ),
     # Contradictions are reported whatever is selected.
     "contradictions not selected": lambda: (
@@ -411,6 +431,39 @@ def test_refuses_an_uncontainable_object_that_may_not_exist():
     metamodel = Metamodel(Parent, options=options)
     with pytest.raises(UnsupportedRuleError, match="no possible container"):
         metamodel.query([Parent(), Child()], BitsEngine(), ["pred p() <-> Child(_)."])
+
+
+class Item(pf.RefineryNode):
+    pass
+
+
+class Owner(pf.RefineryNode):
+    primary: Annotated[list[Item], pf.Contains()] = []
+    secondary: Annotated[list[Item], pf.Contains()] = []
+
+
+def test_refuses_an_object_in_two_certain_containers():
+    """Refinery contradicts the links, and rules out an owner that only may exist (#29 r3)."""
+    item = Item()
+    rules = ["pred p(Owner o, Item i) <-> Owner::primary(o, i)."]
+    with pytest.raises(UnsupportedRuleError, match="in 2 containers at once"):
+        Metamodel(Owner).query([Owner(primary=[item], secondary=[item])], BitsEngine(), rules)
+    may = Metamodel(Owner, options={Owner: ClassOptions(exists=lambda o: "unknown")})
+    with pytest.raises(UnsupportedRuleError, match="in 2 containers at once"):
+        may.query(
+            [Owner(primary=[item], secondary=[item])], BitsEngine(), ["pred x() <-> Owner(_)."]
+        )
+
+
+def test_refuses_an_overflow_on_an_object_that_may_not_exist():
+    root = fs.Dir(name="root", contents=[fs.File(size=i) for i in range(4)])  # contents [0..3]
+    rules = ["pred dirs() <-> Dir(_)."]
+    may = Metamodel(fs.Filesystem, options={fs.Dir: ClassOptions(exists=lambda d: "unknown")})
+    with pytest.raises(UnsupportedRuleError, match=r"more values of Dir::contents"):
+        may.query([fs.Filesystem(root=root)], BitsEngine(), rules)
+    # Certain, the overflow is only a multiplicity error: answered.
+    result = fs.metamodel().query([fs.Filesystem(root=root)], BitsEngine(), rules)
+    assert [str(m) for m in result.matches] == ["true: dirs()"]
 
 
 def test_refuses_refinement_an_unselected_error_predicate_depends_on():
