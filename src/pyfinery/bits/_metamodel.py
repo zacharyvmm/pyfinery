@@ -58,7 +58,9 @@ class BitsEngine:
     - Refinery refines uncertain facts from what must hold: multiplicities,
       one container per object, and ``error`` predicates. The bits engine
       doesn't, so it raises :class:`~pyfinery.bits.UnsupportedRuleError` where
-      Refinery would refine (never for a graph without uncertainty);
+      Refinery would refine; without uncertainty, only where Refinery finds the
+      graph contradictory (an object in two containers, a containment cycle, an
+      instance of an abstract class);
     - ``result.errors`` holds the keys that resolve to no object, and the
       tuples of the rules' predicates that are ``error``; it doesn't check
       multiplicities or containment (:meth:`~pyfinery.Metamodel.validate`
@@ -148,7 +150,8 @@ def _named(
 #
 # Refinery refines uncertain facts from what must hold; the bits engine evaluates
 # the facts as given. These find where the two would differ, to refuse rather
-# than answer differently. A graph without uncertainty is never refined.
+# than answer differently. A graph without uncertainty is refined only where it is
+# contradictory (an object in two containers, a containment cycle).
 
 
 def _abstract_instance(schema: Schema, graph: Graph) -> str | None:
