@@ -115,7 +115,11 @@ class Source:
     asserted: dict[str, Position]
     """Relations that assertions are about, e.g. ``bar`` in ``!bar(b1).``"""
     in_classes: dict[str, Position]
-    """Names in class declarations, e.g. ``bar`` in ``class A { bar[] foo }``."""
+    """The types of class features, e.g. ``bar`` in ``class A { bar[] foo }``."""
+    mentions: dict[str, Position]
+    """Names in the other statements that aren't predicates, but in rules' premises:
+    a predicate with a body named there (e.g. in ``scope`` or a rule's conclusion)
+    may be refined beyond its body."""
 
 
 # -- tokens -------------------------------------------------------------------
@@ -241,6 +245,7 @@ class _Parser:
         predicates = []
         asserted: dict[str, Position] = {}
         in_classes: dict[str, Position] = {}
+        mentions: dict[str, Position] = {}
         while self.peek().kind != "eof":
             start = self.at
             modifiers = []
@@ -257,10 +262,19 @@ class _Parser:
                 statement = self.tokens[start : self.at]
                 if (asserted_name := _asserted(statement)) is not None:
                     asserted.setdefault(asserted_name, statement[0].position)
+                    continue  # its arguments are nodes
                 if _is_class(statement):
                     for name, position in _reference_types(statement):
                         in_classes.setdefault(name, position)
-        return Source(tuple(predicates), asserted, in_classes)
+                    continue
+                leading = {t.text for t in statement[:2] if t.kind == "name"}
+                if leading & _DECLARING:
+                    continue  # names declared there aren't predicates
+                arrows = [i for i, t in enumerate(statement) if t.text == "==>"]
+                for token in statement[arrows[-1] + 1 if arrows else 0 :]:
+                    if token.kind in ("name", "quoted"):
+                        mentions.setdefault(token.name, token.position)
+        return Source(tuple(predicates), asserted, in_classes, mentions)
 
     def skip_statement(self) -> None:
         """Skip to the end of a statement: a ``.``, or the ``}`` closing a class or enum."""
@@ -497,6 +511,9 @@ def _is_class(statement: list[_Token]) -> bool:
     leading = [t.text for t in statement[:2] if t.kind == "name"]
     return "class" in leading
 
+
+# Statements that declare names (enum literals, atoms, nodes, modules), not use them.
+_DECLARING = {"enum", "atom", "declare", "multi", "import", "problem", "module"}
 
 _FEATURE_KINDS = {"contains", "container", "refers", "partial"}
 

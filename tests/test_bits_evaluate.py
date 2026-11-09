@@ -311,3 +311,29 @@ def test_only_reference_types_count_as_predicates_typing_references():
     # A predicate named after a keyword isn't a type because 'class' is in the statement.
     results = evaluate("class B { B[] r }\npred 'class'(Person x) <-> Person(x).", model())
     assert set(results) == {"'class'"}
+
+
+@pytest.mark.parametrize(
+    ("source", "refused"),
+    [
+        # Review of #28, round 4: s's facts refine q through its parameter type.
+        ("pred q(Person x) <-> Person(x).\npred s(q x).\ns(alice).", "parameter type of s"),
+        ("pred q(Person x) <-> Person(x).\nscope q = 1.", "named outside"),
+        (
+            "pred q(Person x) <-> Person(x).\npropagation rule p(Person x) <-> Person(x) ==> q(x).",
+            "named outside",
+        ),
+        # Where a predicate with a body is only read, it is evaluated.
+        ("pred q(Person x) <-> Person(x).\npred t(q x) <-> Person(x).", None),
+        ("pred q(Person x) <-> Person(x).\npropagation rule p(Person x) <-> q(x) ==> r(x).", None),
+        ("pred q(Person x) <-> Person(x).\nenum E { q }\nPerson(q).", None),
+    ],
+)
+def test_predicates_with_bodies_are_only_read(source, refused):
+    """A predicate with a body may be named in bodies, as a parameter type of a predicate
+    with a body, and in rules' premises; elsewhere Refinery may refine it."""
+    if refused is None:
+        evaluate(source, model())
+    else:
+        with pytest.raises(UnsupportedRuleError, match=refused):
+            evaluate(source, model())

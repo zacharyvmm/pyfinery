@@ -126,7 +126,13 @@ def evaluate(
 
 
 def _check_not_refined(source: Source) -> None:
-    """Refuse sources where Refinery would refine a predicate beyond what its body says."""
+    """Refuse sources where Refinery would refine a predicate beyond what its body says.
+
+    A predicate with a body may be named in predicate bodies, as the parameter type
+    of a predicate with a body, and in rules' premises; anywhere else (assertions,
+    ``subsets``, reference types, parameter types of predicates without a body,
+    rules' conclusions, ``scope``...) Refinery may refine it, so the source is refused.
+    """
     defined = {p.name: p for p in source.predicates if p.body is not None}
     for predicate in source.predicates:
         if predicate.subsets is None:
@@ -139,6 +145,16 @@ def _check_not_refined(source: Source) -> None:
             raise UnsupportedRuleError(
                 f"subsets of a predicate with a body ({predicate.subsets})", predicate.position
             )
+    for predicate in source.predicates:
+        if predicate.body is not None:
+            continue  # its parameter types are literals of its body
+        for parameter in predicate.parameters:
+            if parameter.type in defined:
+                raise UnsupportedRuleError(
+                    f"a predicate with a body as a parameter type of {predicate.name}, "
+                    f"which has none ({parameter.type})",
+                    predicate.position,
+                )
     for name in defined:
         if name in source.asserted:
             raise UnsupportedRuleError(
@@ -148,6 +164,11 @@ def _check_not_refined(source: Source) -> None:
             raise UnsupportedRuleError(
                 f"a predicate with a body as the type of a reference ({name})",
                 source.in_classes[name],
+            )
+        if name in source.mentions:
+            raise UnsupportedRuleError(
+                f"a predicate with a body named outside predicates and rules' premises ({name})",
+                source.mentions[name],
             )
 
 
