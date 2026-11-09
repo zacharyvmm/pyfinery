@@ -242,3 +242,20 @@ def test_strings_are_values_even_when_spelled_like_logic_values():
     )
     assert values(results["word"]) == {(0,): "true", (2,): "unknown", (3,): "error"}
     assert values(results["err"]) == {(1,): "true", (2,): "unknown", (3,): "error"}
+
+
+@pytest.mark.parametrize(
+    ("literal", "value"),
+    [
+        (r'"a\nb"', "a\nb"),
+        (r'"\t\r\b\f"', "\t\r\b\f"),
+        (r'"\u0061\u00e9"', "aé"),
+        (r'"\uD83D\uDE00"', "\U0001f600"),  # UTF-16: a surrogate pair is one character
+        (r'"\uD83D"', "\ud83d"),  # a lone surrogate stays
+        (r'"a\\b\"c\'d"', "a\\b\"c'd"),
+    ],
+)
+def test_string_literals_decode_java_escapes(literal, value):
+    from pyfinery.bits._syntax import string_literal
+
+    assert string_literal(literal) == value

@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import math
-import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from decimal import ROUND_CEILING, ROUND_FLOOR, Context, Decimal
@@ -17,6 +16,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from ..models import ErrorValue, JsonOutput, UnknownValue
+from ._syntax import string_literal
 
 LogicValue = Literal["true", "false", "unknown", "error"]
 NodeKind = Literal["default", "atom", "multi"]
@@ -186,7 +186,8 @@ def _integer(value: object) -> int:
 
 def _interval(value: object, data_type: DataType) -> tuple[Number, Number]:
     if value is None or value == "unknown":
-        return -math.inf, math.inf
+        # TruthValue.UNKNOWN is either false (0) or true (1), no other number.
+        return (0, 1) if data_type == "boolean" else (-math.inf, math.inf)
     if value is Attribute.ERROR or value == "error":
         return math.inf, -math.inf
     if data_type == "boolean":
@@ -333,26 +334,13 @@ def _attribute_value(value: object, data_type: str) -> object:
         case ErrorValue():
             return "error"
         case str() if data_type == "string" and value.startswith('"'):
-            return _unquote(value)  # strings are quoted; ``unknown`` and ``error`` aren't
+            return string_literal(value)  # strings are quoted; ``unknown`` and ``error`` aren't
         case "unknown":
             return None
         case "error":
             return Attribute.ERROR
         case _:
             return value
-
-
-def _unquote(text: str) -> str:
-    """A string literal as Refinery writes it, e.g. ``"a \\"b\\""``."""
-    escapes = {"n": "\n", "r": "\r", "t": "\t", "b": "\b", "f": "\f"}
-
-    def replace(match: re.Match[str]) -> str:
-        escaped = match.group(1)
-        if escaped.startswith("u"):
-            return chr(int(escaped[1:], 16))
-        return escapes.get(escaped, escaped)
-
-    return re.sub(r"\\(u[0-9a-fA-F]{4}|.)", replace, text[1:-1])
 
 
 def _logic_value(value: object) -> LogicValue:

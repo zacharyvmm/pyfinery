@@ -396,8 +396,7 @@ class _Parser:
         elif token.kind == "number":
             term = Constant(_number(self.next().text))
         elif token.kind == "string":
-            text = self.next().text
-            term = Constant(re.sub(r"\\(.)", r"\1", text[1:-1]))
+            term = Constant(string_literal(self.next().text))
         elif token.kind == "name" and token.text in ("true", "false"):
             self.next()
             term = Constant(token.text == "true")
@@ -515,6 +514,29 @@ def _negate(literal: Literal_) -> Literal_:
             return Comparison(
                 literal.left, literal.operator, literal.right, not literal.negated, literal.position
             )
+
+
+_ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "b": "\b", "f": "\f"}
+
+
+def string_literal(text: str) -> str:
+    """The value of a string literal as Refinery writes it, e.g. ``"a\\n\\u00e9"``.
+
+    Escapes are Java's: ``\\n``, ``\\t``, ``\\uXXXX`` (UTF-16 code units, so a
+    surrogate pair is one character), and a backslash before anything else.
+    """
+
+    def replace(match: re.Match[str]) -> str:
+        escaped = match.group(1)
+        if escaped.startswith("u"):
+            return chr(int(escaped[1:], 16))
+        return _ESCAPES.get(escaped, escaped)
+
+    value = re.sub(r"\\(u[0-9a-fA-F]{4}|.)", replace, text[1:-1], flags=re.DOTALL)
+    try:  # join surrogate pairs; a lone surrogate stays as it is
+        return value.encode("utf-16", "surrogatepass").decode("utf-16")
+    except UnicodeDecodeError:
+        return value
 
 
 def _number(text: str) -> int | Decimal:
