@@ -38,18 +38,29 @@ UNSUPPORTED = {
 LONE_DIAGONAL = "Refinery evaluates a call repeating a variable used nowhere else as true"
 
 
-def _lone_diagonal(predicate, atoms: set[str]) -> bool:
-    """Whether a clause repeats, within one atom, a variable no other literal has."""
-    parameters = {p.name for p in predicate.parameters} | atoms
+def _lone_diagonal(predicate, atoms: set[str], attributes: set[str]) -> bool:
+    """Whether a clause repeats, within one atom, a variable no other literal has. A
+    negated atom (not an attribute) has its own variables, as in Refinery's language."""
+    bound = {p.name for p in predicate.parameters} | atoms | {"_"}
     for clause in predicate.body or ():
-        uses: dict[str, list[int]] = {}
-        for index, literal in enumerate(clause):
-            for name in _names(literal):
-                if name != "_" and name not in parameters:
-                    uses.setdefault(name, []).append(index)
-        for places in uses.values():
-            if len(places) > 1 and len(set(places)) == 1 and isinstance(clause[places[0]], Atom):
-                return True
+
+        def scoped(literal) -> bool:
+            return (
+                isinstance(literal, Atom) and literal.negated and literal.relation not in attributes
+            )
+
+        clause_level = {n for lit in clause if not scoped(lit) for n in _names(lit)}
+        for literal in clause:
+            if not isinstance(literal, Atom):
+                continue
+            names = _names(literal)
+            for name in set(names) - bound:
+                if names.count(name) < 2:
+                    continue
+                if scoped(literal) and name not in clause_level:
+                    return True
+                if sum(name in _names(other) for other in clause) == 1:
+                    return True
     return False
 
 
@@ -65,9 +76,11 @@ def _names(literal) -> list[str]:
     return names
 
 
-def _affected(predicates, atoms: set[str]) -> set[str]:
+def _affected(predicates, atoms: set[str], attributes: set[str]) -> set[str]:
     """The predicates with a lone diagonal, and those that call them."""
-    affected = {p.name for p in predicates if p.body is not None and _lone_diagonal(p, atoms)}
+    affected = {
+        p.name for p in predicates if p.body is not None and _lone_diagonal(p, atoms, attributes)
+    }
     changed = True
     while changed:
         changed = False
@@ -122,7 +135,13 @@ def test_engine_computes_what_refinery_did(path, case):
     names = [n.name for n in refinery.nodes]
     atoms = {n.simple_name for n in refinery.nodes if n.kind == "atom"}
     atoms |= {n.name for n in refinery.nodes if n.kind == "atom"}
-    affected = _affected(parse(case.source).predicates, atoms)
+    attributes = {
+        name
+        for r in refinery.relations
+        if r.detail.type == "attribute"
+        for name in (r.name, r.simple_name)
+    }
+    affected = _affected(parse(case.source).predicates, atoms, attributes)
     differing = set()
     for name, result in values.items():
         expected = _refinery_values(refinery, name)
