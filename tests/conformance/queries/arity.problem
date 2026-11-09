@@ -1,0 +1,60 @@
+% SPDX-FileCopyrightText: 2026 zacharyvmm <58368863+zacharyvmm@users.noreply.github.com>
+%
+% SPDX-License-Identifier: EPL-2.0
+
+% Predicates with no parameters and with three or more, and repeated variables.
+
+class Person {
+    Person[] friend
+}
+
+Person(a).
+Person(b).
+Person(c).
+?exists(c).
+!exists(Person::new).
+default !friend(*, *).
+friend(a, b).
+friend(b, c).
+?friend(c, a).
+friend(b, b).
+
+% TEST: no parameters
+
+pred someFriendship() <-> friend(_, _).
+pred selfFriend() <-> friend(x, x).
+pred noSelfFriend() <-> !friend(x, x).
+
+% EXPECT EXACTLY:
+someFriendship().
+selfFriend().
+!noSelfFriend().
+
+% TEST: three and four parameters
+
+pred path(Person p, Person q, Person r) <-> friend(p, q), friend(q, r).
+pred square(Person p, Person q, Person r, Person s) <-> path(p, q, r), friend(r, s).
+pred hop(Person p, Person r) <-> path(p, _, r).
+
+% EXPECT EXACTLY:
+path(a, b, c).
+path(a, b, b).
+?path(b, c, a).
+!path(a, c, b).
+square(a, b, b, c).
+?square(a, b, c, a).
+hop(a, c).
+?hop(c, b).
+
+% TEST: repeated variables
+
+pred loop(Person p) <-> friend(p, p).
+pred pathBack(Person p, Person q) <-> path(p, q, p).
+pred path(Person p, Person q, Person r) <-> friend(p, q), friend(q, r).
+
+% EXPECT EXACTLY:
+loop(b).
+!loop(a).
+pathBack(b, b).
+!pathBack(c, a).
+!pathBack(a, b).

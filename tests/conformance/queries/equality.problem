@@ -1,0 +1,49 @@
+% SPDX-FileCopyrightText: 2026 zacharyvmm <58368863+zacharyvmm@users.noreply.github.com>
+%
+% SPDX-License-Identifier: EPL-2.0
+
+% Equality and existence: ==, !=, equals and exists, with multi-objects in an
+% open world.
+
+class Person {
+    Person[] friend
+}
+
+atom root.
+
+Person(root).
+Person(alice).
+Person(bob).
+?exists(bob).
+friend(alice, bob).
+friend(root, root).
+
+% TEST: equality of variables
+
+pred self(Person p, Person q) <-> friend(p, q), p == q.
+pred other(Person p, Person q) <-> friend(p, q), p != q.
+pred same(Person p, Person q) <-> equals(p, q).
+pred isRoot(Person p) <-> p == root.
+
+% EXPECT EXACTLY:
+self(root, root).
+!self(alice, bob).
+other(alice, bob).
+?other(alice, Person::new).
+same(alice, alice).
+!same(alice, bob).
+?same(Person::new, Person::new).
+isRoot(root).
+!isRoot(alice).
+
+% TEST: existence
+
+pred present(Person p) <-> exists(p).
+pred absent(Person p) <-> !exists(p).
+
+% EXPECT EXACTLY:
+present(alice).
+?present(bob).
+?present(Person::new).
+!absent(alice).
+?absent(bob).

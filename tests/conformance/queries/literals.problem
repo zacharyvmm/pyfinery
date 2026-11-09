@@ -1,0 +1,104 @@
+% SPDX-FileCopyrightText: 2026 zacharyvmm <58368863+zacharyvmm@users.noreply.github.com>
+%
+% SPDX-License-Identifier: EPL-2.0
+
+% Positive literals: classes, references, enum literals and atoms as constants,
+% typed and untyped parameters, conjunction, disjunction, and calls.
+
+class Person {
+    Person[] friend
+    Pet[] pets
+    Role role
+}
+
+class Pet.
+
+enum Role { admin, guest }
+
+atom root.
+
+Person(root).
+Person(alice).
+Person(bob).
+Pet(rex).
+!exists(Person::new).
+!exists(Pet::new).
+default !friend(*, *).
+default !pets(*, *).
+default !role(*, *).
+friend(root, alice).
+friend(alice, bob).
+?friend(bob, alice).
+pets(alice, rex).
+role(alice, admin).
+?role(bob, admin).
+
+% TEST: references and typed parameters
+
+pred owner(Person p, Pet q) <-> pets(p, q).
+pred friends(p, q) <-> friend(p, q).
+pred anyone(Person p) <-> Person(p).
+
+% EXPECT EXACTLY:
+owner(alice, rex).
+!owner(bob, rex).
+!owner(alice, alice).
+friends(alice, bob).
+?friends(bob, alice).
+!friends(alice, alice).
+anyone(bob).
+!anyone(rex).
+
+% TEST: enum literals and atoms are constants
+
+pred admin(Person p) <-> role(p, admin).
+pred qualified(Person p) <-> role(p, Role::admin).
+pred fromRoot(Person p) <-> friend(root, p).
+
+% EXPECT EXACTLY:
+admin(alice).
+?admin(bob).
+!admin(root).
+qualified(alice).
+?qualified(bob).
+fromRoot(alice).
+!fromRoot(bob).
+
+% TEST: an implicitly declared node is a variable, not a constant
+
+pred befriendsAlice(Person p) <-> friend(p, alice).
+
+% EXPECT EXACTLY:
+befriendsAlice(root).
+befriendsAlice(alice).
+?befriendsAlice(bob).
+
+% TEST: conjunction, disjunction and calls
+
+pred mutual(Person p, Person q) <-> friend(p, q), friend(q, p).
+pred linked(Person p, Person q) <-> friend(p, q) ; friend(q, p).
+pred inMutual(Person p) <-> mutual(p, _).
+pred adminOrOwner(Person p) <-> admin(p) ; pets(p, _).
+pred admin(Person p) <-> role(p, admin).
+
+% EXPECT EXACTLY:
+?mutual(alice, bob).
+?mutual(bob, alice).
+!mutual(root, alice).
+linked(alice, root).
+linked(bob, alice).
+?inMutual(alice).
+!inMutual(root).
+adminOrOwner(alice).
+?adminOrOwner(bob).
+!adminOrOwner(root).
+
+% TEST: a predicate with no body is unknown
+
+pred trusted(Person p).
+pred vouched(Person p, Person q) <-> friend(p, q), trusted(q).
+
+% EXPECT EXACTLY:
+?trusted(alice).
+?vouched(alice, bob).
+!vouched(bob, root).
