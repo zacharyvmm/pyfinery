@@ -297,9 +297,11 @@ uv run examples/generate_filesystems.py   # model generation with the client
 ## Development
 
 ```sh
-uv run pytest                              # unit tests (mocked HTTP)
+uv run pytest                              # unit tests (mocked HTTP), and the conformance suite's recordings
 PYFINERY_DOCKER_TESTS=1 uv run pytest      # plus end-to-end tests against a real server in Docker
 ```
+
+`tests/conformance` holds Refinery `.problem` files with expectations, and Refinery's recorded answers to them; its [README](tests/conformance/README.md) says how to add cases and record them again.
 
 ## License and attribution
 
