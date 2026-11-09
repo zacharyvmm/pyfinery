@@ -258,9 +258,8 @@ class _Parser:
                 if (asserted_name := _asserted(statement)) is not None:
                     asserted.setdefault(asserted_name, statement[0].position)
                 if _is_class(statement):
-                    for token in statement:
-                        if token.kind in ("name", "quoted"):
-                            in_classes.setdefault(token.name, token.position)
+                    for name, position in _reference_types(statement):
+                        in_classes.setdefault(name, position)
         return Source(tuple(predicates), asserted, in_classes)
 
     def skip_statement(self) -> None:
@@ -310,7 +309,7 @@ class _Parser:
             raise UnsupportedRuleError("directed parameters", self.peek().position)
         first = self.qualified_name()
         if self.peek().kind in ("name", "quoted"):
-            return Parameter(first, self.identifier().value)
+            return Parameter(first, self.identifier().name)
         if "::" in first:
             raise RuleError(f"expected a parameter name after {first}", self.peek().position)
         return Parameter(None, first)
@@ -495,8 +494,76 @@ def _asserted(statement: list[_Token]) -> str | None:
 
 
 def _is_class(statement: list[_Token]) -> bool:
-    leading = [t.text for t in statement[:2]]
+    leading = [t.text for t in statement[:2] if t.kind == "name"]
     return "class" in leading
+
+
+_FEATURE_KINDS = {"contains", "container", "refers", "partial"}
+
+
+def _reference_types(statement: list[_Token]) -> list[tuple[str, Position]]:
+    """The types of the features a class declares, e.g. ``bar`` in
+    ``class A { contains bar[0..1] foo opposite baz }``.
+
+    Each feature is ``[contains|container|refers] Type[multiplicity] name
+    [opposite Name]``, optionally followed by ``;`` or ``,``. If the body isn't
+    that, every name in it that isn't a keyword is returned, to stay on the safe side.
+    """
+    body = [i for i, t in enumerate(statement) if t.text == "{" and t.kind == "symbol"]
+    if not body:
+        return []
+    tokens = statement[body[0] + 1 :]
+    if tokens and tokens[-1].text == "}":
+        tokens = tokens[:-1]
+    found: list[tuple[str, Position]] = []
+    at = 0
+
+    def name_at(position: int) -> tuple[str, int] | None:
+        if position >= len(tokens) or tokens[position].kind not in ("name", "quoted"):
+            return None
+        parts = [tokens[position].name]
+        position += 1
+        while (
+            position + 1 < len(tokens)
+            and tokens[position].text == "::"
+            and tokens[position + 1].kind in ("name", "quoted")
+        ):
+            parts.append(tokens[position + 1].name)
+            position += 2
+        return "::".join(parts), position
+
+    try:
+        while at < len(tokens):
+            if tokens[at].kind == "name" and tokens[at].text in _FEATURE_KINDS:
+                at += 1
+            parsed = name_at(at)
+            if parsed is None:
+                raise ValueError
+            type_name, at = parsed
+            found.append((type_name, tokens[at - 1].position))
+            if at < len(tokens) and tokens[at].text == "[":
+                while at < len(tokens) and tokens[at].text != "]":
+                    at += 1
+                at += 1
+            parsed = name_at(at)
+            if parsed is None:
+                raise ValueError
+            at = parsed[1]
+            if at < len(tokens) and tokens[at].kind == "name" and tokens[at].text == "opposite":
+                parsed = name_at(at + 1)
+                if parsed is None:
+                    raise ValueError
+                at = parsed[1]
+            if at < len(tokens) and tokens[at].text in (";", ","):
+                at += 1
+    except ValueError:
+        keywords = _QUOTED_KEYWORDS | _FEATURE_KINDS | {"opposite", "extends", "abstract"}
+        return [
+            (t.name, t.position)
+            for t in tokens
+            if t.kind == "quoted" or (t.kind == "name" and t.text not in keywords)
+        ]
+    return found
 
 
 @dataclass(frozen=True)

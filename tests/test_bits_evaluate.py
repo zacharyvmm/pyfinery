@@ -294,3 +294,20 @@ def test_quoted_names_resolve_to_the_models_names():
     rules = "pred 'odd pred'('My Class' x) <-> 'My Class'::'odd ref'(x, 'my atom')."
     results = evaluate(rules, model, select=["odd pred"])
     assert values(results["'odd pred'"]) == {(0,): "true"}
+
+
+def test_quoted_parameters_are_the_variables_their_bodies_name():
+    """Review of #28, round 3: the declaration and the body spelled 'odd var' apart."""
+    rules = "pred q(Person 'odd var') <-> Person::friend('odd var', other)."
+    # alice's friend only may exist; bob's, carl, does; carl's friendship is unknown.
+    assert values(evaluate(rules, model())["q"]) == {(0,): "unknown", (1,): "true", (2,): "unknown"}
+
+
+def test_only_reference_types_count_as_predicates_typing_references():
+    from pyfinery.bits._syntax import parse
+
+    source = "class A { contains bar[0..1] foo opposite baz  refers B b; int n }"
+    assert set(parse(source).in_classes) == {"bar", "B", "int"}
+    # A predicate named after a keyword isn't a type because 'class' is in the statement.
+    results = evaluate("class B { B[] r }\npred 'class'(Person x) <-> Person(x).", model())
+    assert set(results) == {"'class'"}
