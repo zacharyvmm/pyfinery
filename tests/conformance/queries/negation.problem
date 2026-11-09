@@ -1,0 +1,71 @@
+% SPDX-FileCopyrightText: 2026 zacharyvmm <58368863+zacharyvmm@users.noreply.github.com>
+%
+% SPDX-License-Identifier: EPL-2.0
+
+% Negation: of bound variables, of variables only a negative literal has
+% (quantified inside it), and of calls; with objects that only may exist.
+
+class Person {
+    Person[] friend
+}
+
+Person(alice).
+Person(bob).
+Person(carl).
+?exists(carl).
+!exists(Person::new).
+default !friend(*, *).
+friend(alice, bob).
+?friend(bob, alice).
+friend(carl, carl).
+
+% TEST: negation of bound variables swaps must and may
+
+pred oneWay(Person p, Person q) <-> friend(p, q), !friend(q, p).
+pred stranger(Person p, Person q) <-> !friend(p, q).
+
+% EXPECT EXACTLY:
+?oneWay(alice, bob).
+!oneWay(bob, alice).
+stranger(bob, carl).
+?stranger(bob, alice).
+!stranger(alice, bob).
+
+% TEST: a variable only in a negative literal is quantified inside it
+
+pred lonely(Person p) <-> !friend(p, _).
+pred noFriendNamed(Person p) <-> !friend(p, other).
+pred isolated(Person p) <-> !friend(p, x), !friend(x, p).
+pred nobodyLikesAnybody() <-> !friend(x, y), !friend(y, x).
+
+% EXPECT EXACTLY:
+!lonely(alice).
+?lonely(bob).
+?lonely(carl).
+!noFriendNamed(alice).
+?isolated(carl).
+!isolated(alice).
+!nobodyLikesAnybody().
+
+% TEST: positive existential variables need objects that must exist
+
+pred hasFriend(Person p) <-> friend(p, _).
+pred twoSided(Person p) <-> friend(p, _), friend(_, p).
+
+% EXPECT EXACTLY:
+hasFriend(alice).
+?hasFriend(bob).
+?hasFriend(carl).
+?twoSided(alice).
+?twoSided(bob).
+?twoSided(carl).
+
+% TEST: negated calls
+
+pred hasFriend(Person p) <-> friend(p, _).
+pred friendless(Person p) <-> !hasFriend(p).
+
+% EXPECT EXACTLY:
+!friendless(alice).
+?friendless(bob).
+?friendless(carl).

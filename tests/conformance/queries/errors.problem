@@ -1,0 +1,39 @@
+% SPDX-FileCopyrightText: 2026 zacharyvmm <58368863+zacharyvmm@users.noreply.github.com>
+%
+% SPDX-License-Identifier: EPL-2.0
+
+% Error predicates: error where their body must hold, false elsewhere, also
+% for the predicates that call them.
+
+class Person {
+    Person[] friend
+}
+
+Person(alice).
+Person(bob).
+!exists(Person::new).
+default !friend(*, *).
+friend(alice, bob).
+?friend(bob, alice).
+
+% TEST: an error predicate that may hold is false
+
+error pred oneWay(Person p) <-> friend(p, q), !friend(q, p).
+pred callsOneWay(Person p) <-> oneWay(p).
+pred notOneWay(Person p) <-> !oneWay(p).
+
+% EXPECT EXACTLY:
+!oneWay(alice).
+!oneWay(bob).
+!callsOneWay(alice).
+notOneWay(alice).
+
+% TEST WITH ERRORS: an error predicate that must hold is an error
+
+error pred befriends(Person p) <-> friend(p, _).
+pred callsBefriends(Person p) <-> befriends(p).
+
+% EXPECT EXACTLY:
+befriends(alice): error.
+!befriends(bob).
+callsBefriends(alice): error.

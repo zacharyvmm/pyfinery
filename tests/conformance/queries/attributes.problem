@@ -1,0 +1,101 @@
+% SPDX-FileCopyrightText: 2026 zacharyvmm <58368863+zacharyvmm@users.noreply.github.com>
+%
+% SPDX-License-Identifier: EPL-2.0
+
+% Attributes: comparisons of intervals with constants and with each other,
+% boolean attributes as literals, and reals and strings.
+
+class Person {
+    int age
+    real score
+    boolean vip
+    string name
+    Person[] friend
+}
+
+Person(alice).
+Person(bob).
+Person(carl).
+!exists(Person::new).
+default !friend(*, *).
+friend(alice, bob).
+friend(bob, carl).
+age(alice): 5.
+age(bob): 3..9.
+age(carl): 30.
+score(alice): 1.0.
+score(bob): 2.5.
+vip(alice): true.
+vip(bob): false.
+name(alice): "x".
+name(bob): "y".
+
+% TEST: comparisons with constants
+
+pred five(Person p) <-> age(p) == 5.
+pred notFive(Person p) <-> age(p) != 5.
+pred adult(Person p) <-> age(p) >= 18.
+pred young(Person p) <-> !(age(p) > 3).
+
+% EXPECT EXACTLY:
+five(alice).
+?five(bob).
+!five(carl).
+!notFive(alice).
+?notFive(bob).
+notFive(carl).
+!adult(alice).
+!adult(bob).
+adult(carl).
+!young(alice).
+?young(bob).
+!young(carl).
+
+% TEST: comparisons of two attributes
+
+pred older(Person p, Person q) <-> age(p) > age(q).
+pred atMost(Person p, Person q) <-> age(p) <= age(q).
+pred differentAge(Person p, Person q) <-> age(p) != age(q).
+
+% EXPECT EXACTLY:
+older(carl, alice).
+?older(bob, alice).
+!older(alice, carl).
+atMost(alice, alice).
+?atMost(bob, bob).
+!differentAge(alice, alice).
+?differentAge(bob, bob).
+differentAge(alice, carl).
+
+% TEST: comparisons through references
+
+pred olderFriend(Person p) <-> friend(p, q), age(q) > age(p).
+
+% EXPECT EXACTLY:
+?olderFriend(alice).
+olderFriend(bob).
+!olderFriend(carl).
+
+% TEST: booleans, reals and strings
+
+pred isVip(Person p) <-> vip(p).
+pred notVip(Person p) <-> !vip(p).
+pred vipTrue(Person p) <-> vip(p) == true.
+pred high(Person p) <-> score(p) > 1.5.
+pred namedX(Person p) <-> name(p) == "x".
+
+% EXPECT EXACTLY:
+isVip(alice).
+!isVip(bob).
+?isVip(carl).
+!notVip(alice).
+notVip(bob).
+vipTrue(alice).
+!vipTrue(bob).
+?vipTrue(carl).
+!high(alice).
+high(bob).
+?high(carl).
+namedX(alice).
+!namedX(bob).
+?namedX(carl).

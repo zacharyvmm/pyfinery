@@ -1,0 +1,59 @@
+% SPDX-FileCopyrightText: 2026 zacharyvmm <58368863+zacharyvmm@users.noreply.github.com>
+%
+% SPDX-License-Identifier: EPL-2.0
+
+% Modal operators, in shadow predicates: a modal literal is two-valued. A
+% negated one quantifies its own variables in its own modality.
+
+class Person {
+    Person[] friend
+}
+
+Person(alice).
+Person(carl).
+?exists(carl).
+!exists(Person::new).
+default !friend(*, *).
+friend(alice, carl).
+?friend(carl, alice).
+
+% TEST: must and may
+
+shadow pred surely(Person p, Person q) <-> must friend(p, q).
+shadow pred maybe(Person p, Person q) <-> may friend(p, q).
+shadow pred onlyMaybe(Person p, Person q) <-> may friend(p, q), !must friend(p, q).
+
+% EXPECT EXACTLY:
+surely(alice, carl).
+!surely(carl, alice).
+maybe(carl, alice).
+!maybe(alice, alice).
+onlyMaybe(carl, alice).
+!onlyMaybe(alice, carl).
+
+% TEST: modal literals with existential variables
+
+shadow pred mustHave(Person p) <-> must friend(p, x).
+shadow pred mayHave(Person p) <-> may friend(p, x).
+shadow pred mustLack(Person p) <-> !must friend(p, x).
+shadow pred mayLack(Person p) <-> !may friend(p, x).
+
+% EXPECT EXACTLY:
+?mustHave(alice).
+!mustHave(carl).
+?mayHave(alice).
+mayHave(carl).
+mustLack(alice).
+mustLack(carl).
+!mayLack(alice).
+!mayLack(carl).
+
+% TEST: shadow predicates calling shadow predicates
+
+shadow pred surely(Person p, Person q) <-> must friend(p, q).
+shadow pred surelyMutual(Person p) <-> surely(p, q), surely(q, p).
+shadow pred notSurelyMutual(Person p) <-> !surelyMutual(p).
+
+% EXPECT EXACTLY:
+!surelyMutual(alice).
+notSurelyMutual(alice).

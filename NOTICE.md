@@ -37,6 +37,14 @@ SPDX-License-Identifier: EPL-2.0
 
 `examples/filesystem.problem` is the tutorial's example problem.
 
+### Refinery semantics tests
+
+- Source: <https://github.com/graphs4value/refinery/tree/main/subprojects/generator-core/src>, from commit [`7470710`](https://github.com/graphs4value/refinery/tree/747071004a969288113bb09d85299bbd28c9f9df/subprojects/generator-core/src)
+- Copyright (c) 2021-2025 The Refinery Authors; `sudoku.problem` also Copyright (c) 2020 Frank McSherry
+- License: EPL-2.0; `sudoku.problem` is MIT AND EPL-2.0
+
+`tests/conformance/upstream/` holds Refinery's file-based semantics tests (`src/test/resources/tools/refinery/generator`), unchanged. `tests/conformance/problems.py` and `tests/conformance/interpretation.py` port the code that reads them (`ProblemSplitter`, `SemanticsTestBuilder`, `SemanticsTestCaseBuilder`, `SemanticsExpectation` and `FilteredInterpretation`) from Java to Python. `tests/conformance/recorded/` holds the Refinery server's answers to them.
+
 ### Refinery documentation
 
 The API behaviour, Docker image (`ghcr.io/graphs4value/refinery`) and server environment variables used by `src/pyfinery/server.py` are described in the [Refinery documentation](https://refinery.tools/learn/docker/). This project doesn't redistribute the Docker image.

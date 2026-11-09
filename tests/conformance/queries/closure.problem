@@ -1,0 +1,76 @@
+% SPDX-FileCopyrightText: 2026 zacharyvmm <58368863+zacharyvmm@users.noreply.github.com>
+%
+% SPDX-License-Identifier: EPL-2.0
+
+% Transitive closure: paths only go through objects that may exist (or must,
+% for paths that must exist), but their ends needn't.
+
+class Node {
+    Node[] next
+}
+
+atom start.
+
+Node(start).
+Node(a).
+Node(b).
+Node(c).
+Node(d).
+?exists(b).
+!exists(Node::new).
+default !next(*, *).
+next(start, a).
+next(a, b).
+next(b, c).
+?next(c, a).
+next(d, d).
+
+% TEST: closure of a reference
+
+pred reaches(Node p, Node q) <-> next+(p, q).
+
+% EXPECT EXACTLY:
+reaches(start, a).
+reaches(a, b).
+?reaches(a, c).
+?reaches(start, c).
+?reaches(c, a).
+?reaches(c, c).
+?reaches(a, a).
+reaches(d, d).
+!reaches(a, start).
+!reaches(d, a).
+
+% TEST: closure of a predicate, with a constant
+
+pred step(Node p, Node q) <-> next(p, q), p != q.
+pred fromStart(Node q) <-> step+(start, q).
+
+% EXPECT EXACTLY:
+fromStart(a).
+fromStart(b).
+?fromStart(c).
+!fromStart(d).
+!fromStart(start).
+
+% TEST: negated closure
+
+pred unreachable(Node p, Node q) <-> !next+(p, q).
+
+% EXPECT EXACTLY:
+!unreachable(start, b).
+?unreachable(start, c).
+unreachable(a, start).
+!unreachable(d, d).
+
+% TEST: closure with an existential end
+
+pred cyclic(Node p) <-> next+(p, p).
+pred leadsSomewhere(Node p) <-> next+(p, _).
+
+% EXPECT EXACTLY:
+cyclic(d).
+?cyclic(a).
+!cyclic(start).
+leadsSomewhere(start).
+?leadsSomewhere(c).

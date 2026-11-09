@@ -1,0 +1,5 @@
+# SPDX-FileCopyrightText: 2026 zacharyvmm <58368863+zacharyvmm@users.noreply.github.com>
+#
+# SPDX-License-Identifier: CC0-1.0
+
+tests/conformance/recorded/** linguist-generated=true
