@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import itertools
 from collections.abc import Iterable, Iterator, Sequence
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
@@ -242,6 +242,17 @@ def _matches_type(schema: Schema, node: BaseModel, parameter: type[BaseModel] | 
 
 def _predicate_facts(schema: Schema, graph: Graph, predicates: Sequence[Predicate]) -> list[str]:
     lines = []
+    for predicate, nodes, answer in predicate_facts(schema, graph, predicates):
+        prefix = "?" if answer == "unknown" else ""
+        names = ", ".join(node.name for node in nodes)
+        lines.append(f"{prefix}{quote_id(predicate.name)}({names}).")
+    return lines
+
+
+def predicate_facts(
+    schema: Schema, graph: Graph, predicates: Sequence[Predicate]
+) -> Iterator[tuple[Predicate, tuple[Node, ...], Literal["true", "unknown"]]]:
+    """The tuples of nodes each predicate holds (``"true"``) or may hold (``"unknown"``) for."""
     objects = [node.obj for node in graph.nodes]
     for predicate in predicates:
         for arguments, answer in _predicate_tuples(schema, predicate, objects):
@@ -252,8 +263,7 @@ def _predicate_facts(schema: Schema, graph: Graph, predicates: Sequence[Predicat
                     f"Predicate {predicate.name!r} returned {answer!r}; expected True, "
                     "False, None, 'true', 'false' or 'unknown'"
                 )
-            prefix = "?" if answer == "unknown" else ""
-            rendered = []
+            nodes = []
             for argument, parameter in zip(arguments, predicate.parameters, strict=True):
                 node = graph.node_of(argument)
                 if node is None or not _matches_type(schema, argument, parameter):
@@ -261,9 +271,8 @@ def _predicate_facts(schema: Schema, graph: Graph, predicates: Sequence[Predicat
                         f"Predicate {predicate.name!r}: {argument!r} is not a node of type "
                         f"{getattr(parameter, '__name__', parameter)} in this graph"
                     )
-                rendered.append(node.name)
-            lines.append(f"{prefix}{quote_id(predicate.name)}({', '.join(rendered)}).")
-    return lines
+                nodes.append(node)
+            yield predicate, tuple(nodes), "unknown" if answer == "unknown" else "true"
 
 
 def _predicate_tuples(

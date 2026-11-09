@@ -148,6 +148,26 @@ Uncertainty can come from three places, each given as a logic value, `"true"` (o
 - **Debugging and async:** `query_problem(...)` shows what is sent, and `aquery()` is the async variant.
 - **`validate()` is two-valued:** facts that are `"unknown"` count as not holding there, and every object exists.
 
+### Querying without a server
+
+`pyfinery.bits` evaluates the rules of `query()` in Python, with NumPy, instead of sending them to Refinery. Install the `bits` extra (`uv add 'pyfinery[bits] @ git+https://github.com/zacharyvmm/pyfinery'`) and pass a `BitsEngine` where `query()` takes a client:
+
+```python
+from pyfinery.bits import BitsEngine
+
+result = guessed.query([deployment], BitsEngine(), [
+    "pred reachesUnencrypted(Service s, Database d) <-> "
+    "Service::depends_on+(s, d), !Database::encrypted(d).",
+])
+```
+
+The matches are the ones Refinery computes, with the same logic values. Relations are packed bit matrices, and only the rules' predicates are computed, not every relation of the metamodel. A query over 4,000 objects takes well under a second. The engine is checked against Refinery's answers in `tests/conformance` and on random graphs.
+
+- **Rules:** classes, references, attributes and predicates, `+`, `!`, `==` and `!=`, comparisons of attribute values, `must` and `may` in `shadow` predicates, and `error` predicates. Aggregation (`count`, `sum`, ...), arithmetic, `candidate` and assertions in rules raise `pyfinery.bits.UnsupportedRuleError`; use Refinery for those.
+- **Refinement:** Refinery refines uncertain facts from what must hold: a required reference whose only value is uncertain must hold, an object has exactly one container (if a containment can hold its class), containment has no cycles, and an `error` predicate must not hold. The bits engine doesn't, so where that would change the answer, it raises `UnsupportedRuleError` rather than answer differently. A graph without uncertainty is refused only where Refinery finds it contradictory: an object in two containers or a containment cycle (when the query depends on containment), or an instance of an abstract class.
+- **Errors:** `result.errors` holds keys that resolve to no object and the tuples of the rules' predicates that are `error`. Multiplicities and containment aren't checked: use `validate()`, which needs Refinery.
+- **Without a metamodel:** `pyfinery.bits.evaluate(rules, model)` evaluates rules over any `PartialModel`, e.g. one read from Refinery's JSON output with `PartialModel.from_json(...)`.
+
 ## Mapping Pydantic classes to Refinery
 
 `Metamodel(*classes, ...)` collects the given classes, their superclasses, the classes their fields refer to, and the already-imported subclasses of those. It doesn't collect every subclass of a shared base class.
