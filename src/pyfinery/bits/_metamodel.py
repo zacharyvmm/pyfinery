@@ -31,7 +31,7 @@ from .._instances import Graph, Value
 from .._options import LogicValue, Predicate
 from .._render import _declare_predicate, predicate_facts
 from .._results import Match, QueryResult, Violation, reference_errors
-from .._schema import EnumLike, Feature, LiteralEnum, Schema, class_name
+from .._schema import EnumLike, Feature, LiteralEnum, Schema, UnionClass, class_name
 from .._syntax import quote_id
 from . import _kernels as k
 from ._errors import UnsupportedRuleError
@@ -169,7 +169,8 @@ def _refined_by_containment(
     With ``c`` values certain and ``u`` uncertain, against ``[lower..upper]``:
     the uncertain ones must hold if ``c + u <= lower``, and can't if
     ``c >= upper``; an object that only may exist can't if ``c + u < lower``.
-    An object has one container at most, and containment has no cycles.
+    An object has one container at most, and exactly one if a containment can
+    hold its class; containment has no cycles.
     """
     exists = {i: node.exists for i, node in enumerate(graph.nodes)}
     counts: dict[tuple[str, int], list[int]] = {}
@@ -210,12 +211,30 @@ def _refined_by_containment(
     every_containment = contains | {
         _opposite_name(schema, f) for f in features if f.kind == "contains" and f.opposite
     }
-    for child, (certain, uncertain) in containers.items():
+    # An object of a class a containment can hold has exactly one container.
+    held = tuple(_classes(f.target) for f in features if f.kind == "contains")
+    contained = tuple(c for classes in held for c in classes)
+    for child, node in enumerate(graph.nodes):
+        certain, uncertain = containers.get(child, [0, 0])
         if uncertain and certain:
             yield (
-                f"uncertain containers of {model.nodes[child].name}, which has a certain one: "
+                f"uncertain containers of {node.name}, which has a certain one: "
                 "Refinery would rule them out",
                 every_containment,
+            )
+        if not contained or not isinstance(node.obj, contained):
+            continue
+        if uncertain == 1 and not certain:
+            yield (
+                f"the one possible container of {node.name}, uncertain: Refinery would "
+                "conclude it holds, as the object needs a container",
+                every_containment,
+            )
+        if not certain and not uncertain and exists[child] == "unknown":
+            yield (
+                f"{node.name}, which only may exist and has no possible container: "
+                "Refinery would conclude it doesn't exist",
+                None,
             )
     n = len(model.nodes)
     edges = [r for r in model.relations if r.name in contains]
@@ -230,6 +249,13 @@ def _refined_by_containment(
                 f"a containment cycle through {names}: Refinery rules out or contradicts it",
                 None if uncertain else every_containment,
             )
+
+
+def _classes(target: object) -> tuple[type, ...]:
+    """The model classes a reference's target stands for."""
+    if isinstance(target, UnionClass):
+        return target.members
+    return (target,) if isinstance(target, type) else ()
 
 
 def _refined_by_error(

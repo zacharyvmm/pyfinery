@@ -378,9 +378,39 @@ def test_refuses_containment_cycles():
     one, two = Box(), Box()
     one.kids.append(two)
     two.kids.append(one)
-    metamodel = Metamodel(Box, options={Box: ClassOptions(logic_value=lambda b, f, v: "unknown")})
+    # Certain: an uncertain cycle is refused too, as each box's one container is uncertain.
+    metamodel = Metamodel(Box)
     with pytest.raises(UnsupportedRuleError, match="containment cycle"):
         metamodel.query([one], BitsEngine(), ["pred p(Box x, Box y) <-> Box::kids(x, y)."])
+
+
+class Child(BaseModel):
+    pass
+
+
+class Parent(BaseModel):
+    kids: list[Child] = []
+
+
+class Family(BaseModel):
+    parents: list[Parent] = []
+    children: list[Child] = []
+
+
+def test_refuses_an_uncertain_only_container():
+    """A Child needs a container: its only possible one, uncertain, must hold (review of #29)."""
+    options = {Parent: ClassOptions(logic_value=lambda obj, f, v: "unknown")}
+    metamodel = Metamodel(Parent, options=options)
+    rules = ["pred p(Parent x, Child y) <-> Parent::kids(x, y)."]
+    with pytest.raises(UnsupportedRuleError, match="one possible container of child_1"):
+        metamodel.query([Parent(kids=[Child()])], BitsEngine(), rules)
+
+
+def test_refuses_an_uncontainable_object_that_may_not_exist():
+    options = {Child: ClassOptions(exists=lambda child: "unknown")}
+    metamodel = Metamodel(Parent, options=options)
+    with pytest.raises(UnsupportedRuleError, match="no possible container"):
+        metamodel.query([Parent(), Child()], BitsEngine(), ["pred p() <-> Child(_)."])
 
 
 def test_refuses_refinement_an_unselected_error_predicate_depends_on():
