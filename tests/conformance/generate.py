@@ -135,11 +135,22 @@ _VARIABLE = re.compile(r"\b(x\d+|y|z)\b")
 
 def _lone_diagonal(clause: list[str]) -> bool:
     """Whether a literal repeats a variable (not a parameter) no other literal has, e.g.
-    ``r+(z, z)``: Refinery evaluates that as true, even without cycles."""
-    for variable in ("y", "z"):
-        users = [lit for lit in clause if variable in _VARIABLE.findall(lit)]
-        if len(users) == 1 and _VARIABLE.findall(users[0]).count(variable) > 1:
-            return True
+    ``r+(z, z)``, or ``!t(y, y)`` where only negated atoms have ``y`` (each has its
+    own): the pinned image evaluates such a call as true, even without cycles."""
+
+    def scoped(literal: str) -> bool:  # a negated atom: its variables are its own
+        return literal.startswith("!") and not literal.startswith("!(")
+
+    clause_level = {v for lit in clause if not scoped(lit) for v in _VARIABLE.findall(lit)}
+    for literal in clause:
+        variables = _VARIABLE.findall(literal)
+        for variable in ("y", "z"):
+            if variables.count(variable) < 2:
+                continue
+            if scoped(literal) and variable not in clause_level:
+                return True
+            if sum(variable in _VARIABLE.findall(other) for other in clause) == 1:
+                return True
     return False
 
 

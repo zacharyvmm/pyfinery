@@ -50,7 +50,7 @@ pred p3(A x0, x1) <->
     !A(x1), s(x1, x1).
 
 pred p4(A x0, A x1) <->
-    !s(x1, y), !p2(x1), !s(y, y), n(x1) > n(x1).
+    r+(z, y).
 
 
 % EXPECT:

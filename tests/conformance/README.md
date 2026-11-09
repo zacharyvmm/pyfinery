@@ -60,4 +60,4 @@ This starts `recording.IMAGE` in Docker, or uses the server at `REFINERY_API_BAS
 
 ## Known Refinery issues
 
-On the pinned image, a call that repeats a variable no other literal of its clause has is evaluated as true: `pred cyc() <-> r+(z, z).` holds even when `r` has no cycles, and `pred loop() <-> r(z, z).` is true when every loop is only unknown. With a parameter instead (`pred cycP(A x) <-> r+(x, x).`), the answer is right. `generate.py` doesn't draw such clauses, and no other file has one.
+On the pinned image, a call that repeats a variable no other literal of its clause has is evaluated as true: `pred cyc() <-> r+(z, z).` holds even when `r` has no cycles, and `pred loop() <-> r(z, z).` is true when every loop is only unknown. A negated atom's variables are its own, so `!t(y, y)` is false even beside `!r(x, y)`. With a parameter instead (`pred cycP(A x) <-> r+(x, x).`), the answer is right. `generate.py` doesn't draw such clauses, and no other file has one.
