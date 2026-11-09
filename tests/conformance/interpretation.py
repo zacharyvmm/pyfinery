@@ -17,6 +17,7 @@ import math
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass
+from decimal import ROUND_CEILING, ROUND_FLOOR, Context, Decimal
 from fractions import Fraction
 
 from pyfinery.models import ErrorValue, JsonOutput, RelationMetadata, TupleElement, UnknownValue
@@ -108,29 +109,34 @@ class _Interval:
         return self.lower > self.upper
 
 
-def _number(text: str) -> Number:
+def _number(text: str, real: bool, rounding: str) -> Number:
     text = text.strip()
+    if real:
+        # RealInterval.of rounds bounds to 16 significant digits, outward.
+        return Fraction(Context(prec=16, rounding=rounding).plus(Decimal(text)))
     try:
         return int(text)
     except ValueError:
         return Fraction(text)
 
 
-def _interval(value: str) -> _Interval | None:
-    """An ``int`` or ``real`` value as an exact interval; ``None`` if it isn't a number."""
+def _interval(value: str, real: bool = False) -> _Interval | None:
+    """An ``int`` or ``real`` value as an exact interval; ``None`` if it isn't a number.
+
+    Reals are rounded as Refinery's ``RealInterval.of`` rounds them.
+    """
     text = value.strip()
     if text == "unknown":
         return _Interval(-math.inf, math.inf)
     if text == "error":
         return _Interval(math.inf, -math.inf)
     lower, separator, upper = text.partition("..")
+    if not separator:
+        lower = upper = text
     try:
-        if not separator:
-            number = _number(text)
-            return _Interval(number, number)
-        low = -math.inf if lower.strip() == "*" else _number(lower)
-        high = math.inf if upper.strip() == "*" else _number(upper)
-    except ValueError:
+        low = -math.inf if lower.strip() == "*" else _number(lower, real, ROUND_FLOOR)
+        high = math.inf if upper.strip() == "*" else _number(upper, real, ROUND_CEILING)
+    except (ValueError, ArithmeticError):
         return None
     return _Interval(low, high)
 
@@ -161,7 +167,7 @@ def _text(value: TupleElement) -> str:
             return str(value)
 
 
-def refines(actual: TupleElement, expected: str, *, exact: bool) -> bool:
+def refines(actual: TupleElement, expected: str, *, exact: bool, real: bool = False) -> bool:
     """Whether the actual value is at least as precise as the expected one (or equal to it).
 
     ``error`` refines every value, and ``unknown`` is refined by every value.
@@ -173,7 +179,7 @@ def refines(actual: TupleElement, expected: str, *, exact: bool) -> bool:
         return expected == "unknown" or text == expected or text == "error"
     if not exact and (text == "error" or expected == "unknown"):
         return True
-    actual_interval, expected_interval = _interval(text), _interval(expected)
+    actual_interval, expected_interval = _interval(text, real), _interval(expected, real)
     if actual_interval is not None and expected_interval is not None:
         if exact:
             return actual_interval == expected_interval or (
@@ -211,16 +217,21 @@ def _check(
     if None not in fixed:
         key = tuple(fixed)  # type: ignore[arg-type]
         actual = interpretation.value(relation, key)  # type: ignore[arg-type]
-        if refines(actual, assertion.value, exact=expectation.exact):
+        if refines(actual, assertion.value, exact=expectation.exact, real=_real(relation)):
             return None
         return _message(assertion, expectation, f"was {_text(actual)} instead")
     # A wildcard: every listed tuple that matches the given nodes.
     for key, actual in interpretation.items(relation):
         matches = all(f is None or f == k for f, k in zip(fixed, key, strict=True))
-        if matches and not refines(actual, assertion.value, exact=expectation.exact):
+        real = _real(relation)
+        if matches and not refines(actual, assertion.value, exact=expectation.exact, real=real):
             names = ", ".join(interpretation.model.nodes[i].name for i in key)
             return _message(assertion, expectation, f"failed for ({names}): {_text(actual)}")
     return None
+
+
+def _real(relation: RelationMetadata) -> bool:
+    return relation.data_type == "builtin::real"
 
 
 def _message(assertion: Assertion, expectation: Expectation, detail: str) -> str:

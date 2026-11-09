@@ -141,6 +141,14 @@ def test_refines(actual, expected, exact, result):
     assert refines(actual, expected, exact=exact) is result
 
 
+def test_reals_are_rounded_to_16_significant_digits():
+    # As Refinery's RealInterval.of: 0.10000000000000001 is 0.1000000000000000..0.1000000000000001.
+    rounded = "0.1000000000000000..0.1000000000000001"
+    assert refines(rounded, "0.10000000000000001", exact=True, real=True)
+    assert not refines(rounded, "0.10000000000000001", exact=True)
+    assert refines("0.1", "0.1", exact=True, real=True)
+
+
 MODEL = JsonOutput.model_validate(
     {
         "concreteness": "partial",

@@ -1,0 +1,72 @@
+% SPDX-FileCopyrightText: 2026 zacharyvmm <58368863+zacharyvmm@users.noreply.github.com>
+%
+% SPDX-License-Identifier: EPL-2.0
+
+% Values compared exactly: Refinery's ints are BigIntegers, its reals
+% BigDecimals rounded outward to 16 significant digits (RealInterval.of), and
+% strings are compared by value, even ones spelled like logic values.
+
+class A {
+    int n
+    real x
+    string s
+}
+
+A(a).
+A(b).
+A(c).
+!exists(A::new).
+n(a): 9007199254740992.
+n(b): 9007199254740993.
+n(c): 3.
+x(a): 0.1.
+x(b): 0.10000000000000001.
+x(c): 2.5.
+s(a): "unknown".
+s(b): "error".
+s(c): "it's".
+
+% TEST: integers beyond a float's precision
+
+pred sameN(A p, A q) <-> n(p) == n(q).
+pred bigger(A p) <-> n(p) > 9007199254740992.
+
+% EXPECT EXACTLY:
+!sameN(a, b).
+sameN(b, b).
+!bigger(a).
+bigger(b).
+!bigger(c).
+n(b): 9007199254740993.
+
+% TEST: reals as decimals of 16 significant digits
+
+pred tenth(A p) <-> x(p) == 0.1.
+pred lessX(A p, A q) <-> x(p) < x(q).
+pred exactlyTenth(A p) <-> x(p) == 0.10000000000000001.
+
+% EXPECT EXACTLY:
+x(b): 0.1000000000000000..0.1000000000000001.
+x(b): 0.10000000000000001.
+tenth(a).
+?tenth(b).
+?lessX(a, b).
+!lessX(b, a).
+lessX(b, c).
+?exactlyTenth(a).
+?exactlyTenth(b).
+!exactlyTenth(c).
+
+% TEST: strings spelled like logic values
+
+pred word(A p) <-> s(p) == "unknown".
+pred err(A p) <-> s(p) == "error".
+pred quote(A p) <-> s(p) == "it's".
+
+% EXPECT EXACTLY:
+word(a).
+!word(b).
+err(b).
+!err(a).
+quote(c).
+s(c): "it's".
