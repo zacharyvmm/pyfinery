@@ -130,6 +130,7 @@ def test_malformed_files(text):
         # Strings are compared by value, as Refinery escapes them.
         ('"it\\\'s"', '"it\'s"', True, True),
         ('"a\\u0041"', '"aA"', True, True),
+        ('"\U0001f600"', '"\\uD83D\\uDE00"', True, True),  # a surrogate pair is one character
         ('"x"', '"y"', False, False),
         # An error refines every value, of every type.
         ("error", '"x"', False, True),

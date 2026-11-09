@@ -1,0 +1,56 @@
+% SPDX-FileCopyrightText: 2026 zacharyvmm <58368863+zacharyvmm@users.noreply.github.com>
+%
+% SPDX-License-Identifier: EPL-2.0
+
+% Strings with escapes, and booleans compared with values that are unknown or
+% errors (an attribute has no value outside its class).
+
+class A {
+    string s
+    boolean b
+}
+
+class B.
+
+A(a).
+A(e).
+A(n).
+A(t).
+B(other).
+!exists(A::new).
+!exists(B::new).
+s(n): "\n".
+s(e): "😀".
+s(t): "a\\b\t".
+b(a): true.
+
+% TEST: escapes in string values and constants
+
+pred newline(A x) <-> s(x) == "\n".
+pred emoji(A x) <-> s(x) == "😀".
+pred escaped(A x) <-> s(x) == "a\\b\u0009".
+
+% EXPECT EXACTLY:
+newline(n).
+!newline(t).
+emoji(e).
+s(e): "😀".
+escaped(t).
+!escaped(n).
+
+% TEST WITH ERRORS: booleans compared with unknown values and errors
+
+pred same(A x, B y) <-> b(x) == b(y).
+pred differ(A x, B y) <-> b(x) != b(y).
+pred alike(A x, A y) <-> b(x) == b(y).
+pred holds(A x) <-> b(x) == true.
+
+% EXPECT EXACTLY:
+same(a, other): error.
+same(n, other): error.
+differ(n, other): error.
+alike(a, a).
+?alike(a, n).
+?alike(n, n).
+holds(a).
+?holds(n).

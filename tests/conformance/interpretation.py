@@ -154,7 +154,11 @@ def _string(value: str) -> str | None:
             return chr(int(escaped[1:], 16))
         return escapes.get(escaped, escaped)
 
-    return re.sub(r"\\(u[0-9a-fA-F]{4}|.)", replace, value[1:-1])
+    decoded = re.sub(r"\\(u[0-9a-fA-F]{4}|.)", replace, value[1:-1], flags=re.DOTALL)
+    try:  # \uXXXX escapes are UTF-16 code units: join surrogate pairs
+        return decoded.encode("utf-16", "surrogatepass").decode("utf-16")
+    except UnicodeDecodeError:
+        return decoded
 
 
 def _text(value: TupleElement) -> str:
