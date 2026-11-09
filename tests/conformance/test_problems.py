@@ -122,6 +122,19 @@ def test_malformed_files(text):
         ("1.5", "1.5", True, True),
         ('"x"', '"x"', True, True),
         ('"x"', "unknown", False, True),
+        # Integers and reals are exact, as Refinery's BigInteger and BigDecimal.
+        ("9007199254740992", "9007199254740993", True, False),
+        ("9007199254740992", "9007199254740993..9007199254740994", False, False),
+        ("0.1", "0.1000000000000000055511151231257827", True, False),
+        ("0.30", "0.3", True, True),
+        # Strings are compared by value, as Refinery escapes them.
+        ('"it\\\'s"', '"it\'s"', True, True),
+        ('"a\\u0041"', '"aA"', True, True),
+        ('"x"', '"y"', False, False),
+        # An error refines every value, of every type.
+        ("error", '"x"', False, True),
+        ("error", '"x"', True, False),
+        ("error", "5", False, True),
     ],
 )
 def test_refines(actual, expected, exact, result):

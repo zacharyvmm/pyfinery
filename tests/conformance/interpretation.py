@@ -14,8 +14,10 @@ it refines the expected one (or, for ``EXPECT EXACTLY``, equals it).
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass
+from fractions import Fraction
 
 from pyfinery.models import ErrorValue, JsonOutput, RelationMetadata, TupleElement, UnknownValue
 
@@ -93,18 +95,29 @@ def default(relation: RelationMetadata) -> TupleElement:
 # -- refinement ---------------------------------------------------------------
 
 
+Number = int | Fraction | float  # exact, as Refinery's BigInteger and BigDecimal; or infinite
+
+
 @dataclass(frozen=True)
 class _Interval:
-    lower: float
-    upper: float
+    lower: Number
+    upper: Number
 
     @property
     def empty(self) -> bool:
         return self.lower > self.upper
 
 
+def _number(text: str) -> Number:
+    text = text.strip()
+    try:
+        return int(text)
+    except ValueError:
+        return Fraction(text)
+
+
 def _interval(value: str) -> _Interval | None:
-    """An ``int`` or ``real`` value as an interval; ``None`` if it isn't a number."""
+    """An ``int`` or ``real`` value as an exact interval; ``None`` if it isn't a number."""
     text = value.strip()
     if text == "unknown":
         return _Interval(-math.inf, math.inf)
@@ -113,13 +126,29 @@ def _interval(value: str) -> _Interval | None:
     lower, separator, upper = text.partition("..")
     try:
         if not separator:
-            number = float(text)
+            number = _number(text)
             return _Interval(number, number)
-        low = -math.inf if lower.strip() == "*" else float(lower)
-        high = math.inf if upper.strip() == "*" else float(upper)
+        low = -math.inf if lower.strip() == "*" else _number(lower)
+        high = math.inf if upper.strip() == "*" else _number(upper)
     except ValueError:
         return None
     return _Interval(low, high)
+
+
+def _string(value: str) -> str | None:
+    """The value of a string literal as Refinery writes it, e.g. ``"it\\'s"``; ``None``
+    if it isn't one."""
+    if len(value) < 2 or value[0] != '"' or value[-1] != '"':
+        return None
+    escapes = {"n": "\n", "r": "\r", "t": "\t", "b": "\b", "f": "\f"}
+
+    def replace(match: re.Match[str]) -> str:
+        escaped = match.group(1)
+        if escaped.startswith("u"):
+            return chr(int(escaped[1:], 16))
+        return escapes.get(escaped, escaped)
+
+    return re.sub(r"\\(u[0-9a-fA-F]{4}|.)", replace, value[1:-1])
 
 
 def _text(value: TupleElement) -> str:
@@ -133,26 +162,30 @@ def _text(value: TupleElement) -> str:
 
 
 def refines(actual: TupleElement, expected: str, *, exact: bool) -> bool:
-    """Whether the actual value is at least as precise as the expected one (or equal to it)."""
+    """Whether the actual value is at least as precise as the expected one (or equal to it).
+
+    ``error`` refines every value, and ``unknown`` is refined by every value.
+    """
     text = _text(actual)
     if expected in _TRUTH_VALUES and text in _TRUTH_VALUES:
         if exact:
             return text == expected
         return expected == "unknown" or text == expected or text == "error"
+    if not exact and (text == "error" or expected == "unknown"):
+        return True
     actual_interval, expected_interval = _interval(text), _interval(expected)
     if actual_interval is not None and expected_interval is not None:
         if exact:
             return actual_interval == expected_interval or (
                 actual_interval.empty and expected_interval.empty
             )
-        if actual_interval.empty:
-            return True
         return (
             expected_interval.lower <= actual_interval.lower
             and actual_interval.upper <= expected_interval.upper
         )
-    if not exact and expected == "unknown":
-        return True
+    actual_string, expected_string = _string(text), _string(expected)
+    if actual_string is not None and expected_string is not None:
+        return actual_string == expected_string
     return text == expected
 
 
