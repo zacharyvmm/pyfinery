@@ -12,10 +12,12 @@ graphs of three model families.
 from __future__ import annotations
 
 import asyncio
+import enum
 import json
 import os
 import random
 from pathlib import Path
+from typing import Annotated
 
 import pytest
 from pydantic import BaseModel
@@ -172,7 +174,8 @@ def test_select_and_aquery():
         [uncertain_graph()], BitsEngine(), RULES, predicates=PREDICATES, select=["removes"]
     )
     assert [m.predicate for m in result.matches] == ["removes"]
-    assert result.source == "\n".join(RULES) and result.model is None
+    assert result.source.startswith("\n".join(RULES)) and result.model is None
+    assert "pred secretFile(File p0)." in result.source
     asynchronous = asyncio.run(
         metamodel().aquery([uncertain_graph()], BitsEngine(), RULES, predicates=PREDICATES)
     )
@@ -230,6 +233,170 @@ def test_refuses_error_predicates_that_may_hold():
             ["error pred removesSecret(Effect e) <-> Effect::target(e, f), secretFile(f)."],
             predicates=PREDICATES,
         )
+
+
+# -- edge cases, each checked against Refinery with PYFINERY_DOCKER_TESTS=1 ---------
+
+
+class Text(BaseModel):
+    text: str
+
+
+class Color(enum.Enum):
+    red = "r"
+    blue = "b"
+
+
+class Colored(BaseModel):
+    flag: bool
+    color: Color
+
+
+class Flagged(BaseModel):
+    flag: bool
+
+
+class Plain(BaseModel):
+    pass
+
+
+class Pair(BaseModel):
+    a: list[Flagged] = []
+    b: list[Plain] = []
+    texts: list[Text] = []
+    colored: list[Colored] = []
+
+
+def _pair(**fields) -> tuple[Metamodel, list[BaseModel]]:
+    return Metamodel(Pair), [Pair(**fields)]
+
+
+EDGE_CASES = {
+    # Strings spelled like logic values are values (review of #29, round 1).
+    "strings": lambda: (
+        *_pair(texts=[Text(text="unknown"), Text(text="error")]),
+        [
+            'pred word(Text t) <-> Text::text(t) == "unknown".',
+            'pred err(Text t) <-> Text::text(t) == "error".',
+        ],
+        [],
+        None,
+    ),
+    # A boolean attribute has no value on enum literals either.
+    "booleans on enum literals": lambda: (
+        *_pair(colored=[Colored(flag=True, color=Color.red)]),
+        ["pred p(x) <-> exists(x), Colored::flag(x)."],
+        [],
+        None,
+    ),
+    # A Predicate object can be selected.
+    "selected predicate": lambda: (
+        *_pair(b=[Plain()]),
+        [],
+        [Predicate("chosen", (Plain,), lambda x: True)],
+        ["chosen"],
+    ),
+    # Contradictions are reported whatever is selected.
+    "contradictions not selected": lambda: (
+        *_pair(a=[Flagged(flag=True)], b=[Plain()]),
+        ["pred p(x) <-> exists(x), Flagged::flag(x)."],
+        [],
+        [],
+    ),
+}
+
+
+def _run(case: str, client):
+    metamodel, objects, rules, predicates, select = EDGE_CASES[case]()
+    result = metamodel.query(objects, client, rules, predicates=predicates, select=select)
+    matches = sorted(
+        (m.predicate, m.node_names, m.logic_value, m.parameters) for m in result.matches
+    )
+    return matches, _errors(result)
+
+
+def _errors(result) -> list:
+    """The errors both engines report. The Refinery engine reports each contradiction
+    of a predicate twice, also for its ``::computed`` relation (as on main)."""
+    kinds = ("rule", "reference", "contradiction")
+    return sorted(
+        (v.kind, v.constraint, v.node_names)
+        for v in result.errors
+        if v.kind in kinds and not v.constraint.endswith("::computed")
+    )
+
+
+def test_edge_cases():
+    assert _run("strings", BitsEngine()) == (
+        [("err", ("text_2",), "true", ("t",)), ("word", ("text_1",), "true", ("t",))],
+        [],
+    )
+    matches, errors = _run("booleans on enum literals", BitsEngine())
+    assert ("contradiction", "p", ("Color::red",)) in errors
+    assert ("contradiction", "p", ("Color::blue",)) in errors
+    assert _run("selected predicate", BitsEngine())[0] == [
+        ("chosen", ("plain_1",), "true", ("p0",))
+    ]
+    matches, errors = _run("contradictions not selected", BitsEngine())
+    assert matches == [] and ("contradiction", "p", ("plain_1",)) in errors
+
+
+@pytest.mark.docker
+@pytest.mark.skipif(
+    os.environ.get("PYFINERY_DOCKER_TESTS") != "1", reason="set PYFINERY_DOCKER_TESTS=1"
+)
+@pytest.mark.parametrize("case", sorted(EDGE_CASES))
+def test_edge_cases_agree_with_refinery(refinery, case):
+    assert _run(case, BitsEngine()) == _run(case, refinery)
+
+
+class Box(BaseModel):
+    kids: Annotated[list[Box], pf.Contains()] = []
+
+
+class Required(BaseModel):
+    target: Plain
+
+
+class Holder(BaseModel):
+    sources: list[Required] = []
+
+
+class Shape(BaseModel):
+    pass
+
+
+class Square(Shape):
+    pass
+
+
+class Shapes(BaseModel):
+    shapes: list[Shape] = []
+
+
+def test_refuses_containment_cycles():
+    one, two = Box(), Box()
+    one.kids.append(two)
+    two.kids.append(one)
+    metamodel = Metamodel(Box, options={Box: ClassOptions(logic_value=lambda b, f, v: "unknown")})
+    with pytest.raises(UnsupportedRuleError, match="containment cycle"):
+        metamodel.query([one], BitsEngine(), ["pred p(Box x, Box y) <-> Box::kids(x, y)."])
+
+
+def test_refuses_refinement_an_unselected_error_predicate_depends_on():
+    metamodel = Metamodel(
+        Holder,
+        options={Required: ClassOptions(logic_value=lambda obj, f, v: "unknown")},
+        rules=["error pred forbidden(Required s) <-> Required::target(s, _)."],
+    )
+    with pytest.raises(UnsupportedRuleError, match="Required::target"):
+        metamodel.query([Holder(sources=[Required(target=Plain())])], BitsEngine(), [])
+
+
+def test_refuses_instances_of_abstract_classes():
+    metamodel = Metamodel(Shapes, Square, options={Shape: ClassOptions(abstract=True)})
+    with pytest.raises(UnsupportedRuleError, match="abstract class Shape"):
+        metamodel.query([Shapes(shapes=[Shape()])], BitsEngine(), ["pred p(Shape x) <-> Shape(x)."])
 
 
 # -- against Refinery, on random graphs -----------------------------------------------
@@ -413,13 +580,7 @@ def test_engines_agree_on_random_graphs(refinery, family):
         def matches(result):
             return sorted((m.predicate, m.node_names, m.logic_value) for m in result.matches)
 
-        def errors(result):
-            kinds = ("rule", "reference", "contradiction")
-            return sorted(
-                (v.kind, v.constraint, v.node_names) for v in result.errors if v.kind in kinds
-            )
-
         assert matches(bits) == matches(expected), f"seed {seed}"
-        assert errors(bits) == errors(expected), f"seed {seed}"
+        assert _errors(bits) == _errors(expected), f"seed {seed}"
         compared += 1
     assert compared >= 15, f"{refused} of 25 refused"

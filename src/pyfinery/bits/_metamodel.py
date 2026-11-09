@@ -25,12 +25,15 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator, Sequence
 from typing import TYPE_CHECKING
 
+import numpy as np
+
 from .._instances import Graph, Value
 from .._options import LogicValue, Predicate
-from .._render import predicate_facts
+from .._render import _declare_predicate, predicate_facts
 from .._results import Match, QueryResult, Violation, reference_errors
 from .._schema import EnumLike, Feature, LiteralEnum, Schema, class_name
 from .._syntax import quote_id
+from . import _kernels as k
 from ._errors import UnsupportedRuleError
 from ._evaluate import PredicateValues, evaluate
 from ._model import Attribute, DataType, Node, PartialModel, Relation
@@ -60,7 +63,8 @@ class BitsEngine:
       tuples of the rules' predicates that are ``error``; it doesn't check
       multiplicities or containment (:meth:`~pyfinery.Metamodel.validate`
       does);
-    - ``result.source`` is the rules, and ``result.model`` is ``None``.
+    - ``result.source`` is what was evaluated: the rules, and the declarations
+      of the :class:`~pyfinery.Predicate` objects; ``result.model`` is ``None``.
     """
 
     def query_graph(
@@ -71,22 +75,29 @@ class BitsEngine:
         predicates: Sequence[Predicate],
         select: Sequence[str],
     ) -> QueryResult:
-        source = "\n".join(rules)
+        # The Predicate objects are declared, as in the problem query() sends.
+        declarations = [_declare_predicate(schema, p) for p in predicates]
+        source = "\n".join([*rules, *declarations])
         parsed = parse(source)
         if parsed.asserted:
             name, position = next(iter(parsed.asserted.items()))
             raise UnsupportedRuleError(
                 f"assertions in rules ({name}): give facts as Predicate objects", position
             )
+        abstract = _abstract_instance(schema, graph)
+        if abstract is not None:
+            raise UnsupportedRuleError(abstract)
         model, objects = partial_model(schema, graph, predicates)
         kinds = {p.name: p for p in parsed.predicates}
-        used = _dependencies(kinds, select, model)
-        for reason, relations in _refined_by_multiplicity(schema, graph, model):
+        # Every predicate with a body is evaluated, as Refinery does: its error
+        # tuples are reported, whatever is selected.
+        names = list(dict.fromkeys([*select, *(p.name for p in parsed.predicates if p.body)]))
+        used = _dependencies(kinds, names, model)
+        for reason, relations in _refined_by_containment(schema, graph, model):
             if relations is None or relations & used:
                 raise UnsupportedRuleError(reason)
-        errors = [p.name for p in parsed.predicates if p.kind == "error" and p.body is not None]
-        names = list(dict.fromkeys([*select, *errors]))
         values = evaluate(source, model, select=names)
+        errors = [name for name in names if kinds[name].kind == "error"]
         for name in errors:
             reason = _refined_by_error(
                 graph, model, values[name], _dependencies(kinds, [name], model) & used
@@ -121,7 +132,18 @@ class BitsEngine:
 # than answer differently. A graph without uncertainty is never refined.
 
 
-def _refined_by_multiplicity(
+def _abstract_instance(schema: Schema, graph: Graph) -> str | None:
+    """An object of an abstract class: Refinery finds its class memberships contradictory."""
+    for node in graph.nodes:
+        if schema.is_abstract(type(node.obj)):
+            return (
+                f"{node.name}, an instance of the abstract class {type(node.obj).__name__}: "
+                "Refinery reports its memberships as contradictions"
+            )
+    return None
+
+
+def _refined_by_containment(
     schema: Schema, graph: Graph, model: PartialModel
 ) -> Iterator[tuple[str, set[str] | None]]:
     """Where Refinery would refine a reference from multiplicities or containment: why,
@@ -130,7 +152,7 @@ def _refined_by_multiplicity(
     With ``c`` values certain and ``u`` uncertain, against ``[lower..upper]``:
     the uncertain ones must hold if ``c + u <= lower``, and can't if
     ``c >= upper``; an object that only may exist can't if ``c + u < lower``.
-    An object has one container at most.
+    An object has one container at most, and containment has no cycles.
     """
     exists = {i: node.exists for i, node in enumerate(graph.nodes)}
     counts: dict[tuple[str, int], list[int]] = {}
@@ -177,6 +199,19 @@ def _refined_by_multiplicity(
                 f"uncertain containers of {model.nodes[child].name}, which has a certain one: "
                 "Refinery would rule them out",
                 every_containment,
+            )
+    n = len(model.nodes)
+    edges = [r for r in model.relations if r.name in contains]
+    if edges:
+        rows = np.concatenate([r.may[:, 0] for r in edges] + [r.must[:, 0] for r in edges])
+        cols = np.concatenate([r.may[:, 1] for r in edges] + [r.must[:, 1] for r in edges])
+        cyclic = k.indices(k.diagonal(k.closure(k.matrix_of(n, rows, cols), n), n), n)
+        if len(cyclic):
+            uncertain = any(exists.get(int(i)) == "unknown" for i in cyclic)
+            names = ", ".join(model.nodes[int(i)].name for i in cyclic)
+            yield (
+                f"a containment cycle through {names}: Refinery rules out or contradicts it",
+                None if uncertain else every_containment,
             )
 
 
@@ -324,10 +359,10 @@ class _Builder:
         members = [
             i for i, node in enumerate(self.graph.nodes) if isinstance(node.obj, feature.owner)
         ]
-        self.attributes[name] = (feature.target, {i: "unknown" for i in members})  # type: ignore[assignment]
+        self.attributes[name] = (feature.target, {i: None for i in members})  # type: ignore[assignment]
         if feature.target == "boolean":
             values = self.relation(name, 1)
-            for i in range(len(self.graph.nodes)):
+            for i in range(len(self.nodes)):  # enum literals too
                 values[(i,)] = "error"  # no value outside the class
             for i in members:
                 values[(i,)] = "unknown"
