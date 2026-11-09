@@ -55,6 +55,7 @@ reports in ``_results``.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Hashable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Literal
@@ -106,6 +107,7 @@ from .errors import RefineryTimeoutError
 from .models import JsonOutputFormat, OutputFormats, SourceOutputFormat
 
 if TYPE_CHECKING:
+    from .bits import BitsEngine
     from .client import AsyncRefinery, Refinery
 
 __all__ = [
@@ -263,6 +265,8 @@ class Metamodel:
         :class:`~pyfinery.InvalidProblemError` if the rules don't compile;
         constraint violations are returned in the report.
         """
+        if isinstance(refinery, _engine_types()):
+            raise TypeError("validate() needs a Refinery client; the bits engine only queries")
         predicates = list(predicates)
         graph = build_graph(self.schema, objects)
         source = render_validation_problem(self.schema, self.source, graph, rules, predicates)
@@ -291,7 +295,7 @@ class Metamodel:
     def query(
         self,
         objects: Iterable[BaseModel],
-        refinery: Refinery,
+        refinery: Refinery | BitsEngine,
         rules: Iterable[str] = (),
         *,
         predicates: Iterable[Predicate] = (),
@@ -307,11 +311,17 @@ class Metamodel:
         or subclass memberships) while keeping uncertainty: objects whose
         ``exists`` is ``"unknown"`` and :class:`Predicate` facts that are
         ``"unknown"`` make the matches that depend on them ``"unknown"``.
+
+        Pass a :class:`~pyfinery.bits.BitsEngine` instead of a client to
+        evaluate the rules in Python, without a server (see :mod:`pyfinery.bits`).
         """
         rules, predicates = list(rules), list(predicates)
         graph = build_graph(self.schema, objects, existence=True)
-        source = render_query_problem(self.schema, self.source, graph, rules, predicates)
         selected = list(select) if select is not None else declared_predicates(rules)
+        if isinstance(refinery, _engine_types()):
+            rules = [*self.rules, *rules]
+            return refinery.query_graph(self.schema, graph, rules, predicates, selected)
+        source = render_query_problem(self.schema, self.source, graph, rules, predicates)
         with _explain_timeout():
             result = refinery.semantics(source, format=_JSON_ONLY)
         return read_matches(result.json_, graph, source, selected)
@@ -319,7 +329,7 @@ class Metamodel:
     async def aquery(
         self,
         objects: Iterable[BaseModel],
-        refinery: AsyncRefinery,
+        refinery: AsyncRefinery | BitsEngine,
         rules: Iterable[str] = (),
         *,
         predicates: Iterable[Predicate] = (),
@@ -328,8 +338,11 @@ class Metamodel:
         """Asynchronous variant of :meth:`query`."""
         rules, predicates = list(rules), list(predicates)
         graph = build_graph(self.schema, objects, existence=True)
-        source = render_query_problem(self.schema, self.source, graph, rules, predicates)
         selected = list(select) if select is not None else declared_predicates(rules)
+        if isinstance(refinery, _engine_types()):
+            rules = [*self.rules, *rules]
+            return refinery.query_graph(self.schema, graph, rules, predicates, selected)
+        source = render_query_problem(self.schema, self.source, graph, rules, predicates)
         with _explain_timeout():
             result = await refinery.semantics(source, format=_JSON_ONLY)
         return read_matches(result.json_, graph, source, selected)
@@ -345,6 +358,13 @@ class Metamodel:
         rules, predicates = list(rules), list(predicates)
         graph = build_graph(self.schema, objects, existence=True)
         return render_query_problem(self.schema, self.source, graph, rules, predicates)
+
+
+def _engine_types() -> tuple[type, ...]:
+    """The engines that evaluate queries in Python: :class:`~pyfinery.bits.BitsEngine`,
+    if :mod:`pyfinery.bits` (which needs NumPy) has been imported."""
+    bits = sys.modules.get("pyfinery.bits")
+    return (bits.BitsEngine,) if bits is not None else ()
 
 
 _JSON_ONLY = OutputFormats(json_=JsonOutputFormat(), source=SourceOutputFormat(enabled=False))

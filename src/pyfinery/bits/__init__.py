@@ -16,6 +16,9 @@ transitive closure (``+``), negation, ``must`` and ``may``, ``==`` and
 ``!=`` of nodes, and comparisons of attribute values. Aggregation,
 arithmetic and the ``candidate`` modality raise :class:`UnsupportedRuleError`.
 
+:class:`BitsEngine`, passed instead of a client, makes
+:meth:`~pyfinery.Metamodel.query` evaluate its rules this way.
+
 Needs NumPy: ``pip install 'pyfinery[bits]'``.
 """
 
@@ -28,10 +31,12 @@ except ImportError as e:  # pragma: no cover
 
 from ._errors import RuleError, UnsupportedRuleError
 from ._evaluate import PredicateValues, evaluate
+from ._metamodel import BitsEngine
 from ._model import Attribute, LogicValue, Node, PartialModel, Relation
 
 __all__ = [
     "Attribute",
+    "BitsEngine",
     "LogicValue",
     "Node",
     "PartialModel",
