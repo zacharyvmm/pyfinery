@@ -104,25 +104,42 @@ class BitsEngine:
             )
             if reason is not None:
                 raise UnsupportedRuleError(reason)
-        exists = [node.exists for node in graph.nodes]
+        node_names = [node.name for node in model.nodes]
+        # As read_matches does: Refinery doesn't weaken a predicate for the existence
+        # of its arguments, only of nodes quantified in its body.
+        maybe = np.zeros(len(model.nodes), bool)
+        maybe[[i for i, node in enumerate(graph.nodes) if node.exists == "unknown"]] = True
         matches, violations = [], reference_errors(graph)
         for name, result in values.items():
+            by_value = result.tuples()
+            kind = "rule" if result.kind == "error" else "contradiction"
+            for key in _sorted(by_value["error"]).tolist():
+                names_, nodes = _named(key, node_names, objects)
+                violations.append(Violation(kind, name, names_, nodes))
+            if name not in select:
+                continue
             parameters = tuple(p.name for p in kinds[name].parameters)
-            for key, value in result.items():
-                node_names = tuple(model.nodes[i].name for i in key)
-                nodes = tuple(objects[i] for i in key)
-                if value == "error":
-                    kind = "rule" if result.kind == "error" else "contradiction"
-                    violations.append(Violation(kind, name, node_names, nodes))
-                    continue
-                if name not in select:
-                    continue
-                # As read_matches does: Refinery doesn't weaken a predicate for the
-                # existence of its arguments, only of nodes quantified in its body.
-                if any(i < len(exists) and exists[i] == "unknown" for i in key):
-                    value = "unknown"
-                matches.append(Match(name, node_names, nodes, value, parameters))
+            true, unknown = by_value["true"], by_value["unknown"]
+            weakened = maybe[true].any(axis=1) if len(true) and true.shape[1] else None
+            keys = np.concatenate([true, unknown])
+            logic_values = np.array(["true"] * len(true) + ["unknown"] * len(unknown), dtype=object)
+            if weakened is not None:
+                logic_values[: len(true)][weakened] = "unknown"
+            order = np.lexsort(keys.T[::-1]) if keys.shape[1] else np.arange(len(keys))
+            for key, value in zip(keys[order].tolist(), logic_values[order].tolist(), strict=True):
+                names_, nodes = _named(key, node_names, objects)
+                matches.append(Match(name, names_, nodes, value, parameters))
         return QueryResult(matches, violations, source, None)
+
+
+def _sorted(tuples: np.ndarray) -> np.ndarray:
+    return tuples[np.lexsort(tuples.T[::-1])] if tuples.shape[1] else tuples
+
+
+def _named(
+    key: list[int], names: list[str], objects: list[BaseModel | None]
+) -> tuple[tuple[str, ...], tuple[BaseModel | None, ...]]:
+    return tuple(names[i] for i in key), tuple(objects[i] for i in key)
 
 
 # -- what Refinery would propagate ------------------------------------------------
