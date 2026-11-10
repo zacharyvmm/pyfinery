@@ -13,11 +13,11 @@ one at a time, fewest neighbours first: those of a variable with neighbours
 ``a`` and ``b`` combine into one matrix product over ``(a, b)``; with one
 neighbour, into "has a pair in this row". That needs no relation over three
 variables. When one would be needed, or a factor has three or more
-variables, or the head does, :func:`join` takes over. A variable outside the
-head that several factors read is split on: the rest is solved for each of its
-values. Otherwise the solver joins in bulk: it builds the rows of values of
-every variable at once, one variable (or wide factor) at a time, a bounded
-block at a time, and keeps those every factor allows.
+variables, or the head does, :func:`join` takes over. If every variable left
+is in the head, it joins in bulk: it builds the rows of values of every
+variable at once, one variable (or wide factor) at a time, a bounded block at a
+time, and keeps those every factor allows. Otherwise it splits on one
+variable's values, and solves the rest for each.
 """
 
 from __future__ import annotations
@@ -242,7 +242,7 @@ def domain_of(factors: list[Factor], variable: VarId, n: int) -> Vector:
 # -- joining in bulk ----------------------------------------------------------------
 
 BLOCK_ROWS = 1 << 16
-"""How many rows :func:`join` builds at a time, at each step: it joins depth first."""
+"""How many rows :func:`complete` builds at a time, at each step: it joins depth first."""
 
 CHUNK_WORDS = 1 << 20
 """How many words of candidates :func:`extend` holds at a time: 8 MiB."""
@@ -261,60 +261,64 @@ class Rows:
 
 
 def join(factors: list[Factor], head: tuple[VarId, ...], n: int) -> Value:
-    """Solve factors of any width, for a head of any size, by building the rows of every
-    variable in bulk: one variable or wide factor at a time (:func:`grow`), keeping the
-    rows the factors over bound variables allow; then project onto the head.
+    """Solve factors of any width, for a head of any size.
 
     Variables outside the head that matrix products can eliminate are eliminated
-    first. If one that several factors read remains, rows would keep each of its
-    values until all those factors are applied: the solver splits on its values
-    instead (:func:`split_on`), and solves the rest for each, which matrix products
-    usually can. Otherwise the rows are built depth first, a block of at most
-    :data:`BLOCK_ROWS` at a time (:func:`complete`), so memory stays bounded; those
-    variables are dropped once their factor is applied; and a head of no variables
-    holds as soon as one row is complete.
+    first. If every variable left is in the head, each row of values that agrees
+    with every factor is an answer: the rows are built in bulk (:func:`complete`),
+    one variable or wide factor at a time, depth first, a block of at most
+    :data:`BLOCK_ROWS` rows at a time. Otherwise the solver splits on one variable
+    (:func:`split_variable`) and solves the rest for each of its values, so that
+    what's left can be eliminated by matrix products.
     """
     remaining = eliminate_existentials(factors, head, n)
     if remaining is None:
         return empty(len(head), n)
-    shared = shared_existentials(remaining, head)
-    if shared:
-        variable = min(shared, key=lambda v: (k.count(domain_of(remaining, v, n)), v))
-        return split_on(remaining, head, variable, n)
     variables = sorted({v for f in remaining for v in f.variables} | set(head))
+    if not set(variables) <= set(head):
+        return split_on(remaining, head, split_variable(remaining, head, n), n)
     start = Rows((), np.empty((1, 0), np.intp))  # one row, of no variables
-    found: list[Tuples] = []
-    size = 0
-    for block in complete(start, remaining, variables, head, n):
-        if not head:
-            return Value(0, n, True)
-        found.append(block.tuples[:, [block.variables.index(v) for v in head]])
-        size += len(found[-1])
-        if size > BLOCK_ROWS:  # drop the head tuples found twice
-            found = [np.unique(np.concatenate(found), axis=0)]
-            size = len(found[0])
+    found = [
+        block.tuples[:, [block.variables.index(v) for v in head]]
+        for block in complete(start, remaining, variables, n)
+    ]  # distinct rows: each binds every variable
     tuples = np.concatenate(found) if found else np.empty((0, len(head)), np.intp)
     return from_tuples(len(head), n, tuples)
 
 
-def shared_existentials(factors: list[Factor], head: tuple[VarId, ...]) -> list[VarId]:
-    """The variables outside the head that several factors read."""
-    readers: dict[VarId, int] = {}
-    for factor in factors:
-        for variable in factor.variables:
-            readers[variable] = readers.get(variable, 0) + 1
-    return sorted(v for v, count in readers.items() if count > 1 and v not in head)
+def split_variable(factors: list[Factor], head: tuple[VarId, ...], n: int) -> VarId:
+    """The variable to split on: of the head, if it has more than two, the one with the
+    fewest values; else of the wide factors, the one with the fewest values; else the
+    variable outside the head with the fewest neighbours."""
+    if len(head) > 2:
+        choices = list(head)
+    else:
+        choices = sorted({v for f in factors if f.value.arity > 2 for v in f.variables})
+    if choices:
+        return min(choices, key=lambda v: (k.count(domain_of(factors, v, n)), v))
+    others = {v for f in factors for v in f.variables} - set(head)
+    return min(others, key=lambda v: (len(neighbours_of(factors, v)), v))
 
 
 def split_on(factors: list[Factor], head: tuple[VarId, ...], variable: VarId, n: int) -> Value:
-    """The union, over each value ``variable`` (not in the head) can take, of the rest
-    solved with ``variable`` set to it."""
-    result = empty(len(head), n)
+    """The rest solved for each value ``variable`` can take: with the value put in
+    place if ``variable`` is in the head, else their union."""
+    rest = tuple(v for v in head if v != variable)
+    union_of_rest = empty(len(rest), n)
+    found: list[Tuples] = []
     for node in k.indices(domain_of(factors, variable, n), n):
-        result = union(result, solve([select(f, variable, int(node)) for f in factors], head, n))
-        if not head and result.truth:
-            break
-    return result
+        value = solve([select(f, variable, int(node)) for f in factors], rest, n)
+        if variable in head:
+            if not is_empty(value):
+                found.append(np.insert(to_tuples(value), head.index(variable), node, axis=1))
+            continue
+        union_of_rest = union(union_of_rest, value)
+        if not head and union_of_rest.truth:
+            break  # holds: no need for more values
+    if variable not in head:
+        return union_of_rest
+    tuples = np.concatenate(found) if found else np.empty((0, len(head)), np.intp)
+    return from_tuples(len(head), n, tuples)
 
 
 def select(factor: Factor, variable: VarId, node: NodeIndex) -> Factor:
@@ -337,9 +341,7 @@ def select(factor: Factor, variable: VarId, node: NodeIndex) -> Factor:
             return make_factor(variables, from_tuples(len(variables), n, rest), factor.negated)
 
 
-def complete(
-    rows: Rows, pending: list[Factor], unbound: list[VarId], head: tuple[VarId, ...], n: int
-) -> Iterator[Rows]:
+def complete(rows: Rows, pending: list[Factor], unbound: list[VarId], n: int) -> Iterator[Rows]:
     """Blocks of complete rows from ``rows``: bind one more variable or wide factor
     (:func:`grow`), and complete each block of the result before the next."""
     if not unbound:
@@ -349,23 +351,9 @@ def complete(
     left = [f for i, f in enumerate(pending) if i not in used]
     for block in blocks:
         block, rest = keep(block, left)
-        if not len(block.tuples):
-            continue
-        still_unbound = [v for v in unbound if v not in block.variables]
-        yield from complete(forget(block, rest, head), rest, still_unbound, head, n)
-
-
-def forget(rows: Rows, pending: list[Factor], head: tuple[VarId, ...]) -> Rows:
-    """The rows without the variables outside the head that no pending factor reads,
-    and without the rows that then repeat."""
-    needed = set(head) | {v for f in pending for v in f.variables}
-    kept = [i for i, v in enumerate(rows.variables) if v in needed]
-    if len(kept) == len(rows.variables):
-        return rows
-    if not kept:
-        return Rows((), np.empty((1, 0), np.intp))  # some row was complete: that's all
-    tuples = np.unique(rows.tuples[:, kept], axis=0)
-    return Rows(tuple(rows.variables[i] for i in kept), tuples)
+        if len(block.tuples):
+            still_unbound = [v for v in unbound if v not in block.variables]
+            yield from complete(block, rest, still_unbound, n)
 
 
 def blocks_of(counts: Indices, limit: int) -> Iterator[tuple[int, int]]:

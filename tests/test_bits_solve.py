@@ -125,3 +125,43 @@ def test_existentials_read_by_several_factors_stay_small(rule, expected):
         tracemalloc.stop()
     assert [key for key, _ in result.items()] == expected
     assert peak < 32 * 2**20, f"peak {peak / 2**20:.0f} MiB"
+
+
+CLIQUE = "r(a,b), r(a,c), r(a,d), r(b,c), r(b,d), r(c,d)."
+
+
+def _clique_model(n):
+    edges = Relation.of("r", 2, [((i, j), "true") for i in range(n) for j in range(n)])
+    return PartialModel([ModelNode(f"n{i}", f"n{i}") for i in range(n)], [edges])
+
+
+def test_a_head_variable_is_split_on_before_existentials(monkeypatch):
+    # With d outside the head, splitting on d would solve the whole (a, b, c) head
+    # once per value of d; splitting on a head variable lets products eliminate d.
+    split = []
+    original = solve_module.split_on
+
+    def recording(factors, head, variable, n):
+        split.append(variable in head)
+        return original(factors, head, variable, n)
+
+    monkeypatch.setattr(solve_module, "split_on", recording)
+    result = evaluate("pred p(a, b, c) <-> " + CLIQUE, _clique_model(8))["p"]
+    assert len(result.tuples()["true"]) == 8**3
+    assert split and all(split)
+
+
+def test_bulk_rows_are_answers_and_not_sorted_again_per_block(monkeypatch):
+    monkeypatch.setattr(solve_module, "BLOCK_ROWS", 100)
+    sorts = 0
+    original = np.unique
+
+    def counting(*args, **kwargs):
+        nonlocal sorts
+        sorts += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(np, "unique", counting)
+    result = evaluate("pred p(a, b, c, d) <-> " + CLIQUE, _clique_model(10))["p"]
+    assert len(result.tuples()["true"]) == 10**4  # 100 blocks of rows
+    assert sorts < 10
