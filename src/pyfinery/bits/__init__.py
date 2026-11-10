@@ -24,20 +24,23 @@ Needs NumPy: ``pip install 'pyfinery[bits]'``.
 
 from __future__ import annotations
 
-# The modules, in the order data flows through them:
+# The packages, in the order data flows through them (each imports only those above it):
 #
-#   metamodel   BitsEngine.query_graph: Graph -> PartialModel -> PackedModel -> QueryResult
-#   syntax      Refinery source -> Source (the pred declarations, as written)
-#   packed      PackedModel: a PartialModel's relations as bits; evaluate(), combine(), connect()
-#   rules       Rules: rules compiled once (read, checked), to evaluate on PackedModels
-#   evaluation  plan, then run each step, building its must and may matrices
-#   plan        the steps: closures and predicates, each after the relations it reads
-#   clauses     a clause, checked and rewritten as Refinery's ClausePostProcessor does
-#   compare     comparisons of attribute values (IntInterval, RealInterval, StringValue)
-#   solve       a clause's factors -> its parameters' tuples: matrix products, bulk joins
-#   values      sets of tuples of nodes: packed bits up to two nodes, arrays beyond
-#   kernels     packed-bit vectors and matrices: product, transitive closure, ...
-#   model       PartialModel: nodes, and the must/may tuples of base relations
+#   matrices/    the data: a PartialModel (tuples) built into a PackedModel (numpy bits)
+#     kernels      packed-bit vectors and matrices: product, transitive closure, ...
+#     values       sets of tuples of any arity, and their set operations
+#     model        PartialModel: nodes, and the must/may tuples of base relations
+#     packed       PackedModel: each relation's must/may arrays; combine, connect
+#   rules/       the text: Rules.compile reads and checks rules, without a model
+#     syntax       Refinery source -> Source (the pred declarations, as written)
+#     compiled     Rules: the predicates with and without a body, checked
+#   evaluation/  rules over a model: evaluate() plans the relations to compute, then
+#     pipeline     computes each: the model's matrices in, the predicates' matrices out
+#     plan         the steps (closures, predicates), each after the relations it reads
+#     clauses      a clause checked and rewritten for a model (ClausePostProcessor)
+#     solve        a clause's literals joined: matrix products, bulk joins
+#     compare      comparisons of attribute values (IntInterval, RealInterval, StringValue)
+#   engine/      BitsEngine: Metamodel.query's Pydantic graph -> PackedModel -> QueryResult
 #
 # Only the names below are the API; the modules' other names may change.
 
@@ -46,12 +49,12 @@ try:
 except ImportError as e:  # pragma: no cover
     raise ImportError("pyfinery.bits needs NumPy: pip install 'pyfinery[bits]'") from e
 
+from .engine import BitsEngine
 from .errors import RuleError, UnsupportedRuleError
-from .evaluation import PredicateValues
-from .metamodel import BitsEngine
-from .model import Attribute, LogicValue, Node, PartialModel, Relation
-from .packed import PackedModel, PackedRelation, evaluate
-from .rules import Rules
+from .evaluation.pipeline import PredicateValues, evaluate
+from .matrices.model import Attribute, LogicValue, Node, PartialModel, Relation
+from .matrices.packed import PackedModel, PackedRelation
+from .rules.compiled import Rules
 
 __all__ = [
     "Attribute",

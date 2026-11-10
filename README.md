@@ -167,16 +167,16 @@ The matches are the ones Refinery computes, with the same logic values. Relation
 - **Refinement:** Refinery refines uncertain facts from what must hold: a required reference whose only value is uncertain must hold, an object has exactly one container (if a containment can hold its class), containment has no cycles, and an `error` predicate must not hold. The bits engine doesn't, so where that would change the answer, it raises `UnsupportedRuleError` rather than answer differently. A graph without uncertainty is refused only where Refinery finds it contradictory: an object in two containers or a containment cycle (when the query depends on containment), or an instance of an abstract class.
 - **Errors:** `result.errors` holds keys that resolve to no object and the tuples of the rules' predicates that are `error`. Multiplicities and containment aren't checked: use `validate()`, which needs Refinery.
 - **Without a metamodel:** `pyfinery.bits.evaluate(rules, model)` evaluates rules over any `PartialModel`, e.g. one read from Refinery's JSON output with `PartialModel.from_json(...)`.
-- **Build once, evaluate often, combine:** `PackedModel.build(model)` packs a `PartialModel`'s relations into bit matrices once, and `Rules.compile(rules)` reads and checks rules once; `rules.evaluate(packed)` evaluates them on any built model. `g1 + g2` puts two built graphs side by side (the second's nodes after the first's, atoms they share once), and `connect` adds tuples between them:
+- **Build once, evaluate often, combine:** `PackedModel.build(model)` packs a `PartialModel`'s relations into bit matrices once, and `Rules.compile(rules)` reads and checks rules once; `evaluate(rules, packed)` (or `packed.evaluate(rules)`) evaluates them on any built model. A built model's relations are numpy arrays of packed bits: `packed["edge"].must` is the matrix of the edges that must hold. `g1 + g2` puts two built graphs side by side (the second's nodes after the first's, atoms they share once), and `connect` adds tuples between them:
 
   ```python
-  from pyfinery.bits import PackedModel, Rules
+  from pyfinery.bits import PackedModel, Rules, evaluate
 
   rules = Rules.compile("pred reach(a, b) <-> edge+(a, b).")
   g1, g2 = PackedModel.build(model_1), PackedModel.build(model_2)
   both, placed = g1.combine(g2)  # placed[j]: where g2's node j is in both
   both = both.connect("edge", [(0, placed[0])])
-  rules.evaluate(both)
+  evaluate(rules, both)
   ```
 
 ## Mapping Pydantic classes to Refinery

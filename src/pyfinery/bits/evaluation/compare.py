@@ -19,13 +19,13 @@ from typing import NamedTuple
 import numpy as np
 from numpy.typing import NDArray
 
-from . import kernels as k
-from .errors import RuleError, UnsupportedRuleError
-from .kernels import NodeIndex
-from .model import Attribute, Numbers, real_interval
+from ..errors import RuleError, UnsupportedRuleError
+from ..matrices import kernels as k
+from ..matrices.kernels import NodeIndex
+from ..matrices.model import Attribute, Numbers, real_interval
+from ..matrices.values import Value
+from ..rules.syntax import Comparison, Modality
 from .solve import Factor, VarId
-from .syntax import Comparison, Modality
-from .values import Value
 
 type Truths = NDArray[np.bool_]
 """Whether something holds, for each value of the compared variables (broadcast over them)."""

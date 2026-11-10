@@ -28,13 +28,24 @@ from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
-from .errors import RuleError
-from .kernels import NodeIndex
+from ..errors import RuleError
+from ..matrices.kernels import NodeIndex
+from ..rules.syntax import (
+    Atom,
+    Call,
+    Comparison,
+    Constant,
+    Literal_,
+    Name,
+    Position,
+    Predicate,
+    Term,
+)
 from .solve import Argument, Node, Var, VarId
-from .syntax import Atom, Call, Comparison, Constant, Literal_, Name, Position, Predicate, Term
 
 if TYPE_CHECKING:
-    from .packed import PackedModel
+    from ..matrices.model import Attribute
+    from ..matrices.packed import PackedModel, PackedRelation
 
 
 class Target(NamedTuple):
@@ -69,7 +80,29 @@ def resolve(
         return Target("derived", name)
     if name in declared and model.relation_named(name) is None:
         return Target("undetermined", name)
-    return Target("base", model.relation(name, position).name)
+    return Target("base", named_relation(model, name, position).name)
+
+
+def named_relation(model: PackedModel, name: str, position: Position | None) -> PackedRelation:
+    """The relation rules name ``name``, or a :class:`RuleError` at ``position``."""
+    try:
+        found = model.relation_named(name)
+    except ValueError as e:
+        raise RuleError(str(e), position) from None
+    if found is None:
+        raise RuleError(f"no relation named {name!r}", position)
+    return found
+
+
+def named_attribute(model: PackedModel, name: str, position: Position | None) -> Attribute:
+    """The attribute rules name ``name``, or a :class:`RuleError` at ``position``."""
+    try:
+        found = model.attribute_named(name)
+    except ValueError as e:
+        raise RuleError(str(e), position) from None
+    if found is None:
+        raise RuleError(f"no attribute named {name!r}", position)
+    return found
 
 
 @dataclass(frozen=True)

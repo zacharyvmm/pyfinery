@@ -26,6 +26,7 @@ from pyfinery.bits import (
     UnsupportedRuleError,
     evaluate,
 )
+from pyfinery.bits.matrices import kernels as k
 
 RULES = """
 pred reach(a, b) <-> Person::friend+(a, b).
@@ -179,9 +180,9 @@ def test_compiled_rules_evaluate_any_built_model():
         model = graph(seed, 9)
         packed = PackedModel.build(model)
         expected = answers(model)
-        assert {n: list(r.items()) for n, r in rules.evaluate(packed).items()} == expected
+        assert {n: list(r.items()) for n, r in evaluate(rules, packed).items()} == expected
         assert {n: list(r.items()) for n, r in packed.evaluate(rules).items()} == expected
-    assert list(rules.evaluate(packed, select=["anyone"])) == ["anyone"]
+    assert list(evaluate(rules, packed, select=["anyone"])) == ["anyone"]
 
 
 def test_compiling_checks_what_doesnt_depend_on_a_model():
@@ -189,3 +190,24 @@ def test_compiling_checks_what_doesnt_depend_on_a_model():
         Rules.compile("pred p(x) <-> q(x).\npred p(x) <-> q(x).")
     with pytest.raises(UnsupportedRuleError, match="assertions about a predicate with a body"):
         Rules.compile("pred p(x) <-> q(x).\np(a).")
+
+
+def test_a_built_models_matrices_are_numpy_arrays():
+    model = PartialModel(
+        [Node(f"n{i}", f"n{i}") for i in range(3)],
+        [
+            Relation.of("Person", 1, [((0,), "true"), ((2,), "true")]),
+            Relation.of("edge", 2, [((0, 1), "true"), ((1, 2), "unknown")]),
+        ],
+    )
+    packed = PackedModel.build(model)
+    edge = packed["edge"]
+    assert k.unpack(edge.must, 3).tolist() == [[0, 1, 0], [0, 0, 0], [0, 0, 0]]
+    assert k.unpack(edge.may, 3).tolist() == [[0, 1, 0], [0, 0, 1], [0, 0, 0]]
+    assert k.unpack(packed["Person"].must, 3).tolist() == [1, 0, 1]
+    assert packed["exists"] is packed["builtin::exists"]
+    reach = packed.evaluate("pred reach(a, b) <-> edge+(a, b).")["reach"]
+    assert k.unpack(reach.must, 3).tolist() == [[0, 1, 0], [0, 0, 0], [0, 0, 0]]
+    assert k.unpack(reach.may, 3).tolist() == [[0, 1, 1], [0, 0, 1], [0, 0, 0]]
+    with pytest.raises(KeyError):
+        packed["missing"]

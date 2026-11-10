@@ -26,9 +26,9 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-from . import kernels as k
-from .kernels import Indices, Matrix, NodeIndex, Vector
-from .values import (
+from ..matrices import kernels as k
+from ..matrices.kernels import Indices, Matrix, NodeIndex, Vector
+from ..matrices.values import (
     Tuples,
     Value,
     complement,

@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 
 from pyfinery.bits import PartialModel, UnsupportedRuleError, evaluate
-from pyfinery.bits.syntax import Atom, Call, Name, parse
+from pyfinery.bits.rules.syntax import Atom, Call, Name, parse
 from pyfinery.models import JsonOutput
 
 from .problems import Case

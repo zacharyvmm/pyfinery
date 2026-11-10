@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: EPL-2.0
 
-"""Evaluating predicates over a partial model, as Refinery does.
+"""Evaluating predicates over a built model, as Refinery does.
 
 Refinery evaluates a predicate twice: for the tuples that *must* satisfy it,
 and those that *may*. Each literal of a clause is read in the clause's
@@ -24,34 +24,26 @@ not, and may hold where ``R`` must not (``DnfLifter`` in Refinery's
 
 The result of a predicate is its ``must`` and ``may`` tuples: ``true`` where
 both hold, ``unknown`` where only ``may`` does, ``error`` where only ``must``.
+
+:func:`evaluate` plans the relations to compute (:mod:`.plan`), then computes
+each in order, from the model's matrices and those computed before it.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import NamedTuple
 
 import numpy as np
 
-from . import kernels as k
-from .clauses import CallLiteral, Clause, CompareLiteral, Operand, Target, resolve
-from .compare import Side, compare
-from .errors import RuleError
-from .kernels import Vector
-from .model import LogicValue
-from .plan import (
-    EXISTS_TARGET,
-    Closure,
-    Derivation,
-    Undetermined,
-    find_predicate,
-    plan,
-)
-from .solve import Factor, Var, VarId, bind, make_factor, solve
-from .syntax import Modality, Position, PredicateKind
-from .values import (
-    Modal,
+from ..errors import RuleError
+from ..matrices import kernels as k
+from ..matrices.kernels import Matrix, Vector
+from ..matrices.model import LogicValue, PartialModel
+from ..matrices.packed import PackedModel
+from ..matrices.values import (
+    Bits,
     NodeTuple,
     Tuples,
     Value,
@@ -62,29 +54,75 @@ from .values import (
     to_tuples,
     union,
 )
+from ..rules.compiled import Rules
+from ..rules.syntax import Modality, Position, PredicateKind
+from .clauses import CallLiteral, Clause, CompareLiteral, Operand, Target, named_attribute, resolve
+from .compare import Side, compare
+from .plan import EXISTS_TARGET, Closure, Derivation, Undetermined, plan
+from .solve import Factor, Var, VarId, bind, make_factor, solve
 
-if TYPE_CHECKING:
-    from .packed import PackedModel
-    from .rules import Rules
+
+def evaluate(
+    rules: str | Sequence[str] | Rules,
+    model: PartialModel | PackedModel,
+    select: Sequence[str] | None = None,
+) -> dict[str, PredicateValues]:
+    """Evaluate the predicates ``rules`` define over ``model``.
+
+    ``rules`` is Refinery source (statements other than ``pred`` declarations
+    are skipped), or :class:`~.rules.compiled.Rules` compiled from it; ``model``
+    is a :class:`PartialModel`, or a :class:`PackedModel` built from one. Compile
+    and build them yourself to evaluate them again. The predicates named in
+    ``select`` are evaluated, or else every one with a body.
+    """
+    compiled = rules if isinstance(rules, Rules) else Rules.compile(rules)
+    packed = model if isinstance(model, PackedModel) else PackedModel.build(model)
+    predicates = compiled.select(select)
+    targets = [
+        resolve(p.name, p.position, packed, compiled.defined, compiled.declared) for p in predicates
+    ]
+    steps = plan(targets, packed, compiled.defined, compiled.declared)
+    relations = base_relations(packed)
+    for step in steps:
+        match step:
+            case Undetermined():
+                relations[step.target] = undetermined(step, relations, packed.size)
+            case Closure():
+                relations[step.target] = closure(step, relations, packed.size)
+            case Derivation():
+                relations[step.target] = derive(step, relations, packed)
+    results = {}
+    for predicate, target in zip(predicates, targets, strict=True):
+        must, may = relations[target]
+        arity = len(predicate.parameters)
+        values = PredicateValues(
+            predicate.name, predicate.kind, arity, must.data, may.data, packed.size
+        )
+        results[predicate.name] = values
+    return results
 
 
 @dataclass(frozen=True)
 class PredicateValues:
-    """What a predicate evaluates to, over the nodes of the model (by index)."""
+    """What a predicate evaluates to over the model's ``n`` nodes: the tuples that must
+    hold and those that may, as packed bits (:data:`~.matrices.values.Bits`), e.g.
+    ``values.must`` is the numpy matrix of a predicate of two parameters."""
 
     name: str
     kind: PredicateKind
     arity: int
-    must: Value
-    may: Value
+    must: Bits
+    may: Bits
+    n: int
 
     def tuples(self) -> dict[LogicValue, Tuples]:
         """The tuples that are ``true``, ``unknown`` and ``error``, as arrays of shape
         ``(m, arity)``, in no particular order."""
+        must, may = Value(self.arity, self.n, self.must), Value(self.arity, self.n, self.may)
         return {
-            "true": to_tuples(intersection(self.must, self.may)),
-            "unknown": to_tuples(difference(self.may, self.must)),
-            "error": to_tuples(difference(self.must, self.may)),
+            "true": to_tuples(intersection(must, may)),
+            "unknown": to_tuples(difference(may, must)),
+            "error": to_tuples(difference(must, may)),
         }
 
     def items(self) -> Iterator[tuple[NodeTuple, LogicValue]]:
@@ -95,7 +133,8 @@ class PredicateValues:
         return iter(sorted(found))
 
     def value(self, key: NodeTuple) -> LogicValue:
-        must, may = is_member(self.must, key), is_member(self.may, key)
+        must = is_member(Value(self.arity, self.n, self.must), key)
+        may = is_member(Value(self.arity, self.n, self.may), key)
         if must:
             return "true" if may else "error"
         return "unknown" if may else "false"
@@ -113,29 +152,15 @@ def is_member(value: Value, key: NodeTuple) -> bool:
             return bool(np.any(np.all(value.array == np.asarray(key), axis=1)))
 
 
-def evaluate_rules(
-    rules: Rules, model: PackedModel, select: Sequence[str] | None = None
-) -> dict[str, PredicateValues]:
-    """Evaluate the predicates of ``rules`` over ``model``: plan the relations to compute,
-    then compute each, in order, from the model's and those before it."""
-    defined, declared = rules.defined, rules.declared
-    names = list(select) if select is not None else list(defined)
-    selected = [find_predicate(name, defined, declared) for name in names]
-    targets = [resolve(p.name, p.position, model, defined, declared) for p in selected]
-    steps = plan(targets, model, defined, declared)
-    relations = base_relations(model)
-    for step in steps:
-        match step:
-            case Undetermined():
-                relations[step.target] = undetermined(step, relations, model.size)
-            case Closure():
-                relations[step.target] = transitive_closure(step, relations, model.size)
-            case Derivation():
-                relations[step.target] = derive(step, relations, model)
-    return {
-        p.name: PredicateValues(p.name, p.kind, len(p.parameters), *relations[target])
-        for p, target in zip(selected, targets, strict=True)
-    }
+class Modal(NamedTuple):
+    """A relation's values as evaluation reads them: the tuples that must hold, and
+    those that may."""
+
+    must: Value
+    may: Value
+
+    def read(self, modality: Modality) -> Value:
+        return self.must if modality == "must" else self.may
 
 
 type Relations = dict[Target, Modal]
@@ -143,8 +168,12 @@ type Relations = dict[Target, Modal]
 
 
 def base_relations(model: PackedModel) -> Relations:
-    """The relations of the model, packed already: where evaluation starts."""
-    return {Target("base", r.name): r.values for r in model.relations.values()}
+    """The model's matrices, as evaluation reads them: where it starts."""
+    n = model.size
+    return {
+        Target("base", r.name): Modal(Value(r.arity, n, r.must), Value(r.arity, n, r.may))
+        for r in model.relations.values()
+    }
 
 
 # -- steps --------------------------------------------------------------------
@@ -176,17 +205,20 @@ def undetermined(step: Undetermined, relations: Relations, n: int) -> Modal:
     return Modal(empty(arity, n), may)
 
 
-def transitive_closure(step: Closure, relations: Relations, n: int) -> Modal:
+def closure(step: Closure, relations: Relations, n: int) -> Modal:
+    """``R+`` in each modality, from ``R`` and the nodes that exist."""
     steps, exists = relations[step.target.steps], relations[EXISTS_TARGET]
     if steps.must.arity != 2:
         raise RuleError(f"{step.written}+ needs a relation of two nodes", step.position)
+    must = transitive_closure(steps.must.matrix, exists.must.vector, n)
+    may = transitive_closure(steps.may.matrix, exists.may.vector, n)
+    return Modal(Value(2, n, must), Value(2, n, may))
 
-    def close(steps: Value, exists: Value) -> Value:
-        through = k.mask_columns(steps.matrix, exists.vector)
-        paths = k.product(k.closure(through, n), steps.matrix, n)
-        return Value(2, n, steps.matrix | paths)
 
-    return Modal(close(steps.must, exists.must), close(steps.may, exists.may))
+def transitive_closure(steps: Matrix, exists: Vector, n: int) -> Matrix:
+    """``R+``: steps of ``R``, each but the last to a node that exists."""
+    through = k.mask_columns(steps, exists)  # the steps to a node that exists
+    return steps | k.product(k.closure(through, n), steps, n)
 
 
 def derive(step: Derivation, relations: Relations, model: PackedModel) -> Modal:
@@ -274,5 +306,5 @@ def comparison(compared: CompareLiteral, modality: Modality, model: PackedModel)
 def side(operand: Operand, position: Position, model: PackedModel) -> Side:
     if operand.attribute is None:
         return Side(None, None, operand.constant, None)
-    attribute = model.attribute(operand.attribute, position)
+    attribute = named_attribute(model, operand.attribute, position)
     return Side(operand.variable, operand.node, None, attribute)

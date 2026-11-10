@@ -7,14 +7,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import NamedTuple, cast
+from typing import cast
 
 import numpy as np
 from numpy.typing import NDArray
 
 from . import kernels as k
 from .kernels import Indices, Matrix, NodeIndex, Vector
-from .syntax import Modality
 
 type NodeTuple = tuple[NodeIndex, ...]
 """A tuple of nodes, e.g. the arguments of a predicate."""
@@ -22,20 +21,24 @@ type NodeTuple = tuple[NodeIndex, ...]
 type Tuples = NDArray[np.intp]
 """Tuples of nodes: an array of shape ``(m, arity)``, a :data:`NodeTuple` per row."""
 
+type Bits = bool | Vector | Matrix | Tuples
+"""A set of tuples of nodes, as numpy holds it, by arity: whether the empty tuple is
+in it (0); a :data:`~.kernels.Vector` (1); a :data:`~.kernels.Matrix` (2); or
+:data:`Tuples` without repeats (3 or more)."""
+
 
 @dataclass(frozen=True)
 class Value:
     """A set of tuples of ``arity`` nodes out of ``n``.
 
-    ``data`` depends on the arity: whether the empty tuple is in the set for 0,
-    a :data:`~.kernels.Vector` for 1, a :data:`~.kernels.Matrix` for 2, and for
-    3 or more, :data:`Tuples` without repeats. Read it as one of those with
-    :attr:`truth`, :attr:`vector`, :attr:`matrix` or :attr:`array`.
+    ``data`` is :data:`Bits` of that arity; read it as what it is with
+    :attr:`truth`, :attr:`vector`, :attr:`matrix` or :attr:`array`. The set
+    operations below work on any arity.
     """
 
     arity: int
     n: int
-    data: bool | Vector | Matrix | Tuples
+    data: Bits
 
     @property
     def truth(self) -> bool:
@@ -56,16 +59,6 @@ class Value:
     def array(self) -> Tuples:
         assert self.arity >= 3
         return cast(Tuples, self.data)
-
-
-class Modal(NamedTuple):
-    """A relation's values: the tuples that must hold, and those that may."""
-
-    must: Value
-    may: Value
-
-    def read(self, modality: Modality) -> Value:
-        return self.must if modality == "must" else self.may
 
 
 def empty(arity: int, n: int) -> Value:

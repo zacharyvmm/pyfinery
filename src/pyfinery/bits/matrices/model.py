@@ -15,9 +15,9 @@ from typing import Any, Literal, Protocol
 import numpy as np
 from numpy.typing import NDArray
 
-from ..models import ErrorValue, JsonOutput, UnknownValue
+from ...models import ErrorValue, JsonOutput, UnknownValue
+from ..names import string_literal
 from .kernels import NodeIndex
-from .syntax import string_literal
 from .values import NodeTuple, Tuples
 
 LogicValue = Literal["true", "false", "unknown", "error"]

@@ -12,9 +12,9 @@ import random
 import numpy as np
 import pytest
 
-from pyfinery.bits import solve as solve_module
-from pyfinery.bits.solve import Factor, Node, Var, bind, make_factor, solve
-from pyfinery.bits.values import from_tuples, to_tuples
+from pyfinery.bits.evaluation import solve as solve_module
+from pyfinery.bits.evaluation.solve import Factor, Node, Var, bind, make_factor, solve
+from pyfinery.bits.matrices.values import from_tuples, to_tuples
 
 
 def _brute_force(factors, head, variables, n):

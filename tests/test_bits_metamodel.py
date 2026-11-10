@@ -26,7 +26,7 @@ import pyfinery as pf
 from pyfinery import ClassOptions, Metamodel, Predicate
 from pyfinery._instances import build_graph
 from pyfinery.bits import BitsEngine, UnsupportedRuleError
-from pyfinery.bits.metamodel import partial_model
+from pyfinery.bits.engine.build import partial_model
 
 from . import deployment_models as deployment
 from . import generic_models as generic

@@ -8,7 +8,7 @@
 
     rules = Rules.compile("pred reach(a, b) <-> edge+(a, b).")
     for model in models:  # PackedModel.build(...) of each
-        rules.evaluate(model)
+        evaluate(rules, model)
 
 Compiling reads the rules and checks what doesn't depend on a model. What
 does (the relations and atoms their names resolve to, and so the steps of the
@@ -17,17 +17,12 @@ evaluation) is planned for each model, which takes little next to evaluating.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
-from .errors import UnsupportedRuleError
-from .evaluation import PredicateValues, evaluate_rules
-from .plan import split_predicates
+from ..errors import RuleError, UnsupportedRuleError
+from ..names import refinery_name
 from .syntax import Predicate, Source, parse
-
-if TYPE_CHECKING:
-    from .packed import PackedModel
 
 
 @dataclass(frozen=True)
@@ -51,12 +46,36 @@ class Rules:
         defined, declared = split_predicates(source.predicates)
         return cls(source, defined, declared)
 
-    def evaluate(
-        self, model: PackedModel, select: Sequence[str] | None = None
-    ) -> dict[str, PredicateValues]:
-        """The values over ``model`` of the predicates named in ``select``, or else of
-        every one with a body."""
-        return evaluate_rules(self, model, select)
+    def select(self, names: Sequence[str] | None) -> list[Predicate]:
+        """The predicates named, or else every one with a body."""
+        if names is None:
+            return list(self.defined.values())
+        return [self.find(name) for name in names]
+
+    def find(self, name: str) -> Predicate:
+        """A predicate by name, as Refinery writes it or (if it needs quotes) unquoted,
+        e.g. ``'odd name'`` or ``odd name``."""
+        for candidate in (name, refinery_name(name)):
+            found = self.defined.get(candidate) or self.declared.get(candidate)
+            if found is not None:
+                return found
+        raise RuleError(f"no predicate named {name!r} in the rules")
+
+
+def split_predicates(
+    predicates: Iterable[Predicate],
+) -> tuple[dict[str, Predicate], dict[str, Predicate]]:
+    """The predicates with a body (``defined``), and without (``declared``), by name."""
+    defined: dict[str, Predicate] = {}
+    declared: dict[str, Predicate] = {}
+    for predicate in predicates:
+        if predicate.body is None:
+            declared.setdefault(predicate.name, predicate)
+        elif predicate.name in defined:
+            raise RuleError(f"{predicate.name} is defined twice", predicate.position)
+        else:
+            defined[predicate.name] = predicate
+    return defined, declared
 
 
 def check_not_refined(source: Source) -> None:

@@ -26,13 +26,13 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from ..errors import RuleError
+from ..matrices.model import EXISTS
+from ..rules.syntax import Position, Predicate
 from .clauses import CallLiteral, Clause, Target, normalize, resolve
-from .errors import RuleError
-from .model import EXISTS
-from .syntax import Position, Predicate, refinery_name
 
 if TYPE_CHECKING:
-    from .packed import PackedModel
+    from ..matrices.packed import PackedModel
 
 EXISTS_TARGET = Target("base", EXISTS)
 """Which nodes exist: what variables that aren't parameters range over."""
@@ -70,34 +70,6 @@ class Derivation:
 
 
 type Step = Undetermined | Closure | Derivation
-
-
-def split_predicates(
-    predicates: Iterable[Predicate],
-) -> tuple[dict[str, Predicate], dict[str, Predicate]]:
-    """The rules' predicates with a body (``defined``), and without (``declared``), by name."""
-    defined: dict[str, Predicate] = {}
-    declared: dict[str, Predicate] = {}
-    for predicate in predicates:
-        if predicate.body is None:
-            declared.setdefault(predicate.name, predicate)
-        elif predicate.name in defined:
-            raise RuleError(f"{predicate.name} is defined twice", predicate.position)
-        else:
-            defined[predicate.name] = predicate
-    return defined, declared
-
-
-def find_predicate(
-    name: str, defined: Mapping[str, Predicate], declared: Mapping[str, Predicate]
-) -> Predicate:
-    """A predicate of the rules by name, as Refinery writes it or (if it needs quotes)
-    unquoted, e.g. ``'odd name'`` or ``odd name``."""
-    for candidate in (name, refinery_name(name)):
-        found = defined.get(candidate) or declared.get(candidate)
-        if found is not None:
-            return found
-    raise RuleError(f"no predicate named {name!r} in the rules")
 
 
 def plan(

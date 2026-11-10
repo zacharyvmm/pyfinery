@@ -2,15 +2,20 @@
 #
 # SPDX-License-Identifier: EPL-2.0
 
-"""A partial model built into packed bits: evaluate rules on it, and combine it with others.
+"""A partial model built into packed bits: its relations as numpy arrays, ready to
+evaluate rules on and to combine with other models.
 
 ::
 
-    g1 = PackedModel.build(model_1)  # each relation's must and may, as bits
-    g2 = PackedModel.build(model_2)
+    g1 = PackedModel.build(model_1)  # each relation's must and may, as packed bits
+    g1["edge"].must  # the numpy matrix of the edges that must hold
     both, placed = g1.combine(g2)  # g2's nodes after g1's: more rows and columns
     both = both.connect("edge", [(0, placed[0])])  # an edge from g1's node 0 to g2's
-    both.evaluate("pred reach(a, b) <-> edge+(a, b).")
+
+A relation's ``must`` and ``may`` are numpy arrays shaped by its arity (see
+:data:`~.values.Bits`): a ``bool`` for 0 nodes; a vector of ``uint64`` words, bit
+``i`` for node ``i``, for 1; a matrix of ``n`` such rows for 2; and an array of
+tuples for 3 or more. ``kernels.unpack(matrix, n)`` gives the plain ``n × n`` bools.
 
 Combining keeps each graph's tuples as they are: a relation's matrix of the
 combined graph has the first graph's in the top left block, the second's in
@@ -23,34 +28,27 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING
 
 import numpy as np
 
-from .errors import RuleError
-from .evaluation import PredicateValues
 from .kernels import Indices, NodeIndex
-from .model import (
-    BUILTINS,
-    Attribute,
-    LogicValue,
-    Node,
-    PartialModel,
-    Relation,
-    atom_index,
-    lookup,
-)
-from .rules import Rules
-from .syntax import Position
-from .values import Modal, NodeTuple, difference, empty, from_tuples, relabel, union
+from .model import BUILTINS, Attribute, LogicValue, Node, PartialModel, Relation, atom_index, lookup
+from .values import Bits, NodeTuple, Value, difference, empty, from_tuples, relabel, union
+
+if TYPE_CHECKING:
+    from ..evaluation.pipeline import PredicateValues
+    from ..rules.compiled import Rules
 
 
 @dataclass(frozen=True)
 class PackedRelation:
-    """A base relation, its tuples packed into bits."""
+    """A base relation: the tuples that must hold and those that may, as packed bits."""
 
     name: str
     arity: int
-    values: Modal
+    must: Bits
+    may: Bits
     simple_name: str
 
 
@@ -68,10 +66,7 @@ class PackedModel:
     def build(cls, model: PartialModel) -> PackedModel:
         """Pack each relation of ``model`` into bits."""
         n = model.size
-        relations = {
-            r.name: PackedRelation(r.name, r.arity, pack(r, n), r.simple_name)
-            for r in model.all_relations
-        }
+        relations = {r.name: pack(r, n) for r in model.all_relations}
         attributes = {a.name: a for a in model.attributes}
         return cls(tuple(model.nodes), relations, attributes)
 
@@ -79,14 +74,21 @@ class PackedModel:
     def size(self) -> int:
         return len(self.nodes)
 
-    # -- evaluating ---------------------------------------------------------------
+    def __getitem__(self, name: str) -> PackedRelation:
+        """A relation by name, or by simple name if only one has it, e.g. ``model["edge"]``;
+        ``exists`` and ``equals`` are the builtin ones."""
+        found = self.relation_named(name)
+        if found is None:
+            raise KeyError(name)
+        return found
 
     def evaluate(
         self, rules: str | Sequence[str] | Rules, select: Sequence[str] | None = None
     ) -> dict[str, PredicateValues]:
-        """Evaluate the predicates ``rules`` define (see :func:`evaluate`)."""
-        compiled = rules if isinstance(rules, Rules) else Rules.compile(rules)
-        return compiled.evaluate(self, select)
+        """Evaluate ``rules`` over this model: :func:`~pyfinery.bits.evaluate`."""
+        from ..evaluation.pipeline import evaluate  # evaluation reads this module: import it late
+
+        return evaluate(rules, self, select)
 
     # -- combining ------------------------------------------------------------------
 
@@ -97,10 +99,10 @@ class PackedModel:
         placement = place(self, other)
         added = [node for node, at in zip(other.nodes, placement, strict=True) if at >= self.size]
         nodes = (*self.nodes, *added)
-        n = len(nodes)
+        n, sizes = len(nodes), (self.size, other.size)
         relations = {
             name: combine_relations(
-                self.relations.get(name), other.relations.get(name), n, self.size, placement
+                self.relations.get(name), other.relations.get(name), n, sizes, placement
             )
             for name in {**self.relations, **other.relations}
         }
@@ -126,14 +128,14 @@ class PackedModel:
             raise ValueError(f"no relation named {relation!r}")
         n, arity = self.size, found.arity
         facts = from_tuples(arity, n, np.array(list(tuples), np.intp).reshape(-1, arity))
-        none = empty(arity, n)
-        must = union(
-            difference(found.values.must, facts), facts if value in ("true", "error") else none
-        )
-        may = union(
-            difference(found.values.may, facts), facts if value in ("true", "unknown") else none
-        )
-        relations = {**self.relations, found.name: replace(found, values=Modal(must, may))}
+
+        def set_facts(current: Bits, holds: bool) -> Bits:
+            kept = difference(Value(arity, n, current), facts)
+            return union(kept, facts if holds else empty(arity, n)).data
+
+        must = set_facts(found.must, value in ("true", "error"))
+        may = set_facts(found.may, value in ("true", "unknown"))
+        relations = {**self.relations, found.name: replace(found, must=must, may=may)}
         return replace(self, relations=relations)
 
     # -- names ------------------------------------------------------------------------
@@ -153,50 +155,15 @@ class PackedModel:
         """The index of the atom (or enum literal) ``name``, by name or unique simple name."""
         return atom_index(self.nodes, name)
 
-    def relation(self, name: str, position: Position | None) -> PackedRelation:
-        """The relation rules name ``name``, or a :class:`RuleError` at ``position``."""
-        try:
-            found = self.relation_named(name)
-        except ValueError as e:
-            raise RuleError(str(e), position) from None
-        if found is None:
-            raise RuleError(f"no relation named {name!r}", position)
-        return found
 
-    def attribute(self, name: str, position: Position | None) -> Attribute:
-        """The attribute rules name ``name``, or a :class:`RuleError` at ``position``."""
-        try:
-            found = self.attribute_named(name)
-        except ValueError as e:
-            raise RuleError(str(e), position) from None
-        if found is None:
-            raise RuleError(f"no attribute named {name!r}", position)
-        return found
-
-
-def evaluate(
-    rules: str | Sequence[str] | Rules,
-    model: PartialModel | PackedModel,
-    select: Sequence[str] | None = None,
-) -> dict[str, PredicateValues]:
-    """Evaluate the predicates ``rules`` define over ``model``.
-
-    ``rules`` is Refinery source (statements other than ``pred`` declarations
-    are skipped), or :class:`Rules` compiled from it. The predicates named in
-    ``select`` are evaluated, or else every one with a body. A
-    :class:`PartialModel` is built into a :class:`PackedModel` first: build it
-    yourself, and compile the rules, to evaluate them on it again.
-    """
-    packed = model if isinstance(model, PackedModel) else PackedModel.build(model)
-    return packed.evaluate(rules, select)
-
-
-def pack(relation: Relation, n: int) -> Modal:
-    """A relation's must and may tuples as bits: one value if they're the same tuples."""
-    must = from_tuples(relation.arity, n, relation.must)
+def pack(relation: Relation, n: int) -> PackedRelation:
+    """A relation's must and may tuples as bits: one array if they're the same tuples."""
+    must = from_tuples(relation.arity, n, relation.must).data
     if np.array_equal(relation.must, relation.may):
-        return Modal(must, must)
-    return Modal(must, from_tuples(relation.arity, n, relation.may))
+        may = must
+    else:
+        may = from_tuples(relation.arity, n, relation.may).data
+    return PackedRelation(relation.name, relation.arity, must, may, relation.simple_name)
 
 
 # -- combining ------------------------------------------------------------------
@@ -223,23 +190,24 @@ def combine_relations(
     first: PackedRelation | None,
     second: PackedRelation | None,
     n: int,
-    first_size: int,
+    sizes: tuple[int, int],
     placement: Indices,
 ) -> PackedRelation:
     """A relation of the combined graph: the tuples of both, where each put them."""
-    parts = []
+    parts = []  # each graph's relation, how many nodes it has, and where they went
     if first is not None:
-        parts.append((first, np.arange(first_size)))
+        parts.append((first, sizes[0], np.arange(sizes[0])))
     if second is not None:
-        parts.append((second, placement))
-    named, _ = parts[0]
-    if any(relation.arity != named.arity for relation, _ in parts):
+        parts.append((second, sizes[1], placement))
+    named = parts[0][0]
+    if any(relation.arity != named.arity for relation, _, _ in parts):
         raise ValueError(f"{named.name} has a different arity in each graph")
-    must, may = empty(named.arity, n), empty(named.arity, n)
-    for relation, places in parts:
-        must = union(must, relabel(relation.values.must, n, places))
-        may = union(may, relabel(relation.values.may, n, places))
-    return PackedRelation(named.name, named.arity, Modal(must, may), named.simple_name)
+    arity = named.arity
+    must, may = empty(arity, n), empty(arity, n)
+    for relation, size, places in parts:
+        must = union(must, relabel(Value(arity, size, relation.must), n, places))
+        may = union(may, relabel(Value(arity, size, relation.may), n, places))
+    return PackedRelation(named.name, arity, must.data, may.data, named.simple_name)
 
 
 def combine_attributes(
