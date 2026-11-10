@@ -168,14 +168,16 @@ def test_bulk_rows_are_answers_and_not_sorted_again_per_block(monkeypatch):
 
 
 def _count_sorts(monkeypatch):
-    calls = {"unique": 0}
-    original = np.unique
+    """Count the sorts numpy does: np.unique, and np.argsort (which lookups use)."""
+    calls = {"sorts": 0}
+    for name in ("unique", "argsort"):
+        original = getattr(np, name)
 
-    def counting(*args, **kwargs):
-        calls["unique"] += 1
-        return original(*args, **kwargs)
+        def counting(*args, _original=original, **kwargs):
+            calls["sorts"] += 1
+            return _original(*args, **kwargs)
 
-    monkeypatch.setattr(np, "unique", counting)
+        monkeypatch.setattr(np, name, counting)
     return calls
 
 
@@ -197,9 +199,34 @@ def test_wide_factors_are_sorted_once_for_every_block(rule, monkeypatch):
     model = PartialModel([ModelNode(f"n{i}", f"n{i}") for i in range(n)], [edges, triples])
     calls = _count_sorts(monkeypatch)
     expected = evaluate(rule, model)["p"].tuples()["true"]  # in one block
-    in_one_block, calls["unique"] = calls["unique"], 0
+    in_one_block, calls["sorts"] = calls["sorts"], 0
     monkeypatch.setattr(solve_module, "BLOCK_ROWS", 10)
     found = evaluate(rule, model)["p"].tuples()["true"]
     assert len(found) > 100  # many blocks of rows
     assert sorted(map(tuple, found.tolist())) == sorted(map(tuple, expected.tolist()))
-    assert calls["unique"] <= in_one_block  # no sort per block
+    assert calls["sorts"] <= in_one_block  # no sort per block
+
+
+@pytest.mark.parametrize(
+    "layout",
+    ["contiguous", "strided", "reversed", "fortran", "one column", "empty"],
+)
+def test_row_keys_are_equal_exactly_where_rows_are(layout):
+    rng = np.random.default_rng(3)
+    base = rng.integers(0, 4, (200, 6)).astype(np.intp)
+    rows = {
+        "contiguous": base[:, :3].copy(),
+        "strided": base[:, ::2],
+        "reversed": base[::-1, 2:5],
+        "fortran": np.asfortranarray(base[:, 1:4]),
+        "one column": base[:, 2:3],
+        "empty": base[:0, :3],
+    }[layout]
+    other = np.ascontiguousarray(rows[::-1])  # the same rows, laid out differently
+    keys, other_keys = solve_module.row_keys(rows), solve_module.row_keys(other)
+    for i in range(len(rows)):
+        for j in range(len(rows)):
+            assert (keys[i] == other_keys[j]) == bool(np.array_equal(rows[i], other[j]))
+    found = solve_module.Lookup.of(other, list(range(rows.shape[1])))
+    low, matches = found.matching(rows)
+    assert all(matches > 0) and len(low) == len(rows)
