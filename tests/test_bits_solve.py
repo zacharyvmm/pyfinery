@@ -165,3 +165,41 @@ def test_bulk_rows_are_answers_and_not_sorted_again_per_block(monkeypatch):
     result = evaluate("pred p(a, b, c, d) <-> " + CLIQUE, _clique_model(10))["p"]
     assert len(result.tuples()["true"]) == 10**4  # 100 blocks of rows
     assert sorts < 10
+
+
+def _count_sorts(monkeypatch):
+    calls = {"unique": 0}
+    original = np.unique
+
+    def counting(*args, **kwargs):
+        calls["unique"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(np, "unique", counting)
+    return calls
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        "pred p(a, b, c) <-> r(a, b), r(b, c), !t(a, b, c).",  # checked against t, per block
+        # The first join of t starts from one row; the second is in blocks; the third
+        # joins t per block.
+        "pred p(a, b, c, d, e) <-> t(a, b, c), t(b, c, d), t(c, d, e).",
+    ],
+)
+def test_wide_factors_are_sorted_once_for_every_block(rule, monkeypatch):
+    n = 10
+    grid = np.array(np.meshgrid(*[np.arange(n)] * 3, indexing="ij")).reshape(3, -1).T
+    t = grid[grid.sum(axis=1) % 4 == 0]
+    edges = Relation.of("r", 2, [((i, j), "true") for i in range(n) for j in range(n)])
+    triples = Relation("t", 3, t, t, "t")
+    model = PartialModel([ModelNode(f"n{i}", f"n{i}") for i in range(n)], [edges, triples])
+    calls = _count_sorts(monkeypatch)
+    expected = evaluate(rule, model)["p"].tuples()["true"]  # in one block
+    in_one_block, calls["unique"] = calls["unique"], 0
+    monkeypatch.setattr(solve_module, "BLOCK_ROWS", 10)
+    found = evaluate(rule, model)["p"].tuples()["true"]
+    assert len(found) > 100  # many blocks of rows
+    assert sorted(map(tuple, found.tolist())) == sorted(map(tuple, expected.tolist()))
+    assert calls["unique"] <= in_one_block  # no sort per block

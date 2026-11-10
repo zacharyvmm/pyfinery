@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -280,7 +281,7 @@ def join(factors: list[Factor], head: tuple[VarId, ...], n: int) -> Value:
     start = Rows((), np.empty((1, 0), np.intp))  # one row, of no variables
     found = [
         block.tuples[:, [block.variables.index(v) for v in head]]
-        for block in complete(start, remaining, variables, n)
+        for block in complete(start, remaining, variables, n, {})
     ]  # distinct rows: each binds every variable
     tuples = np.concatenate(found) if found else np.empty((0, len(head)), np.intp)
     return from_tuples(len(head), n, tuples)
@@ -341,19 +342,21 @@ def select(factor: Factor, variable: VarId, node: NodeIndex) -> Factor:
             return make_factor(variables, from_tuples(len(variables), n, rest), factor.negated)
 
 
-def complete(rows: Rows, pending: list[Factor], unbound: list[VarId], n: int) -> Iterator[Rows]:
+def complete(
+    rows: Rows, pending: list[Factor], unbound: list[VarId], n: int, lookups: Lookups
+) -> Iterator[Rows]:
     """Blocks of complete rows from ``rows``: bind one more variable or wide factor
     (:func:`grow`), and complete each block of the result before the next."""
     if not unbound:
         yield rows
         return
-    blocks, used = grow(rows, pending, unbound, n)
+    blocks, used = grow(rows, pending, unbound, n, lookups)
     left = [f for i, f in enumerate(pending) if i not in used]
     for block in blocks:
-        block, rest = keep(block, left)
+        block, rest = keep(block, left, lookups)
         if len(block.tuples):
             still_unbound = [v for v in unbound if v not in block.variables]
-            yield from complete(block, rest, still_unbound, n)
+            yield from complete(block, rest, still_unbound, n, lookups)
 
 
 def blocks_of(counts: Indices, limit: int) -> Iterator[tuple[int, int]]:
@@ -388,7 +391,7 @@ def eliminate_existentials(
 
 
 def grow(
-    rows: Rows, pending: list[Factor], unbound: list[VarId], n: int
+    rows: Rows, pending: list[Factor], unbound: list[VarId], n: int, lookups: Lookups
 ) -> tuple[Iterator[Rows], set[int]]:
     """The rows with more variables bound, in blocks, and which pending factors that used up.
 
@@ -401,7 +404,7 @@ def grow(
     linked_wide = [i for i in wide if bound & set(pending[i].variables)]
     if linked_wide:
         i = min(linked_wide, key=lambda i: len(pending[i].value.array))
-        return join_tuples(rows, pending[i]), {i}
+        return join_tuples(rows, pending[i], lookups), {i}
     unary = {v: [i for i, f in enumerate(pending) if f.variables == (v,)] for v in unbound}
     links = {
         v: [
@@ -417,7 +420,7 @@ def grow(
         return extend(rows, variable, [pending[i] for i in sorted(used)], k.full_vector(n), n), used
     if wide:
         i = min(wide, key=lambda i: len(pending[i].value.array))
-        return join_tuples(rows, pending[i]), {i}
+        return join_tuples(rows, pending[i], lookups), {i}
     variable = min(unbound, key=lambda v: k.count(domain_of(pending, v, n)))
     domain = domain_of(pending, variable, n)  # the unary factors on it, and more
     return extend(rows, variable, [], domain, n), set(unary[variable])
@@ -453,7 +456,7 @@ def extend(
             yield Rows(variables, np.column_stack([rows.tuples[start + first + at], value]))
 
 
-def join_tuples(rows: Rows, factor: Factor) -> Iterator[Rows]:
+def join_tuples(rows: Rows, factor: Factor, lookups: Lookups) -> Iterator[Rows]:
     """Each row, with each tuple of a wide ``factor`` that agrees with it: in blocks of at
     most :data:`BLOCK_ROWS` rows (but for a single row with more tuples)."""
     tuples = factor.value.array
@@ -466,13 +469,9 @@ def join_tuples(rows: Rows, factor: Factor) -> Iterator[Rows]:
         low = np.zeros(count, np.intp)
         matches = np.full(count, len(tuples), np.intp)
     else:
-        mine, keys = codes(
-            rows.tuples[:, [rows.variables.index(v) for v in shared]],
-            tuples[:, [factor.variables.index(v) for v in shared]],
-        )
-        order = np.argsort(keys, kind="stable")
-        low = np.searchsorted(keys[order], mine, "left")
-        matches = np.searchsorted(keys[order], mine, "right") - low
+        found = lookup(lookups, factor, [factor.variables.index(v) for v in shared])
+        order = found.order
+        low, matches = found.matching(rows.tuples[:, [rows.variables.index(v) for v in shared]])
     variables = (*rows.variables, *(factor.variables[i] for i in added))
     for first, last in blocks_of(matches, BLOCK_ROWS):
         some = matches[first:last]
@@ -482,20 +481,20 @@ def join_tuples(rows: Rows, factor: Factor) -> Iterator[Rows]:
         yield Rows(variables, np.column_stack([rows.tuples[at], tuples[theirs][:, added]]))
 
 
-def keep(rows: Rows, pending: list[Factor]) -> tuple[Rows, list[Factor]]:
+def keep(rows: Rows, pending: list[Factor], lookups: Lookups) -> tuple[Rows, list[Factor]]:
     """The rows every factor over bound variables allows, and the factors left."""
     bound = set(rows.variables)
     keeping = np.ones(len(rows.tuples), bool)
     left = []
     for factor in pending:
         if set(factor.variables) <= bound:
-            keeping &= allows(rows, factor)
+            keeping &= allows(rows, factor, lookups)
         else:
             left.append(factor)
     return Rows(rows.variables, rows.tuples[keeping]), left
 
 
-def allows(rows: Rows, factor: Factor) -> NDArray[np.bool_]:
+def allows(rows: Rows, factor: Factor, lookups: Lookups) -> NDArray[np.bool_]:
     """Which rows a factor over bound variables allows."""
     columns = [rows.column(v) for v in factor.variables]
     match factor.value.arity:
@@ -506,16 +505,52 @@ def allows(rows: Rows, factor: Factor) -> NDArray[np.bool_]:
             r, c = columns
             found = (factor.value.matrix[r, c >> 6] >> (c & 63).astype(np.uint64)) & k.ONE
         case _:
-            mine, theirs = codes(np.column_stack(columns), factor.value.array)
-            found = np.isin(mine, theirs)
+            every = lookup(lookups, factor, list(range(len(factor.variables))))
+            found = every.matching(np.column_stack(columns))[1] > 0
     allowed: NDArray[np.bool_] = found.astype(bool) != factor.negated
     return allowed
 
 
-def codes(left: Tuples, right: Tuples) -> tuple[Indices, Indices]:
-    """A number for each row of ``left`` and of ``right``: the same where the rows are."""
-    if left.shape[1] == 1:
-        return left[:, 0], right[:, 0]
-    _, numbers = np.unique(np.concatenate([left, right]), axis=0, return_inverse=True)
-    numbers = numbers.reshape(-1)
-    return numbers[: len(left)], numbers[len(left) :]
+@dataclass(frozen=True)
+class Lookup:
+    """A wide factor's tuples sorted once by some of their columns, to find in bulk the
+    tuples that agree with each row on those columns."""
+
+    order: Indices
+    """The tuples, by index, sorted by the columns."""
+    keys: NDArray[Any]
+    """Those columns of the tuples, in that order: one key per tuple."""
+
+    @classmethod
+    def of(cls, tuples: Tuples, columns: list[int]) -> Lookup:
+        keys = row_keys(tuples[:, columns])
+        order = np.argsort(keys, kind="stable")
+        return cls(order, keys[order])
+
+    def matching(self, values: Tuples) -> tuple[Indices, Indices]:
+        """For each row of ``values`` (of the columns): where its tuples start in
+        :attr:`order`, and how many there are."""
+        keys = row_keys(values)
+        low = np.searchsorted(self.keys, keys, "left")
+        return low, np.searchsorted(self.keys, keys, "right") - low
+
+
+type Lookups = dict[tuple[int, tuple[int, ...]], Lookup]
+"""A join's lookups, by the ``id`` of the factor and the columns: each is made once,
+and every block of rows uses it."""
+
+
+def lookup(lookups: Lookups, factor: Factor, columns: list[int]) -> Lookup:
+    key = (id(factor), tuple(columns))
+    if key not in lookups:
+        lookups[key] = Lookup.of(factor.value.array, columns)
+    return lookups[key]
+
+
+def row_keys(columns: Tuples) -> NDArray[Any]:
+    """A key per row, equal where the rows are: the value for one column, else the row's
+    bytes (whose order isn't numeric, but is the same for every array of rows)."""
+    if columns.shape[1] == 1:
+        return np.ascontiguousarray(columns[:, 0], np.intp)
+    rows = np.ascontiguousarray(columns, np.intp)
+    return rows.view(np.dtype((np.void, rows.itemsize * rows.shape[1]))).ravel()
