@@ -19,38 +19,113 @@ commit ``7470710``):
 ``x == y`` and ``x != y`` are calls of the builtin ``equals``, as Refinery's
 language translates them: they bind variables like other atoms.
 
-This module checks and rewrites; :mod:`._evaluate` reads the result in a modality.
+This module checks and rewrites; :mod:`.evaluation` reads the result in a modality.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
-from ._errors import RuleError
-from ._model import PartialModel
-from ._solve import Argument, Node, Var
-from ._syntax import Atom, Call, Comparison, Constant, Literal_, Name, Predicate, Term
+from ..errors import RuleError
+from ..matrices.kernels import NodeIndex
+from ..rules.syntax import (
+    Atom,
+    Call,
+    Comparison,
+    Constant,
+    Literal_,
+    Name,
+    Position,
+    Predicate,
+    Term,
+)
+from .solve import Argument, Node, Var, VarId
+
+if TYPE_CHECKING:
+    from ..matrices.model import Attribute
+    from ..matrices.packed import PackedModel, PackedRelation
+
+
+class Target(NamedTuple):
+    """A relation an atom reads, whose values evaluation computes once.
+
+    ``kind`` says where they come from: ``base``, a relation of the model (by
+    its full name); ``undetermined``, a predicate of the rules without a body
+    or values; ``derived``, a predicate of the rules with a body. With
+    ``transitive``, it's the transitive closure of that relation.
+    """
+
+    kind: Literal["base", "undetermined", "derived"]
+    name: str
+    transitive: bool = False
+
+    @property
+    def steps(self) -> Target:
+        """The relation a transitive closure closes."""
+        return self._replace(transitive=False)
+
+
+def resolve(
+    name: str,
+    position: Position | None,
+    model: PackedModel,
+    defined: Collection[str],
+    declared: Collection[str],
+) -> Target:
+    """The relation rules read by ``name``: a predicate of theirs (with a body, or without
+    one and values in the model), or else a relation of the model."""
+    if name in defined:
+        return Target("derived", name)
+    if name in declared and model.relation_named(name) is None:
+        return Target("undetermined", name)
+    return Target("base", named_relation(model, name, position).name)
+
+
+def named_relation(model: PackedModel, name: str, position: Position | None) -> PackedRelation:
+    """The relation rules name ``name``, or a :class:`RuleError` at ``position``."""
+    try:
+        found = model.relation_named(name)
+    except ValueError as e:
+        raise RuleError(str(e), position) from None
+    if found is None:
+        raise RuleError(f"no relation named {name!r}", position)
+    return found
+
+
+def named_attribute(model: PackedModel, name: str, position: Position | None) -> Attribute:
+    """The attribute rules name ``name``, or a :class:`RuleError` at ``position``."""
+    try:
+        found = model.attribute_named(name)
+    except ValueError as e:
+        raise RuleError(str(e), position) from None
+    if found is None:
+        raise RuleError(f"no attribute named {name!r}", position)
+    return found
 
 
 @dataclass(frozen=True)
 class CallLiteral:
-    """An atom with its arguments resolved."""
+    """An atom with its arguments and the relation it reads resolved."""
 
     atom: Atom
+    target: Target
     arguments: tuple[Argument, ...]
     attribute: bool = False
     """A boolean attribute read as an atom: its arguments are inputs, which it doesn't bind."""
 
     @property
-    def variables(self) -> set[int]:
+    def variables(self) -> set[VarId]:
         return {a.id for a in self.arguments if isinstance(a, Var)}
 
 
 @dataclass(frozen=True)
 class Operand:
-    variable: int | None = None
-    node: int | None = None
+    """An attribute's value of a variable or a node, or a constant."""
+
+    variable: VarId | None = None
+    node: NodeIndex | None = None
     constant: object = None
     attribute: str | None = None
 
@@ -62,7 +137,7 @@ class CompareLiteral:
     right: Operand
 
     @property
-    def variables(self) -> set[int]:
+    def variables(self) -> set[VarId]:
         return {o.variable for o in (self.left, self.right) if o.variable is not None}
 
 
@@ -72,35 +147,41 @@ class Clause:
 
     calls: tuple[CallLiteral, ...]
     comparisons: tuple[CompareLiteral, ...]
-    bound: frozenset[int]
+    bound: frozenset[VarId]
     """The variables literals bind: parameters, and those in positive atoms."""
     parameters: int
-
-
-@dataclass(frozen=True)
-class Context:
-    model: PartialModel
-    is_attribute: Callable[[str], bool]
-    """Whether a name is that of a boolean attribute (and no predicate's)."""
-    identity: Callable[[Atom], str]
-    """What an atom calls: the same for two atoms of one relation."""
+    """How many parameters: they are the variables ``0`` to ``parameters - 1``."""
 
 
 def normalize(
-    predicate: Predicate, literals: Sequence[Literal_], context: Context
+    predicate: Predicate,
+    literals: Sequence[Literal_],
+    model: PackedModel,
+    defined: Collection[str],
+    declared: Collection[str],
 ) -> Clause | None:
-    scope = _Scope(predicate, context.model)
+    """A clause of ``predicate``, checked and rewritten, or ``None`` if it's always false.
+
+    ``defined`` and ``declared`` name the rules' predicates with and without a
+    body: an atom names one of those, or else a relation of ``model``.
+    """
+    scope = Scope(predicate, model)
+
+    def target(atom: Atom) -> Target:
+        found = resolve(atom.relation, atom.position, model, defined, declared)
+        return found._replace(transitive=atom.transitive)
+
     parameters = len(predicate.parameters)
     calls: list[CallLiteral] = []
     comparisons: list[CompareLiteral] = []
-    clause_level: set[int] = set()  # variables of literals that aren't negated atoms
+    clause_level: set[VarId] = set()  # variables of literals that aren't negated atoms
 
     for index, parameter in enumerate(predicate.parameters):
         if parameter.type is not None:
             type_atom = Atom(parameter.type, (), False, None, False, predicate.position)
-            calls.append(CallLiteral(type_atom, (Var(index),)))
+            calls.append(CallLiteral(type_atom, target(type_atom), (Var(index),)))
     for literal in literals:
-        if isinstance(literal, Comparison) and _of_nodes(literal):
+        if isinstance(literal, Comparison) and compares_nodes(literal):
             if literal.negated:
                 raise RuleError(
                     "a negated comparison of nodes: write != or == instead", literal.position
@@ -109,24 +190,23 @@ def normalize(
             right = scope.argument(literal.right)  # type: ignore[arg-type]
             negated = literal.operator == "!="
             atom = Atom("equals", (), negated, None, False, literal.position)
-            call = CallLiteral(atom, (left, right))
+            call = CallLiteral(atom, target(atom), (left, right))
             clause_level |= call.variables  # ``!=`` isn't a negation scope
             calls.append(call)
         elif isinstance(literal, Comparison):
             compared = CompareLiteral(
                 literal,
-                _operand(literal.left, scope, literal),
-                _operand(literal.right, scope, literal),
+                operand_of(literal.left, scope, literal),
+                operand_of(literal.right, scope, literal),
             )
             clause_level |= compared.variables
             comparisons.append(compared)
         else:
-            attribute = context.is_attribute(literal.relation)
+            attribute = is_boolean_attribute(literal.relation, model, defined)
             if attribute and literal.transitive:
                 raise RuleError(f"{literal.relation} is an attribute", literal.position)
-            call = CallLiteral(
-                literal, tuple(scope.argument(a) for a in literal.arguments), attribute
-            )
+            arguments = tuple(scope.argument(a) for a in literal.arguments)
+            call = CallLiteral(literal, target(literal), arguments, attribute)
             if attribute or not literal.negated:
                 clause_level |= call.variables
             calls.append(call)
@@ -152,17 +232,17 @@ def normalize(
                 "several literals",
                 predicate.position,
             )
-    if _contradicts(calls, bound, context):
+    if contradicts(calls, bound):
         return None
     return Clause(tuple(calls), tuple(comparisons), frozenset(bound), parameters)
 
 
-def _of_nodes(comparison: Comparison) -> bool:
+def compares_nodes(comparison: Comparison) -> bool:
     sides = (comparison.left, comparison.right)
     return comparison.operator in ("==", "!=") and all(isinstance(s, Name) for s in sides)
 
 
-def _operand(term: Term, scope: _Scope, comparison: Comparison) -> Operand:
+def operand_of(term: Term, scope: Scope, comparison: Comparison) -> Operand:
     if isinstance(term, Constant):
         return Operand(constant=term.value)
     if isinstance(term, Call):
@@ -175,15 +255,26 @@ def _operand(term: Term, scope: _Scope, comparison: Comparison) -> Operand:
     raise RuleError("only attribute values and constants can be compared", comparison.position)
 
 
-def _contradicts(calls: list[CallLiteral], bound: set[int], context: Context) -> bool:
+def is_boolean_attribute(name: str, model: PackedModel, defined: Collection[str]) -> bool:
+    """Whether ``name`` is that of a boolean attribute (and no predicate's with a body)."""
+    if name in defined:
+        return False
+    try:
+        attribute = model.attribute_named(name)
+    except ValueError:
+        return False
+    return attribute is not None and attribute.data_type == "boolean"
+
+
+def contradicts(calls: list[CallLiteral], bound: set[VarId]) -> bool:
     """Whether the clause calls a relation and its negation at the same bound arguments."""
 
-    def target(call: CallLiteral) -> tuple[str, str | None] | None:
+    def target(call: CallLiteral) -> tuple[Target, str | None] | None:
         if call.atom.transitive or call.attribute:
             return None
-        return context.identity(call.atom), call.atom.modality
+        return call.target, call.atom.modality  # the same however atoms name the relation
 
-    positive: dict[tuple[str, str | None], list[CallLiteral]] = {}
+    positive: dict[tuple[Target, str | None], list[CallLiteral]] = {}
     for call in calls:
         key = target(call)
         if key is not None and not call.atom.negated:
@@ -204,13 +295,13 @@ def _contradicts(calls: list[CallLiteral], bound: set[int], context: Context) ->
 # -- names --------------------------------------------------------------------
 
 
-class _Scope:
+class Scope:
     """The variables of a clause: parameters first, then the rest as they come."""
 
-    def __init__(self, predicate: Predicate, model: PartialModel) -> None:
+    def __init__(self, predicate: Predicate, model: PackedModel) -> None:
         self.model = model
-        self.ids: dict[str, int] = {}
-        self.names: dict[int, str] = {}
+        self.ids: dict[str, VarId] = {}
+        self.names: dict[VarId, str] = {}
         for parameter in predicate.parameters:
             if parameter.name in self.ids:
                 raise RuleError(f"two parameters named {parameter.name}", predicate.position)
@@ -218,7 +309,7 @@ class _Scope:
             self.names[len(self.names)] = parameter.name
         self.next = len(self.ids)
 
-    def name(self, variable: int) -> str:
+    def name(self, variable: VarId) -> str:
         return self.names.get(variable, "_")
 
     def argument(self, name: Name) -> Argument:

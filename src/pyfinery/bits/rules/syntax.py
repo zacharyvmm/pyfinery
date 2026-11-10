@@ -24,9 +24,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Literal
+from typing import Literal, cast
 
-from ._errors import RuleError, UnsupportedRuleError
+from ..errors import RuleError, UnsupportedRuleError
+from ..names import QUOTED_KEYWORDS, refinery_name, string_literal
 
 PredicateKind = Literal["pred", "error", "shadow"]
 Modality = Literal["must", "may"]
@@ -124,7 +125,7 @@ class Source:
 
 # -- tokens -------------------------------------------------------------------
 
-_TOKEN = re.compile(
+TOKEN_PATTERN = re.compile(
     r"""
     (?P<space>\s+)
     | (?P<comment>(?:%|//)[^\n]*|/\*.*?\*/)
@@ -140,7 +141,7 @@ _TOKEN = re.compile(
 
 
 @dataclass(frozen=True)
-class _Token:
+class Token:
     kind: str
     text: str
     position: Position
@@ -159,31 +160,31 @@ class _Token:
         return refinery_name(self.value)
 
 
-_EOF = "<end of input>"
+EOF = "<end of input>"
 
 
-def _tokens(source: str) -> list[_Token]:
+def tokenize(source: str) -> list[Token]:
     tokens = []
     line, line_start = 1, 0
-    for match in _TOKEN.finditer(source):
+    for match in TOKEN_PATTERN.finditer(source):
         kind = match.lastgroup
         assert kind is not None
         text = match.group()
         if kind not in ("space", "comment"):
-            tokens.append(_Token(kind, text, Position(line, match.start() - line_start + 1)))
+            tokens.append(Token(kind, text, Position(line, match.start() - line_start + 1)))
         newlines = text.count("\n")
         if newlines:
             line += newlines
             line_start = match.start() + text.rindex("\n") + 1
-    tokens.append(_Token("eof", _EOF, Position(line, len(source) - line_start + 1)))
+    tokens.append(Token("eof", EOF, Position(line, len(source) - line_start + 1)))
     return tokens
 
 
 # -- parser -------------------------------------------------------------------
 
-_MODIFIERS = {"error", "shadow"}
-_OPERATORS = {"==", "!=", "<", "<=", ">", ">="}
-_UNSUPPORTED_IN_BODY = {
+MODIFIERS = {"error", "shadow"}
+OPERATORS = {"==", "!=", "<", "<=", ">", ">="}
+UNSUPPORTED_IN_BODY = {
     "count": "aggregation",
     "sum": "aggregation",
     "prod": "aggregation",
@@ -195,20 +196,20 @@ _UNSUPPORTED_IN_BODY = {
 
 def parse(source: str) -> Source:
     """The predicate declarations of ``source``, which may be a whole problem."""
-    return _Parser(_tokens(source)).statements()
+    return Parser(tokenize(source)).statements()
 
 
-class _Parser:
-    def __init__(self, tokens: list[_Token]) -> None:
+class Parser:
+    def __init__(self, tokens: list[Token]) -> None:
         self.tokens = tokens
         self.at = 0
 
     # -- helpers --
 
-    def peek(self, ahead: int = 0) -> _Token:
+    def peek(self, ahead: int = 0) -> Token:
         return self.tokens[min(self.at + ahead, len(self.tokens) - 1)]
 
-    def next(self) -> _Token:
+    def next(self) -> Token:
         token = self.peek()
         self.at = min(self.at + 1, len(self.tokens) - 1)
         return token
@@ -219,13 +220,13 @@ class _Parser:
             return True
         return False
 
-    def expect(self, text: str) -> _Token:
+    def expect(self, text: str) -> Token:
         token = self.peek()
         if token.text != text or token.kind in ("string", "quoted"):
             raise RuleError(f"expected {text!r}, found {token.text!r}", token.position)
         return self.next()
 
-    def identifier(self) -> _Token:
+    def identifier(self) -> Token:
         token = self.peek()
         if token.kind not in ("name", "quoted"):
             raise RuleError(f"expected a name, found {token.text!r}", token.position)
@@ -249,7 +250,7 @@ class _Parser:
         while self.peek().kind != "eof":
             start = self.at
             modifiers = []
-            while self.peek().text in _MODIFIERS and self.peek().kind == "name":
+            while self.peek().text in MODIFIERS and self.peek().kind == "name":
                 modifiers.append(self.next().text)
             if self.peek().text == "pred" and self.peek().kind == "name":
                 self.next()
@@ -260,15 +261,15 @@ class _Parser:
                 self.at = start
                 self.skip_statement()
                 statement = self.tokens[start : self.at]
-                if (asserted_name := _asserted(statement)) is not None:
+                if (asserted_name := asserted_relation(statement)) is not None:
                     asserted.setdefault(asserted_name, statement[0].position)
                     continue  # its arguments are nodes
-                if _is_class(statement):
-                    for name, position in _reference_types(statement):
+                if is_class(statement):
+                    for name, position in reference_types(statement):
                         in_classes.setdefault(name, position)
                     continue
                 leading = {t.text for t in statement[:2] if t.kind == "name"}
-                if leading & _DECLARING:
+                if leading & DECLARING:
                     continue  # names declared there aren't predicates
                 arrows = [i for i, t in enumerate(statement) if t.text == "==>"]
                 for token in statement[arrows[-1] + 1 if arrows else 0 :]:
@@ -344,8 +345,8 @@ class _Parser:
 
     def literal(self) -> Literal_:
         token = self.peek()
-        if token.kind == "name" and token.text in _UNSUPPORTED_IN_BODY:
-            raise UnsupportedRuleError(_UNSUPPORTED_IN_BODY[token.text], token.position)
+        if token.kind == "name" and token.text in UNSUPPORTED_IN_BODY:
+            raise UnsupportedRuleError(UNSUPPORTED_IN_BODY[token.text], token.position)
         if (
             token.text in ("true", "false")
             and token.kind == "name"
@@ -359,17 +360,17 @@ class _Parser:
             raise UnsupportedRuleError("constant literals", token.position)
         if self.accept("!"):
             literal = self.parenthesized() if self.peek().text == "(" else self.modal_atom()
-            return _negate(literal)
+            return negate(literal)
         if self.peek().text == "(":
             return self.parenthesized()
         if self.peek().text in ("must", "may") and self.peek(1).kind in ("name", "quoted"):
             return self.modal_atom()
         left = self.term()
-        if self.peek().text in _OPERATORS:
+        if self.peek().text in OPERATORS:
             return self.comparison(left, token.position)
         if isinstance(left, Call):
             return Atom(left.relation, left.arguments, False, None, False, left.position)
-        if isinstance(left, _Transitive):
+        if isinstance(left, Transitive):
             return Atom(left.relation, left.arguments, False, None, True, left.position)
         raise RuleError(f"expected a literal, found {token.text!r}", token.position)
 
@@ -390,31 +391,30 @@ class _Parser:
         term = self.term()
         if isinstance(term, Call):
             atom = Atom(term.relation, term.arguments, False, modality, False, term.position)
-        elif isinstance(term, _Transitive):
+        elif isinstance(term, Transitive):
             atom = Atom(term.relation, term.arguments, False, modality, True, term.position)
         else:
             raise RuleError("expected an atom", self.peek().position)
-        if self.peek().text in _OPERATORS:
+        if self.peek().text in OPERATORS:
             raise RuleError("comparisons must be parenthesized after '!'", self.peek().position)
         return atom
 
-    def comparison(self, left: Term, position: Position) -> Comparison:
-        operator = self.next().text
+    def comparison(self, left: Term | Transitive, position: Position) -> Comparison:
+        operator = cast(Operator, self.next().text)  # one of OPERATORS, as the caller checked
         right = self.term()
-        if self.peek().text in _OPERATORS:
+        if self.peek().text in OPERATORS:
             raise RuleError("comparisons don't chain", self.peek().position)
-        for side in (left, right):
-            if isinstance(side, _Transitive):
-                raise RuleError("transitive closure in a comparison", position)
-        return Comparison(left, operator, right, False, position)  # type: ignore[arg-type]
+        if isinstance(left, Transitive) or isinstance(right, Transitive):
+            raise RuleError("transitive closure in a comparison", position)
+        return Comparison(left, operator, right, False, position)
 
-    def term(self) -> Term | _Transitive:
+    def term(self) -> Term | Transitive:
         token = self.peek()
         if token.text == "-" and self.peek(1).kind == "number":
             self.next()
-            term: Term | _Transitive = Constant(_number("-" + self.next().text))
+            term: Term | Transitive = Constant(parse_number("-" + self.next().text))
         elif token.kind == "number":
-            term = Constant(_number(self.next().text))
+            term = Constant(parse_number(self.next().text))
         elif token.kind == "string":
             term = Constant(string_literal(self.next().text))
         elif token.kind == "name" and token.text in ("true", "false"):
@@ -428,7 +428,7 @@ class _Parser:
                 transitive = True
             if self.peek().text == "(":
                 arguments = self.arguments()
-                term = (_Transitive if transitive else Call)(name, arguments, token.position)
+                term = (Transitive if transitive else Call)(name, arguments, token.position)
             elif transitive:
                 raise RuleError("expected '(' after '+'", self.peek().position)
             else:
@@ -462,7 +462,7 @@ class _Parser:
             self.expect(",")
 
 
-_STATEMENT_KEYWORDS = {
+STATEMENT_KEYWORDS = {
     "abstract",
     "aggregator",
     "atom",
@@ -485,7 +485,7 @@ _STATEMENT_KEYWORDS = {
 }
 
 
-def _asserted(statement: list[_Token]) -> str | None:
+def asserted_relation(statement: list[Token]) -> str | None:
     """The relation an assertion is about, e.g. ``bar`` in ``default !bar(*).``"""
     at = 0
     if at < len(statement) and statement[at].text == "default":
@@ -500,25 +500,25 @@ def _asserted(statement: list[_Token]) -> str | None:
             at += 1
         else:
             break
-    if not parts or (statement[0].kind == "name" and parts[0] in _STATEMENT_KEYWORDS):
+    if not parts or (statement[0].kind == "name" and parts[0] in STATEMENT_KEYWORDS):
         return None
     if at < len(statement) and statement[at].text == "(":
         return "::".join(parts)
     return None
 
 
-def _is_class(statement: list[_Token]) -> bool:
+def is_class(statement: list[Token]) -> bool:
     leading = [t.text for t in statement[:2] if t.kind == "name"]
     return "class" in leading
 
 
 # Statements that declare names (enum literals, atoms, nodes, modules), not use them.
-_DECLARING = {"enum", "atom", "declare", "multi", "import", "problem", "module"}
+DECLARING = {"enum", "atom", "declare", "multi", "import", "problem", "module"}
 
-_FEATURE_KINDS = {"contains", "container", "refers", "partial"}
+FEATURE_KINDS = {"contains", "container", "refers", "partial"}
 
 
-def _reference_types(statement: list[_Token]) -> list[tuple[str, Position]]:
+def reference_types(statement: list[Token]) -> list[tuple[str, Position]]:
     """The types of the features a class declares, e.g. ``bar`` in
     ``class A { contains bar[0..1] foo opposite baz }``.
 
@@ -551,7 +551,7 @@ def _reference_types(statement: list[_Token]) -> list[tuple[str, Position]]:
 
     try:
         while at < len(tokens):
-            if tokens[at].kind == "name" and tokens[at].text in _FEATURE_KINDS:
+            if tokens[at].kind == "name" and tokens[at].text in FEATURE_KINDS:
                 at += 1
             parsed = name_at(at)
             if parsed is None:
@@ -574,7 +574,7 @@ def _reference_types(statement: list[_Token]) -> list[tuple[str, Position]]:
             if at < len(tokens) and tokens[at].text in (";", ","):
                 at += 1
     except ValueError:
-        keywords = _QUOTED_KEYWORDS | _FEATURE_KINDS | {"opposite", "extends", "abstract"}
+        keywords = QUOTED_KEYWORDS | FEATURE_KINDS | {"opposite", "extends", "abstract"}
         return [
             (t.name, t.position)
             for t in tokens
@@ -584,13 +584,13 @@ def _reference_types(statement: list[_Token]) -> list[tuple[str, Position]]:
 
 
 @dataclass(frozen=True)
-class _Transitive:
+class Transitive:
     relation: str
     arguments: tuple[Name, ...]
     position: Position
 
 
-def _negate(literal: Literal_) -> Literal_:
+def negate(literal: Literal_) -> Literal_:
     match literal:
         case Atom():
             return Atom(
@@ -607,52 +607,7 @@ def _negate(literal: Literal_) -> Literal_:
             )
 
 
-# The keywords Refinery quotes when it writes a name: its grammar's keywords, but those
-# its Identifier rule also takes as names (IdentifierValueConverter, Problem.xtext).
-_QUOTED_KEYWORDS = frozenset(
-    {
-        *("abstract", "candidate", "class", "declare", "default", "enum", "error"),
-        *("extends", "false", "import", "is", "may", "must", "partial", "pred"),
-        *("refers", "rule", "scope", "true", "unknown", "__proto__"),
-    }
-)
-_SIMPLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
-_JAVA_ESCAPES = {"\\": "\\\\", "'": "\\'", '"': '\\"', "\n": "\\n", "\t": "\\t", "\r": "\\r"}
-_JAVA_ESCAPES |= {"\b": "\\b", "\f": "\\f"}
-
-
-def refinery_name(value: str) -> str:
-    """A name as Refinery writes it in its output (``IdentifierValueConverter``):
-    as it is if it is an identifier and not a keyword, else quoted, Java-escaped."""
-    if _SIMPLE_NAME.match(value) and value not in _QUOTED_KEYWORDS:
-        return value
-    return "'" + "".join(_JAVA_ESCAPES.get(c, c) for c in value) + "'"
-
-
-_ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "b": "\b", "f": "\f"}
-
-
-def string_literal(text: str) -> str:
-    """The value of a string literal as Refinery writes it, e.g. ``"a\\n\\u00e9"``.
-
-    Escapes are Java's: ``\\n``, ``\\t``, ``\\uXXXX`` (UTF-16 code units, so a
-    surrogate pair is one character), and a backslash before anything else.
-    """
-
-    def replace(match: re.Match[str]) -> str:
-        escaped = match.group(1)
-        if escaped.startswith("u"):
-            return chr(int(escaped[1:], 16))
-        return _ESCAPES.get(escaped, escaped)
-
-    value = re.sub(r"\\(u[0-9a-fA-F]{4}|.)", replace, text[1:-1], flags=re.DOTALL)
-    try:  # join surrogate pairs; a lone surrogate stays as it is
-        return value.encode("utf-16", "surrogatepass").decode("utf-16")
-    except UnicodeDecodeError:
-        return value
-
-
-def _number(text: str) -> int | Decimal:
+def parse_number(text: str) -> int | Decimal:
     """A number as written: an int, or a real as a decimal (BigInteger and BigDecimal)."""
     try:
         return int(text)

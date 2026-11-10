@@ -20,7 +20,7 @@ from pyfinery.bits import (
     UnsupportedRuleError,
     evaluate,
 )
-from pyfinery.bits._syntax import parse
+from pyfinery.bits.rules.syntax import parse
 
 
 def model() -> PartialModel:
@@ -256,7 +256,7 @@ def test_strings_are_values_even_when_spelled_like_logic_values():
     ],
 )
 def test_string_literals_decode_java_escapes(literal, value):
-    from pyfinery.bits._syntax import string_literal
+    from pyfinery.bits.names import string_literal
 
     assert string_literal(literal) == value
 
@@ -277,7 +277,7 @@ def test_string_literals_decode_java_escapes(literal, value):
 )
 def test_names_are_written_as_refinery_writes_them(value, name):
     """As checked against the pinned image: these are the names of its JSON output."""
-    from pyfinery.bits._syntax import refinery_name
+    from pyfinery.bits.names import refinery_name
 
     assert refinery_name(value) == name
 
@@ -304,7 +304,7 @@ def test_quoted_parameters_are_the_variables_their_bodies_name():
 
 
 def test_only_reference_types_count_as_predicates_typing_references():
-    from pyfinery.bits._syntax import parse
+    from pyfinery.bits.rules.syntax import parse
 
     source = "class A { contains bar[0..1] foo opposite baz  refers B b; int n }"
     assert set(parse(source).in_classes) == {"bar", "B", "int"}
@@ -337,3 +337,12 @@ def test_predicates_with_bodies_are_only_read(source, refused):
     else:
         with pytest.raises(UnsupportedRuleError, match=refused):
             evaluate(source, model())
+
+
+def test_a_selected_predicate_without_a_body_has_the_models_arity():
+    # Person relates one node in the model; a declaration of none can't select it.
+    with pytest.raises(
+        RuleError, match="Person has 0 parameters, but Person in the model relates 1"
+    ):
+        evaluate("pred Person().", model(), select=["Person"])
+    assert len(list(evaluate("pred Person(x).", model(), select=["Person"])["Person"].items())) == 3

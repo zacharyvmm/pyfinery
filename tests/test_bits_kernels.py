@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyfinery.bits import _kernels as k
+from pyfinery.bits.matrices import kernels as k
 
 SIZES = [1, 2, 63, 64, 65, 130]
 

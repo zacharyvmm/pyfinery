@@ -7,16 +7,18 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from decimal import ROUND_CEILING, ROUND_FLOOR, Context, Decimal
-from typing import Literal
+from typing import Any, Literal, Protocol
 
 import numpy as np
 from numpy.typing import NDArray
 
-from ..models import ErrorValue, JsonOutput, UnknownValue
-from ._syntax import string_literal
+from ...models import ErrorValue, JsonOutput, UnknownValue
+from ..names import string_literal
+from .kernels import NodeIndex
+from .values import NodeTuple, Tuples
 
 LogicValue = Literal["true", "false", "unknown", "error"]
 NodeKind = Literal["default", "atom", "multi"]
@@ -24,6 +26,8 @@ DataType = Literal["int", "real", "string", "boolean"]
 
 EXISTS = "builtin::exists"
 EQUALS = "builtin::equals"
+BUILTINS = {"exists": EXISTS, "equals": EQUALS}
+"""The builtin relations, by the names rules give them."""
 
 
 @dataclass(frozen=True)
@@ -34,7 +38,7 @@ class Node:
     """``atom`` nodes (atoms and enum literals) are the ones rules may name."""
 
 
-def _tuples(arity: int, keys: list[tuple[int, ...]]) -> NDArray[np.intp]:
+def tuple_array(arity: int, keys: list[NodeTuple]) -> Tuples:
     return np.array(keys, dtype=np.intp).reshape(len(keys), arity)
 
 
@@ -48,8 +52,8 @@ class Relation:
 
     name: str
     arity: int
-    must: NDArray[np.intp]
-    may: NDArray[np.intp]
+    must: Tuples
+    may: Tuples
     simple_name: str = ""
 
     @classmethod
@@ -57,7 +61,7 @@ class Relation:
         cls,
         name: str,
         arity: int,
-        values: Iterable[tuple[tuple[int, ...], LogicValue]],
+        values: Iterable[tuple[NodeTuple, LogicValue]],
         simple_name: str | None = None,
     ) -> Relation:
         """A relation from ``(tuple, value)`` pairs; tuples that aren't given are false."""
@@ -70,18 +74,26 @@ class Relation:
             if value in ("true", "unknown"):
                 may.append(tuple(key))
         return cls(
-            name, arity, _tuples(arity, must), _tuples(arity, may), simple_name or _simple(name)
+            name,
+            arity,
+            tuple_array(arity, must),
+            tuple_array(arity, may),
+            simple_name or simple_name_of(name),
         )
 
 
-class _Error:
+class ErrorMarker:
     def __repr__(self) -> str:
         return "Attribute.ERROR"
 
 
-Number = int | Decimal | float
+type Number = int | Decimal | float
 """Exact, as Refinery's BigInteger and BigDecimal bounds; ``float`` only for infinities,
 or values a float holds exactly."""
+
+type Numbers = NDArray[Any]
+"""An array of :data:`Number`: ``float64`` if every one is a float exactly, else
+``object``, of exact ``int`` and ``Decimal``."""
 
 
 class Attribute:
@@ -90,19 +102,18 @@ class Attribute:
 
     An unknown value is ``[-inf, inf]``. A node outside the attribute's class
     has no value, which Refinery treats as an error: the empty ``[inf, -inf]``.
-    Bounds are float64 arrays when every value is a float exactly, and object
-    arrays of exact ``int`` and ``Fraction`` otherwise.
+    Bounds are :data:`Numbers`, by node.
     """
 
-    ERROR = _Error()
+    ERROR = ErrorMarker()
     """The value of an attribute that is an error, for :meth:`of`."""
 
     def __init__(
         self,
         name: str,
         data_type: DataType,
-        lower: NDArray,
-        upper: NDArray,
+        lower: Numbers,
+        upper: Numbers,
         strings: tuple[str | None, ...] = (),
         simple_name: str = "",
     ) -> None:
@@ -111,7 +122,7 @@ class Attribute:
         self.lower = lower
         self.upper = upper
         self.strings = strings
-        self.simple_name = simple_name or _simple(name)
+        self.simple_name = simple_name or simple_name_of(name)
 
     def __repr__(self) -> str:
         return f"Attribute({self.name!r}, {self.data_type!r})"
@@ -122,7 +133,7 @@ class Attribute:
         name: str,
         data_type: DataType,
         n: int,
-        values: Iterable[tuple[int, object]],
+        values: Iterable[tuple[NodeIndex, object]],
         simple_name: str | None = None,
     ) -> Attribute:
         """An attribute from ``(node, value)`` pairs, given for the nodes of its class.
@@ -144,7 +155,7 @@ class Attribute:
                 strings[node] = value
                 lower[node] = upper[node] = 0
                 continue
-            lower[node], upper[node] = _interval(value, data_type)
+            lower[node], upper[node] = as_interval(value, data_type)
         bounds = [b for b in (*lower, *upper) if not isinstance(b, float)]
         dtype = np.float64 if all(float(b) == b for b in bounds) else object
         return cls(
@@ -153,20 +164,20 @@ class Attribute:
             np.array(lower, dtype=dtype),
             np.array(upper, dtype=dtype),
             tuple(strings) if data_type == "string" else (),
-            simple_name or _simple(name),
+            simple_name or simple_name_of(name),
         )
 
 
-_FLOOR = Context(prec=16, rounding=ROUND_FLOOR)
-_CEILING = Context(prec=16, rounding=ROUND_CEILING)
+FLOOR = Context(prec=16, rounding=ROUND_FLOOR)
+CEILING = Context(prec=16, rounding=ROUND_CEILING)
 
 
 def real_interval(value: Decimal) -> tuple[Decimal, Decimal]:
     """A real as Refinery's ``RealInterval.of`` holds it: rounded outward to 16 digits."""
-    return _FLOOR.plus(value), _CEILING.plus(value)
+    return FLOOR.plus(value), CEILING.plus(value)
 
 
-def _decimal(value: object) -> Decimal:
+def as_decimal(value: object) -> Decimal:
     if isinstance(value, bool):
         raise ValueError(f"not a number: {value!r}")
     if isinstance(value, float):
@@ -178,13 +189,13 @@ def _decimal(value: object) -> Decimal:
     return Decimal(str(value).strip())
 
 
-def _integer(value: object) -> int:
+def as_integer(value: object) -> int:
     if isinstance(value, bool | float | Decimal):
         raise ValueError(f"not an integer: {value!r}")
     return int(value) if isinstance(value, int) else int(str(value).strip())
 
 
-def _interval(value: object, data_type: DataType) -> tuple[Number, Number]:
+def as_interval(value: object, data_type: DataType) -> tuple[Number, Number]:
     if value is None or value == "unknown":
         # TruthValue.UNKNOWN is either false (0) or true (1), no other number.
         return (0, 1) if data_type == "boolean" else (-math.inf, math.inf)
@@ -202,16 +213,18 @@ def _interval(value: object, data_type: DataType) -> tuple[Number, Number]:
     upper: object = value
     if isinstance(value, str) and ".." in value:
         lower, _, upper = value.partition("..")
+    low: Number
+    high: Number
     if data_type == "int":
-        low = -math.inf if str(lower).strip() == "*" else _integer(lower)
-        high = math.inf if str(upper).strip() == "*" else _integer(upper)
+        low = -math.inf if str(lower).strip() == "*" else as_integer(lower)
+        high = math.inf if str(upper).strip() == "*" else as_integer(upper)
         return low, high
-    low = -math.inf if str(lower).strip() == "*" else real_interval(_decimal(lower))[0]
-    high = math.inf if str(upper).strip() == "*" else real_interval(_decimal(upper))[1]
+    low = -math.inf if str(lower).strip() == "*" else real_interval(as_decimal(lower))[0]
+    high = math.inf if str(upper).strip() == "*" else real_interval(as_decimal(upper))[1]
     return low, high
 
 
-def _simple(name: str) -> str:
+def simple_name_of(name: str) -> str:
     return name.rsplit("::", 1)[-1]
 
 
@@ -246,33 +259,25 @@ class PartialModel:
     def size(self) -> int:
         return len(self.nodes)
 
+    @property
+    def all_relations(self) -> tuple[Relation, ...]:
+        """The relations, and the builtin ``exists`` and ``equals`` if they weren't given."""
+        return tuple(self._relations.values())
+
     def relation_named(self, name: str) -> Relation | None:
         """A relation by name, or by simple name if only one has it.
 
         ``exists`` and ``equals`` are the builtin ones.
         """
-        if name in ("exists", "equals"):
-            name = f"builtin::{name}"
-        return _lookup(self._relations, name)
+        return lookup(self._relations, BUILTINS.get(name, name))
 
     def attribute_named(self, name: str) -> Attribute | None:
         """An attribute by name, or by simple name if only one has it."""
-        return _lookup(self._attributes, name)
+        return lookup(self._attributes, name)
 
-    def atom_named(self, name: str) -> int | None:
+    def atom_named(self, name: str) -> NodeIndex | None:
         """The index of the atom (or enum literal) ``name``, by name or unique simple name."""
-        found = [
-            i for i, node in enumerate(self.nodes) if node.kind == "atom" and node.name == name
-        ]
-        if not found:
-            found = [
-                i
-                for i, node in enumerate(self.nodes)
-                if node.kind == "atom" and node.simple_name == name
-            ]
-        if len(found) > 1:
-            raise ValueError(f"atom {name!r} is ambiguous")
-        return found[0] if found else None
+        return atom_index(self.nodes, name)
 
     @classmethod
     def from_json(cls, output: JsonOutput, *, exclude: Iterable[str] = ()) -> PartialModel:
@@ -295,14 +300,14 @@ class PartialModel:
                 if data_type not in ("int", "real", "string"):
                     continue
                 values = [
-                    (int(t[0]), _attribute_value(t[arity], data_type))  # type: ignore[arg-type]
+                    (int(t[0]), as_attribute_value(t[arity], data_type))  # type: ignore[arg-type]
                     for t in raw
                 ]
                 attributes.append(
                     Attribute.of(metadata.name, data_type, n, values, metadata.simple_name)  # type: ignore[arg-type]
                 )
                 continue
-            keyed = [(tuple(int(i) for i in t[:arity]), _logic_value(t[arity])) for t in raw]  # type: ignore[arg-type]
+            keyed = [(tuple(int(i) for i in t[:arity]), as_logic_value(t[arity])) for t in raw]  # type: ignore[arg-type]
             if data_type == "boolean":
                 # A boolean attribute is an error on the nodes it isn't listed for.
                 listed = {key for key, _ in keyed}
@@ -316,7 +321,15 @@ class PartialModel:
         return cls(nodes, relations, attributes)
 
 
-def _lookup[T: (Relation, Attribute)](table: dict[str, T], name: str) -> T | None:
+class Named(Protocol):
+    @property
+    def name(self) -> str: ...
+    @property
+    def simple_name(self) -> str: ...
+
+
+def lookup[T: Named](table: Mapping[str, T], name: str) -> T | None:
+    """An item by name, or by simple name if only one has it."""
     found = table.get(name)
     if found is not None:
         return found
@@ -327,7 +340,19 @@ def _lookup[T: (Relation, Attribute)](table: dict[str, T], name: str) -> T | Non
     return matches[0] if matches else None
 
 
-def _attribute_value(value: object, data_type: str) -> object:
+def atom_index(nodes: Sequence[Node], name: str) -> NodeIndex | None:
+    """The index of the atom (or enum literal) ``name``, by name or unique simple name."""
+    found = [i for i, node in enumerate(nodes) if node.kind == "atom" and node.name == name]
+    if not found:
+        found = [
+            i for i, node in enumerate(nodes) if node.kind == "atom" and node.simple_name == name
+        ]
+    if len(found) > 1:
+        raise ValueError(f"atom {name!r} is ambiguous")
+    return found[0] if found else None
+
+
+def as_attribute_value(value: object, data_type: str) -> object:
     match value:
         case UnknownValue():
             return value.unknown
@@ -343,7 +368,7 @@ def _attribute_value(value: object, data_type: str) -> object:
             return value
 
 
-def _logic_value(value: object) -> LogicValue:
+def as_logic_value(value: object) -> LogicValue:
     if value not in ("true", "false", "unknown", "error"):
         raise ValueError(f"not a logic value: {value!r}")
-    return value  # type: ignore[return-value]
+    return value

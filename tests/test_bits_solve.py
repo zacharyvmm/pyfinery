@@ -8,12 +8,16 @@ from __future__ import annotations
 
 import itertools
 import random
+import tracemalloc
 
 import numpy as np
 import pytest
 
-from pyfinery.bits._solve import Factor, Node, Var, bind, make_factor, solve
-from pyfinery.bits._values import from_tuples, to_tuples
+from pyfinery.bits import Node as ModelNode
+from pyfinery.bits import PartialModel, Relation, evaluate
+from pyfinery.bits.evaluation import solve as solve_module
+from pyfinery.bits.evaluation.solve import Factor, Node, Var, bind, make_factor, solve
+from pyfinery.bits.matrices.values import from_tuples, to_tuples
 
 
 def _brute_force(factors, head, variables, n):
@@ -57,6 +61,17 @@ def _draw(rng: random.Random, n: int):
 
 @pytest.mark.parametrize("seed", range(300))
 def test_solve_matches_enumeration(seed):
+    _check_against_enumeration(seed)
+
+
+@pytest.mark.parametrize("seed", range(50))
+def test_bulk_joins_in_chunks_match_enumeration(seed, monkeypatch):
+    monkeypatch.setattr(solve_module, "CHUNK_WORDS", 3)  # a few rows at a time
+    monkeypatch.setattr(solve_module, "BLOCK_ROWS", 3)
+    _check_against_enumeration(seed)
+
+
+def _check_against_enumeration(seed):
     rng = random.Random(seed)
     n = rng.randint(1, 5)
     variables, specs, head = _draw(rng, n)
@@ -84,3 +99,134 @@ def test_bind_selects_nodes_and_repeated_variables():
     assert {tuple(t) for t in to_tuples(factor.value).tolist()} == {(0, 1), (2, 3)}
     negated = bind(from_tuples(1, n, np.array([[2]])), [Node(2)], negated=True)
     assert negated == Factor((), negated.value) and negated.value.data is False
+
+
+@pytest.mark.parametrize(
+    ("rule", "expected"),
+    [
+        ("pred p() <-> r(a,b), r(a,c), r(a,d), r(b,c), r(b,d), r(c,d).", [()]),
+        (
+            "pred p(a) <-> r(a,b), r(a,c), r(a,d), r(b,c), r(b,d), r(c,d).",
+            [(i,) for i in range(60)],
+        ),
+    ],
+)
+def test_existentials_read_by_several_factors_stay_small(rule, expected):
+    # A 4-clique over a complete graph of 60 nodes: 12,960,000 assignments of a, b, c, d,
+    # which no step may hold at once.
+    n = 60
+    edges = Relation.of("r", 2, [((i, j), "true") for i in range(n) for j in range(n)])
+    model = PartialModel([ModelNode(f"n{i}", f"n{i}") for i in range(n)], [edges])
+    tracemalloc.start()
+    try:
+        result = evaluate(rule, model)["p"]
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert [key for key, _ in result.items()] == expected
+    assert peak < 32 * 2**20, f"peak {peak / 2**20:.0f} MiB"
+
+
+CLIQUE = "r(a,b), r(a,c), r(a,d), r(b,c), r(b,d), r(c,d)."
+
+
+def _clique_model(n):
+    edges = Relation.of("r", 2, [((i, j), "true") for i in range(n) for j in range(n)])
+    return PartialModel([ModelNode(f"n{i}", f"n{i}") for i in range(n)], [edges])
+
+
+def test_a_head_variable_is_split_on_before_existentials(monkeypatch):
+    # With d outside the head, splitting on d would solve the whole (a, b, c) head
+    # once per value of d; splitting on a head variable lets products eliminate d.
+    split = []
+    original = solve_module.split_on
+
+    def recording(factors, head, variable, n):
+        split.append(variable in head)
+        return original(factors, head, variable, n)
+
+    monkeypatch.setattr(solve_module, "split_on", recording)
+    result = evaluate("pred p(a, b, c) <-> " + CLIQUE, _clique_model(8))["p"]
+    assert len(result.tuples()["true"]) == 8**3
+    assert split and all(split)
+
+
+def test_bulk_rows_are_answers_and_not_sorted_again_per_block(monkeypatch):
+    monkeypatch.setattr(solve_module, "BLOCK_ROWS", 100)
+    sorts = 0
+    original = np.unique
+
+    def counting(*args, **kwargs):
+        nonlocal sorts
+        sorts += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(np, "unique", counting)
+    result = evaluate("pred p(a, b, c, d) <-> " + CLIQUE, _clique_model(10))["p"]
+    assert len(result.tuples()["true"]) == 10**4  # 100 blocks of rows
+    assert sorts < 10
+
+
+def _count_sorts(monkeypatch):
+    """Count the sorts numpy does: np.unique, and np.argsort (which lookups use)."""
+    calls = {"sorts": 0}
+    for name in ("unique", "argsort"):
+        original = getattr(np, name)
+
+        def counting(*args, _original=original, **kwargs):
+            calls["sorts"] += 1
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(np, name, counting)
+    return calls
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        "pred p(a, b, c) <-> r(a, b), r(b, c), !t(a, b, c).",  # checked against t, per block
+        # The first join of t starts from one row; the second is in blocks; the third
+        # joins t per block.
+        "pred p(a, b, c, d, e) <-> t(a, b, c), t(b, c, d), t(c, d, e).",
+    ],
+)
+def test_wide_factors_are_sorted_once_for_every_block(rule, monkeypatch):
+    n = 10
+    grid = np.array(np.meshgrid(*[np.arange(n)] * 3, indexing="ij")).reshape(3, -1).T
+    t = grid[grid.sum(axis=1) % 4 == 0]
+    edges = Relation.of("r", 2, [((i, j), "true") for i in range(n) for j in range(n)])
+    triples = Relation("t", 3, t, t, "t")
+    model = PartialModel([ModelNode(f"n{i}", f"n{i}") for i in range(n)], [edges, triples])
+    calls = _count_sorts(monkeypatch)
+    expected = evaluate(rule, model)["p"].tuples()["true"]  # in one block
+    in_one_block, calls["sorts"] = calls["sorts"], 0
+    monkeypatch.setattr(solve_module, "BLOCK_ROWS", 10)
+    found = evaluate(rule, model)["p"].tuples()["true"]
+    assert len(found) > 100  # many blocks of rows
+    assert sorted(map(tuple, found.tolist())) == sorted(map(tuple, expected.tolist()))
+    assert calls["sorts"] <= in_one_block  # no sort per block
+
+
+@pytest.mark.parametrize(
+    "layout",
+    ["contiguous", "strided", "reversed", "fortran", "one column", "empty"],
+)
+def test_row_keys_are_equal_exactly_where_rows_are(layout):
+    rng = np.random.default_rng(3)
+    base = rng.integers(0, 4, (200, 6)).astype(np.intp)
+    rows = {
+        "contiguous": base[:, :3].copy(),
+        "strided": base[:, ::2],
+        "reversed": base[::-1, 2:5],
+        "fortran": np.asfortranarray(base[:, 1:4]),
+        "one column": base[:, 2:3],
+        "empty": base[:0, :3],
+    }[layout]
+    other = np.ascontiguousarray(rows[::-1])  # the same rows, laid out differently
+    keys, other_keys = solve_module.row_keys(rows), solve_module.row_keys(other)
+    for i in range(len(rows)):
+        for j in range(len(rows)):
+            assert (keys[i] == other_keys[j]) == bool(np.array_equal(rows[i], other[j]))
+    found = solve_module.Lookup.of(other, list(range(rows.shape[1])))
+    low, matches = found.matching(rows)
+    assert all(matches > 0) and len(low) == len(rows)

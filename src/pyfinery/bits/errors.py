@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ._syntax import Position
+    from .rules.syntax import Position
 
 
 class RuleError(ValueError):
