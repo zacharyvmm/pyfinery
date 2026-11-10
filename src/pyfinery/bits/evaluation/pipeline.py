@@ -55,7 +55,7 @@ from ..matrices.values import (
     union,
 )
 from ..rules.compiled import Rules
-from ..rules.syntax import Modality, Position, PredicateKind
+from ..rules.syntax import Modality, Position, Predicate, PredicateKind
 from .clauses import CallLiteral, Clause, CompareLiteral, Operand, Target, named_attribute, resolve
 from .compare import Side, compare
 from .plan import EXISTS_TARGET, Closure, Derivation, Undetermined, plan
@@ -78,9 +78,7 @@ def evaluate(
     compiled = rules if isinstance(rules, Rules) else Rules.compile(rules)
     packed = model if isinstance(model, PackedModel) else PackedModel.build(model)
     predicates = compiled.select(select)
-    targets = [
-        resolve(p.name, p.position, packed, compiled.defined, compiled.declared) for p in predicates
-    ]
+    targets = selected_targets(predicates, packed, compiled)
     steps = plan(targets, packed, compiled.defined, compiled.declared)
     relations = base_relations(packed)
     for step in steps:
@@ -100,6 +98,23 @@ def evaluate(
         )
         results[predicate.name] = values
     return results
+
+
+def selected_targets(predicates: list[Predicate], model: PackedModel, rules: Rules) -> list[Target]:
+    """What each selected predicate is: its own, or (without a body) the relation of the
+    model it names, which must relate as many nodes as the predicate has parameters."""
+    targets = []
+    for predicate in predicates:
+        target = resolve(predicate.name, predicate.position, model, rules.defined, rules.declared)
+        arity = len(predicate.parameters)
+        if target.kind == "base" and model.relations[target.name].arity != arity:
+            raise RuleError(
+                f"{predicate.name} has {arity} parameters, but {target.name} in the model "
+                f"relates {model.relations[target.name].arity} nodes",
+                predicate.position,
+            )
+        targets.append(target)
+    return targets
 
 
 @dataclass(frozen=True)

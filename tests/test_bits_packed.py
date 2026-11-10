@@ -211,3 +211,14 @@ def test_a_built_models_matrices_are_numpy_arrays():
     assert k.unpack(reach.may, 3).tolist() == [[0, 1, 1], [0, 0, 1], [0, 0, 0]]
     with pytest.raises(KeyError):
         packed["missing"]
+
+
+def test_connect_sets_nullary_facts_and_checks_its_tuples():
+    flag = PackedModel.build(PartialModel([Node("a", "a")], [Relation.of("r", 0, [])]))
+    assert flag.connect("r", [()])["r"].must is True
+    assert flag.connect("r", [])["r"].must is False
+    two = PackedModel.build(graph(1, 2))
+    with pytest.raises(ValueError, match="relates 2 nodes, not 4"):
+        two.connect("Person::friend", [(0, 1, 1, 0)])
+    with pytest.raises(ValueError, match="beyond the model"):
+        two.connect("Person::friend", [(0, 7)])

@@ -337,3 +337,12 @@ def test_predicates_with_bodies_are_only_read(source, refused):
     else:
         with pytest.raises(UnsupportedRuleError, match=refused):
             evaluate(source, model())
+
+
+def test_a_selected_predicate_without_a_body_has_the_models_arity():
+    # Person relates one node in the model; a declaration of none can't select it.
+    with pytest.raises(
+        RuleError, match="Person has 0 parameters, but Person in the model relates 1"
+    ):
+        evaluate("pred Person().", model(), select=["Person"])
+    assert len(list(evaluate("pred Person(x).", model(), select=["Person"])["Person"].items())) == 3

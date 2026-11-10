@@ -127,7 +127,13 @@ class PackedModel:
         if found is None:
             raise ValueError(f"no relation named {relation!r}")
         n, arity = self.size, found.arity
-        facts = from_tuples(arity, n, np.array(list(tuples), np.intp).reshape(-1, arity))
+        keys = [tuple(key) for key in tuples]
+        for key in keys:
+            if len(key) != arity:
+                raise ValueError(f"{found.name} relates {arity} nodes, not {len(key)}: {key}")
+            if any(not 0 <= int(i) < n for i in key):
+                raise ValueError(f"{key} names a node beyond the model's {n}")
+        facts = from_tuples(arity, n, np.array(keys, np.intp).reshape(len(keys), arity))
 
         def set_facts(current: Bits, holds: bool) -> Bits:
             kept = difference(Value(arity, n, current), facts)

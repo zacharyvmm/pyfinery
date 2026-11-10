@@ -13,14 +13,16 @@ one at a time, fewest neighbours first: those of a variable with neighbours
 ``a`` and ``b`` combine into one matrix product over ``(a, b)``; with one
 neighbour, into "has a pair in this row". That needs no relation over three
 variables. When one would be needed, or a factor has three or more
-variables, or the head does, the solver joins in bulk (:func:`join`): it
-builds the rows of values of every variable at once, one variable (or wide
-factor) at a time, and keeps those every factor allows.
+variables, or the head does, :func:`join` takes over. A variable outside the
+head that several factors read is split on: the rest is solved for each of its
+values. Otherwise the solver joins in bulk: it builds the rows of values of
+every variable at once, one variable (or wide factor) at a time, a bounded
+block at a time, and keeps those every factor allows.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -39,6 +41,7 @@ from ..matrices.values import (
     is_empty,
     to_tuples,
     transpose,
+    union,
 )
 
 type VarId = int
@@ -238,8 +241,11 @@ def domain_of(factors: list[Factor], variable: VarId, n: int) -> Vector:
 
 # -- joining in bulk ----------------------------------------------------------------
 
-CHUNK_WORDS = 1 << 22
-"""How many words of candidates :func:`extend` holds at once: 32 MiB."""
+BLOCK_ROWS = 1 << 16
+"""How many rows :func:`join` builds at a time, at each step: it joins depth first."""
+
+CHUNK_WORDS = 1 << 20
+"""How many words of candidates :func:`extend` holds at a time: 8 MiB."""
 
 
 @dataclass(frozen=True)
@@ -260,21 +266,119 @@ def join(factors: list[Factor], head: tuple[VarId, ...], n: int) -> Value:
     rows the factors over bound variables allow; then project onto the head.
 
     Variables outside the head that matrix products can eliminate are eliminated
-    first, so that the rows don't grow with them.
+    first. If one that several factors read remains, rows would keep each of its
+    values until all those factors are applied: the solver splits on its values
+    instead (:func:`split_on`), and solves the rest for each, which matrix products
+    usually can. Otherwise the rows are built depth first, a block of at most
+    :data:`BLOCK_ROWS` at a time (:func:`complete`), so memory stays bounded; those
+    variables are dropped once their factor is applied; and a head of no variables
+    holds as soon as one row is complete.
     """
     remaining = eliminate_existentials(factors, head, n)
     if remaining is None:
         return empty(len(head), n)
+    shared = shared_existentials(remaining, head)
+    if shared:
+        variable = min(shared, key=lambda v: (k.count(domain_of(remaining, v, n)), v))
+        return split_on(remaining, head, variable, n)
     variables = sorted({v for f in remaining for v in f.variables} | set(head))
-    rows = Rows((), np.empty((1, 0), np.intp))  # one row, of no variables
-    pending = remaining
-    while len(rows.variables) < len(variables) and len(rows.tuples):
-        rows, used = grow(rows, pending, variables, n)
-        pending = [f for i, f in enumerate(pending) if i not in used]
-        rows, pending = keep(rows, pending)
-    if not len(rows.tuples):
-        return empty(len(head), n)
-    return from_tuples(len(head), n, rows.tuples[:, [rows.variables.index(v) for v in head]])
+    start = Rows((), np.empty((1, 0), np.intp))  # one row, of no variables
+    found: list[Tuples] = []
+    size = 0
+    for block in complete(start, remaining, variables, head, n):
+        if not head:
+            return Value(0, n, True)
+        found.append(block.tuples[:, [block.variables.index(v) for v in head]])
+        size += len(found[-1])
+        if size > BLOCK_ROWS:  # drop the head tuples found twice
+            found = [np.unique(np.concatenate(found), axis=0)]
+            size = len(found[0])
+    tuples = np.concatenate(found) if found else np.empty((0, len(head)), np.intp)
+    return from_tuples(len(head), n, tuples)
+
+
+def shared_existentials(factors: list[Factor], head: tuple[VarId, ...]) -> list[VarId]:
+    """The variables outside the head that several factors read."""
+    readers: dict[VarId, int] = {}
+    for factor in factors:
+        for variable in factor.variables:
+            readers[variable] = readers.get(variable, 0) + 1
+    return sorted(v for v, count in readers.items() if count > 1 and v not in head)
+
+
+def split_on(factors: list[Factor], head: tuple[VarId, ...], variable: VarId, n: int) -> Value:
+    """The union, over each value ``variable`` (not in the head) can take, of the rest
+    solved with ``variable`` set to it."""
+    result = empty(len(head), n)
+    for node in k.indices(domain_of(factors, variable, n), n):
+        result = union(result, solve([select(f, variable, int(node)) for f in factors], head, n))
+        if not head and result.truth:
+            break
+    return result
+
+
+def select(factor: Factor, variable: VarId, node: NodeIndex) -> Factor:
+    """The factor with ``variable`` set to ``node``."""
+    if variable not in factor.variables:
+        return factor
+    place = factor.variables.index(variable)
+    variables = factor.variables[:place] + factor.variables[place + 1 :]
+    value, n = factor.value, factor.value.n
+    match value.arity:
+        case 1:
+            return Factor((), Value(0, n, k.contains(value.vector, node)))
+        case 2:
+            matrix = value.matrix
+            vector = k.row(matrix, node) if place == 0 else k.column(matrix, node, n)
+            return Factor(variables, Value(1, n, vector))
+        case _:
+            tuples = value.array[value.array[:, place] == node]
+            rest = np.delete(tuples, place, axis=1)
+            return make_factor(variables, from_tuples(len(variables), n, rest), factor.negated)
+
+
+def complete(
+    rows: Rows, pending: list[Factor], unbound: list[VarId], head: tuple[VarId, ...], n: int
+) -> Iterator[Rows]:
+    """Blocks of complete rows from ``rows``: bind one more variable or wide factor
+    (:func:`grow`), and complete each block of the result before the next."""
+    if not unbound:
+        yield rows
+        return
+    blocks, used = grow(rows, pending, unbound, n)
+    left = [f for i, f in enumerate(pending) if i not in used]
+    for block in blocks:
+        block, rest = keep(block, left)
+        if not len(block.tuples):
+            continue
+        still_unbound = [v for v in unbound if v not in block.variables]
+        yield from complete(forget(block, rest, head), rest, still_unbound, head, n)
+
+
+def forget(rows: Rows, pending: list[Factor], head: tuple[VarId, ...]) -> Rows:
+    """The rows without the variables outside the head that no pending factor reads,
+    and without the rows that then repeat."""
+    needed = set(head) | {v for f in pending for v in f.variables}
+    kept = [i for i, v in enumerate(rows.variables) if v in needed]
+    if len(kept) == len(rows.variables):
+        return rows
+    if not kept:
+        return Rows((), np.empty((1, 0), np.intp))  # some row was complete: that's all
+    tuples = np.unique(rows.tuples[:, kept], axis=0)
+    return Rows(tuple(rows.variables[i] for i in kept), tuples)
+
+
+def blocks_of(counts: Indices, limit: int) -> Iterator[tuple[int, int]]:
+    """Consecutive ranges of rows whose ``counts`` add up to at most ``limit``, but for a
+    single row over it; ranges that add up to nothing are skipped."""
+    total = np.cumsum(counts)
+    first = 0
+    while first < len(counts):
+        before = int(total[first - 1]) if first else 0
+        last = max(int(np.searchsorted(total, before + limit, "right")), first + 1)
+        if int(total[last - 1]) > before:
+            yield first, last
+        first = last
 
 
 def eliminate_existentials(
@@ -296,16 +400,15 @@ def eliminate_existentials(
 
 
 def grow(
-    rows: Rows, pending: list[Factor], variables: list[VarId], n: int
-) -> tuple[Rows, set[int]]:
-    """The rows with more variables bound, and which pending factors that used up.
+    rows: Rows, pending: list[Factor], unbound: list[VarId], n: int
+) -> tuple[Iterator[Rows], set[int]]:
+    """The rows with more variables bound, in blocks, and which pending factors that used up.
 
     In order of preference: join a wide factor on a variable already bound; bind
     the variable that the most binary factors link to bound ones, from the rows of
     those factors; join a wide factor; bind the variable with the fewest values.
     """
     bound = set(rows.variables)
-    unbound = [v for v in variables if v not in bound]
     wide = [i for i, f in enumerate(pending) if f.value.arity > 2 and not f.negated]
     linked_wide = [i for i in wide if bound & set(pending[i].variables)]
     if linked_wide:
@@ -332,9 +435,12 @@ def grow(
     return extend(rows, variable, [], domain, n), set(unary[variable])
 
 
-def extend(rows: Rows, variable: VarId, factors: list[Factor], domain: Vector, n: int) -> Rows:
+def extend(
+    rows: Rows, variable: VarId, factors: list[Factor], domain: Vector, n: int
+) -> Iterator[Rows]:
     """Each row, with each value of ``variable`` in ``domain`` that ``factors`` (unary on
-    it, or binary from a bound variable to it) allow with that row."""
+    it, or binary from a bound variable to it) allow with that row: in blocks of at most
+    :data:`BLOCK_ROWS` rows (but for a single row with more values)."""
     links: list[tuple[Indices, Matrix]] = []  # a bound variable's values, rows of what it allows
     for factor in factors:
         if factor.value.arity == 1:
@@ -345,31 +451,32 @@ def extend(rows: Rows, variable: VarId, factors: list[Factor], domain: Vector, n
             matrix = k.transpose(matrix, n)
         (other,) = set(factor.variables) - {variable}
         links.append((rows.column(other), matrix))
+    variables = (*rows.variables, variable)
     words = max(k.words(n), 1)
-    chunk = max(1, CHUNK_WORDS // words)
-    found_rows, found_values = [], []
+    chunk = max(1, min(BLOCK_ROWS, CHUNK_WORDS // words))
     for start in range(0, len(rows.tuples), chunk):
         stop = min(start + chunk, len(rows.tuples))
         candidates = np.tile(domain, (stop - start, 1))
         for values, matrix in links:
             candidates &= matrix[values[start:stop]]
-        at, value = k.pairs(candidates, n)
-        found_rows.append(at + start)
-        found_values.append(value)
-    at = np.concatenate(found_rows) if found_rows else np.empty(0, np.intp)
-    value = np.concatenate(found_values) if found_values else np.empty(0, np.intp)
-    return Rows((*rows.variables, variable), np.column_stack([rows.tuples[at], value]))
+        counts = np.bitwise_count(candidates).sum(axis=1)  # values per row
+        for first, last in blocks_of(counts, BLOCK_ROWS):
+            at, value = k.pairs(candidates[first:last], n)
+            yield Rows(variables, np.column_stack([rows.tuples[start + first + at], value]))
 
 
-def join_tuples(rows: Rows, factor: Factor) -> Rows:
-    """Each row, with each tuple of a wide ``factor`` that agrees with it."""
+def join_tuples(rows: Rows, factor: Factor) -> Iterator[Rows]:
+    """Each row, with each tuple of a wide ``factor`` that agrees with it: in blocks of at
+    most :data:`BLOCK_ROWS` rows (but for a single row with more tuples)."""
     tuples = factor.value.array
     shared = [v for v in factor.variables if v in rows.variables]
     added = [factor.variables.index(v) for v in factor.variables if v not in rows.variables]
     count = len(rows.tuples)
+    # The tuples agreeing with row i: order[low[i] : low[i] + matches[i]].
     if not shared:
-        at = np.repeat(np.arange(count), len(tuples))
-        theirs = np.tile(np.arange(len(tuples)), count)
+        order = np.arange(len(tuples))
+        low = np.zeros(count, np.intp)
+        matches = np.full(count, len(tuples), np.intp)
     else:
         mine, keys = codes(
             rows.tuples[:, [rows.variables.index(v) for v in shared]],
@@ -378,11 +485,13 @@ def join_tuples(rows: Rows, factor: Factor) -> Rows:
         order = np.argsort(keys, kind="stable")
         low = np.searchsorted(keys[order], mine, "left")
         matches = np.searchsorted(keys[order], mine, "right") - low
-        at = np.repeat(np.arange(count), matches)
-        within = np.arange(matches.sum()) - np.repeat(np.cumsum(matches) - matches, matches)
-        theirs = order[np.repeat(low, matches) + within]
     variables = (*rows.variables, *(factor.variables[i] for i in added))
-    return Rows(variables, np.column_stack([rows.tuples[at], tuples[theirs][:, added]]))
+    for first, last in blocks_of(matches, BLOCK_ROWS):
+        some = matches[first:last]
+        at = np.repeat(np.arange(first, last), some)
+        within = np.arange(some.sum()) - np.repeat(np.cumsum(some) - some, some)
+        theirs = order[np.repeat(low[first:last], some) + within]
+        yield Rows(variables, np.column_stack([rows.tuples[at], tuples[theirs][:, added]]))
 
 
 def keep(rows: Rows, pending: list[Factor]) -> tuple[Rows, list[Factor]]:

@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import itertools
 import random
+import tracemalloc
 
 import numpy as np
 import pytest
 
+from pyfinery.bits import Node as ModelNode
+from pyfinery.bits import PartialModel, Relation, evaluate
 from pyfinery.bits.evaluation import solve as solve_module
 from pyfinery.bits.evaluation.solve import Factor, Node, Var, bind, make_factor, solve
 from pyfinery.bits.matrices.values import from_tuples, to_tuples
@@ -64,6 +67,7 @@ def test_solve_matches_enumeration(seed):
 @pytest.mark.parametrize("seed", range(50))
 def test_bulk_joins_in_chunks_match_enumeration(seed, monkeypatch):
     monkeypatch.setattr(solve_module, "CHUNK_WORDS", 3)  # a few rows at a time
+    monkeypatch.setattr(solve_module, "BLOCK_ROWS", 3)
     _check_against_enumeration(seed)
 
 
@@ -95,3 +99,29 @@ def test_bind_selects_nodes_and_repeated_variables():
     assert {tuple(t) for t in to_tuples(factor.value).tolist()} == {(0, 1), (2, 3)}
     negated = bind(from_tuples(1, n, np.array([[2]])), [Node(2)], negated=True)
     assert negated == Factor((), negated.value) and negated.value.data is False
+
+
+@pytest.mark.parametrize(
+    ("rule", "expected"),
+    [
+        ("pred p() <-> r(a,b), r(a,c), r(a,d), r(b,c), r(b,d), r(c,d).", [()]),
+        (
+            "pred p(a) <-> r(a,b), r(a,c), r(a,d), r(b,c), r(b,d), r(c,d).",
+            [(i,) for i in range(60)],
+        ),
+    ],
+)
+def test_existentials_read_by_several_factors_stay_small(rule, expected):
+    # A 4-clique over a complete graph of 60 nodes: 12,960,000 assignments of a, b, c, d,
+    # which no step may hold at once.
+    n = 60
+    edges = Relation.of("r", 2, [((i, j), "true") for i in range(n) for j in range(n)])
+    model = PartialModel([ModelNode(f"n{i}", f"n{i}") for i in range(n)], [edges])
+    tracemalloc.start()
+    try:
+        result = evaluate(rule, model)["p"]
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert [key for key, _ in result.items()] == expected
+    assert peak < 32 * 2**20, f"peak {peak / 2**20:.0f} MiB"
