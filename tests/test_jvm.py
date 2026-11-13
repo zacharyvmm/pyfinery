@@ -36,7 +36,7 @@ def fake_jdk(
 
 @pytest.mark.parametrize(
     ("value", "major"),
-    [("25.0.3", 25), ("26", 26), ("21.0.2+13", 21), ("1.8.0_402", 8), ("25-ea", 25)],
+    [("25.0.3", 25), ("26", 26), ("21.0.2+13", 21), ("25-ea", 25)],
 )
 def test_reads_major_version(tmp_path, value, major):
     (tmp_path / "release").write_text(f'JAVA_VERSION="{value}"\n')
@@ -91,8 +91,7 @@ def test_an_explicit_choice_is_not_skipped(tmp_path, monkeypatch):
 def test_no_jdk(monkeypatch):
     monkeypatch.delenv("PYFINERY_JAVA_HOME", raising=False)
     monkeypatch.delenv("JAVA_HOME", raising=False)
-    monkeypatch.setattr(_java, "_macos_java_home", lambda: None)
-    with pytest.raises(JvmError, match="No JDK found"):
+    with pytest.raises(JvmError, match="Neither PYFINERY_JAVA_HOME nor JAVA_HOME is set"):
         _java.find_jdk()
 
 

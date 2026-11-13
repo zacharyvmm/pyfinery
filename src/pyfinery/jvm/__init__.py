@@ -116,7 +116,7 @@ def configure(
     :param generation: also load what model generation needs (OR-tools, about 57 MB
         more to fetch once). A JVM started without it cannot generate.
     :param java_home: the JDK to run on; by default ``$PYFINERY_JAVA_HOME``, else
-        ``$JAVA_HOME``, else (on macOS) the one ``/usr/libexec/java_home`` finds.
+        ``$JAVA_HOME``.
     :param cache_dir: where jars, compiled helpers and native libraries are kept; by
         default ``$PYFINERY_CACHE_DIR``, else the platform's user cache directory.
     :param jvm_options: extra options for the JVM, e.g. ``["-Xmx4g"]``.

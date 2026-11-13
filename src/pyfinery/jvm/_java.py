@@ -8,7 +8,6 @@ helpers in ``java/`` are compiled on first use with its ``javac``, so a JDK
 from __future__ import annotations
 
 import os
-import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,25 +33,18 @@ class Jdk:
 
 
 def find_jdk(explicit: str | os.PathLike[str] | None = None) -> Jdk:
-    """The JDK to use: ``explicit``, else ``$PYFINERY_JAVA_HOME``, else ``$JAVA_HOME``, else on
-    macOS the one ``/usr/libexec/java_home`` finds. Raises :class:`JvmError` saying what is wrong
-    and how to fix it.
+    """The JDK to use: ``explicit``, else ``$PYFINERY_JAVA_HOME``, else ``$JAVA_HOME``. Nothing is
+    searched for: raises :class:`JvmError` if none is set, or if it isn't a JDK 25 or later.
     """
-    candidates: list[tuple[str, str]] = []
     if explicit is not None:
-        candidates.append(("configure(java_home=...)", os.fspath(explicit)))
+        return inspect_jdk(Path(explicit), "configure(java_home=...)")
     for variable in ("PYFINERY_JAVA_HOME", "JAVA_HOME"):
         if os.environ.get(variable):
-            candidates.append((f"${variable}", os.environ[variable]))
-    if not candidates and sys.platform == "darwin":
-        found = _macos_java_home()
-        if found:
-            candidates.append(("/usr/libexec/java_home", found))
-    if not candidates:
-        raise JvmError("No JDK found. " + _HOW_TO.format(minimum=MINIMUM_VERSION))
-    # The first one given decides: falling back past an explicit choice would hide a mistake.
-    source, home = candidates[0]
-    return inspect_jdk(Path(home), source)
+            return inspect_jdk(Path(os.environ[variable]), f"${variable}")
+    raise JvmError(
+        "Neither PYFINERY_JAVA_HOME nor JAVA_HOME is set. "
+        + _HOW_TO.format(minimum=MINIMUM_VERSION)
+    )
 
 
 def inspect_jdk(home: Path, source: str = "the JDK") -> Jdk:
@@ -98,34 +90,16 @@ def read_version(home: Path) -> int | None:
     for line in release.read_text(encoding="utf-8", errors="replace").splitlines():
         if line.startswith("JAVA_VERSION="):
             value = line.partition("=")[2].strip().strip('"')
-            head = value.split(".")[0]
-            # Java 8 and older call themselves 1.8 and so on.
-            if head == "1" and "." in value:
-                head = value.split(".")[1]
             try:
-                return int(head.split("-")[0].split("+")[0])
+                return int(value.split(".")[0].split("-")[0].split("+")[0])
             except ValueError:
                 return None
     return None
 
 
 def _libjvm(home: Path) -> Path | None:
-    for pattern in ("lib/server/libjvm.*", "bin/server/jvm.dll", "jre/lib/server/libjvm.*"):
+    for pattern in ("lib/server/libjvm.*", "bin/server/jvm.dll"):
         for path in sorted(home.glob(pattern)):
             if path.suffix in (".dylib", ".so", ".dll"):
                 return path
     return None
-
-
-def _macos_java_home() -> str | None:
-    try:
-        found = subprocess.run(
-            ["/usr/libexec/java_home", "-v", f"{MINIMUM_VERSION}+"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return found.stdout.strip() or None if found.returncode == 0 else None
