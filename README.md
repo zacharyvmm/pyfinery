@@ -363,7 +363,7 @@ PYFINERY_DOCKER_TESTS=1 uv run pytest      # plus end-to-end tests against a rea
 PYFINERY_JVM_TESTS=1 uv run pytest         # plus tests that start Refinery's JVM (needs a JDK 25 in PYFINERY_JAVA_HOME or JAVA_HOME)
 ```
 
-`pyfinery.jvm` (the `jvm` extra) runs Refinery in the Python process through JPype. It fetches Refinery's jars from Maven Central on first use, as pinned in `src/pyfinery/jvm/jars.json`; after upgrading Refinery, write that file again with `gradle -q -p tools/jars manifest` (needs a JDK 25). Its two Java helpers, in `src/pyfinery/jvm/java/`, are compiled with the JDK's `javac` on first use.
+`pyfinery.jvm` (the `jvm` extra) runs Refinery in the Python process through JPype. It fetches Refinery's jars from Maven Central on first use, as pinned in `src/pyfinery/jvm/_runtime/jars.json`; after upgrading Refinery, write that file again with `gradle -q -p tools/jars manifest` (needs a JDK 25). Its two Java helpers, in `src/pyfinery/jvm/_runtime/java/`, are compiled with the JDK's `javac` on first use.
 
 `tests/conformance` holds Refinery `.problem` files with expectations, and Refinery's recorded answers to them; its [README](tests/conformance/README.md) says how to add cases and record them again.
 

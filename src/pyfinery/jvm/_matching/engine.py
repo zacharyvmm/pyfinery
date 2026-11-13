@@ -19,21 +19,22 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from .._instances import Graph
-from .._options import Predicate
-from .._render import predicate_facts
-from .._results import QueryResult, ValidationReport, reference_errors
-from .._schema import Schema
-from .._syntax import quote_id
-from ._cache import compiled
-from ._compile import CompiledProblem
-from ._model import PlainModel
-from .errors import UnsupportedRuleError
+from ..._engines import Engine
+from ..._instances import Graph
+from ..._options import Predicate
+from ..._render import predicate_facts
+from ..._results import QueryResult, ValidationReport, reference_errors
+from ..._schema import Schema
+from ..._syntax import quote_id
+from ..errors import UnsupportedRuleError
+from .cache import compiled
+from .compile import CompiledProblem
+from .model import PlainModel
 
 __all__ = ["JvmEngine"]
 
 
-class JvmEngine:
+class JvmEngine(Engine):
     """Validates and queries with Refinery's matcher in this process (see the module).
 
     :meth:`query_graph` matches complete graphs only: an object that may not

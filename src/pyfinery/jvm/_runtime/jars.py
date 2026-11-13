@@ -22,7 +22,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Literal
 
-from .errors import JvmError
+from ..errors import JvmError
 
 logger = logging.getLogger("pyfinery.jvm")
 

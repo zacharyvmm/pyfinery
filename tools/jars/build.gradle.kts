@@ -1,4 +1,4 @@
-// Writes src/pyfinery/jvm/jars.json: the jars pyfinery.jvm fetches from Maven Central on first use,
+// Writes src/pyfinery/jvm/_runtime/jars.json: the jars pyfinery.jvm fetches from Maven Central on first use,
 // per feature, each with its URL, size and SHA-256, and the platform of the jars of native libraries.
 // Run it when Refinery is upgraded:  gradle -q -p tools/jars manifest  (needs a JDK 25)
 import java.security.MessageDigest
@@ -51,7 +51,7 @@ fun quoted(text: String?) = if (text == null) "null" else "\"$text\""
 
 tasks.register("manifest") {
     val features = listOf(validation, generation)
-    val target = rootDir.resolve("../../src/pyfinery/jvm/jars.json")
+    val target = rootDir.resolve("../../src/pyfinery/jvm/_runtime/jars.json")
     doLast {
         val out = StringBuilder("{\n  \"refinery\": \"$refinery\",\n  \"java\": 25,\n  \"features\": {\n")
         features.forEachIndexed { i, conf ->

@@ -98,7 +98,7 @@ from ._syntax import (
 )
 
 if TYPE_CHECKING:
-    from .bits import BitsEngine
+    from ._engines import AsyncEngine, AsyncQueryEngine, Engine, QueryEngine
     from .client import AsyncRefinery, Refinery
 
 __all__ = [
@@ -234,7 +234,7 @@ class Metamodel:
     def validate(
         self,
         objects: Iterable[BaseModel],
-        refinery: Refinery,
+        refinery: Refinery | Engine,
         rules: Iterable[str] = (),
         *,
         predicates: Iterable[Predicate] = (),
@@ -251,6 +251,9 @@ class Metamodel:
         object exists (``ClassOptions(exists=...)`` is ignored). Use
         :meth:`query` to reason about what may hold.
 
+        Pass a :class:`~pyfinery.jvm.JvmEngine` instead of a client to validate
+        in this process, without a server (see :mod:`pyfinery.jvm`).
+
         Only nodes reachable from ``objects`` through outgoing references are
         checked (see :meth:`collect`). Raises
         :class:`~pyfinery.InvalidProblemError` if the rules don't compile;
@@ -265,7 +268,7 @@ class Metamodel:
     async def avalidate(
         self,
         objects: Iterable[BaseModel],
-        refinery: AsyncRefinery,
+        refinery: AsyncRefinery | AsyncEngine | Engine,
         rules: Iterable[str] = (),
         *,
         predicates: Iterable[Predicate] = (),
@@ -282,7 +285,7 @@ class Metamodel:
     def query(
         self,
         objects: Iterable[BaseModel],
-        refinery: Refinery | BitsEngine,
+        refinery: Refinery | QueryEngine,
         rules: Iterable[str] = (),
         *,
         predicates: Iterable[Predicate] = (),
@@ -312,7 +315,7 @@ class Metamodel:
     async def aquery(
         self,
         objects: Iterable[BaseModel],
-        refinery: AsyncRefinery | BitsEngine,
+        refinery: AsyncRefinery | AsyncQueryEngine | QueryEngine,
         rules: Iterable[str] = (),
         *,
         predicates: Iterable[Predicate] = (),

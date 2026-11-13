@@ -6,9 +6,9 @@ import threading
 from collections import OrderedDict
 from collections.abc import Sequence
 
-from .._options import Predicate
-from .._schema import Schema
-from ._compile import CompiledProblem
+from ..._options import Predicate
+from ..._schema import Schema
+from .compile import CompiledProblem
 
 SIZE = 16
 """How many compiled problems are kept."""

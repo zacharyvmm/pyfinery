@@ -2,7 +2,7 @@
 
 :class:`CompiledProblem` parses a metamodel, its rules, the declarations of
 :class:`~pyfinery.Predicate` objects and the metamodel's structural checks
-(:mod:`._structure`) as one Refinery problem, compiles every predicate with
+(:mod:`.structure`) as one Refinery problem, compiles every predicate with
 Refinery's ``QueryCompiler``, and rewrites the result from the partial-model
 symbols it targets onto plain two-valued ones: a store with Refinery's
 incremental (Rete) query interpreter and no reasoning layer, so a model is
@@ -31,14 +31,14 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from .._mapping import Catalogue
-from .._options import Predicate
-from .._render import _declare_predicate, render_metamodel
-from .._results import ViolationKind
-from .._schema import Schema
-from ..errors import InvalidProblemError
-from ._java_classes import java
-from ._structure import CONTAINS, INVALID_CONTAINER, Check, structure
+from ..._mapping import Catalogue
+from ..._options import Predicate
+from ..._render import _declare_predicate, render_metamodel
+from ..._results import ViolationKind
+from ..._schema import Schema
+from ...errors import InvalidProblemError
+from .classes import java
+from .structure import CONTAINS, INVALID_CONTAINER, Check, structure
 
 NODE = "builtin::node"
 """The plain symbol every object of a model is in: ``node`` and ``exists``."""

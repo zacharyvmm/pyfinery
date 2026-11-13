@@ -29,15 +29,15 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
-from .._instances import build_graph
-from .._options import Predicate
-from .._results import ValidationReport, Violation, reference_errors
-from ._cache import compiled
-from ._model import Key, PlainModel
+from ..._instances import build_graph
+from ..._options import Predicate
+from ..._results import ValidationReport, Violation, reference_errors
+from .cache import compiled
 from .engine import require_supported
+from .model import Key, PlainModel
 
 if TYPE_CHECKING:
-    from ..graph import Metamodel
+    from ...graph import Metamodel
 
 __all__ = ["Changes", "Checkpoint", "Session"]
 

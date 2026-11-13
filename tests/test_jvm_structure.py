@@ -9,8 +9,14 @@ from pydantic import Field
 
 from pyfinery import Container, Contains, Metamodel, Ref, RefineryNode
 from pyfinery._mapping import Catalogue
-from pyfinery.jvm import _cache
-from pyfinery.jvm._structure import CONTAINS, INVALID_CONTAINER, MAX_JOINED, Check, structure
+from pyfinery.jvm._matching import cache as _cache
+from pyfinery.jvm._matching.structure import (
+    CONTAINS,
+    INVALID_CONTAINER,
+    MAX_JOINED,
+    Check,
+    structure,
+)
 
 from . import graph_models
 

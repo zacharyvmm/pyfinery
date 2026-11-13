@@ -12,7 +12,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from .errors import JvmError
+from ..errors import JvmError
 
 MINIMUM_VERSION = 25
 

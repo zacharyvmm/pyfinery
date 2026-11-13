@@ -12,9 +12,9 @@ import zipfile
 from importlib import resources
 from pathlib import Path
 
-from ._jars import Jar
-from ._java import Jdk
-from .errors import JvmError
+from ..errors import JvmError
+from .jars import Jar
+from .jdk import Jdk
 
 logger = logging.getLogger("pyfinery.jvm")
 

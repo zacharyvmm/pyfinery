@@ -6,14 +6,14 @@ from __future__ import annotations
 from collections.abc import Hashable, Iterable, Sequence
 from typing import Any
 
-from .._instances import Graph
-from .._mapping import NodeIds, facts
-from .._options import Predicate
-from .._render import predicate_facts
-from .._results import Match, Violation
-from .._syntax import quote_id
-from ._compile import CONTAINED, CONTAINER, NODE, CompiledProblem
-from ._java_classes import java
+from ..._instances import Graph
+from ..._mapping import NodeIds, facts
+from ..._options import Predicate
+from ..._render import predicate_facts
+from ..._results import Match, Violation
+from ..._syntax import quote_id
+from .classes import java
+from .compile import CONTAINED, CONTAINER, NODE, CompiledProblem
 
 type Key = tuple[str, tuple[int, ...]]
 """A fact of a plain model: a relation, and a tuple of node ids that holds in it."""
@@ -23,7 +23,7 @@ class PlainModel:
     """A model of ``problem``'s store, which :meth:`sync` keeps equal to a graph."""
 
     def __init__(self, problem: CompiledProblem) -> None:
-        from . import _jpype, helpers
+        from .._runtime import _jpype, helpers
 
         j = java()
         self.problem = problem

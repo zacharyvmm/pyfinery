@@ -123,7 +123,7 @@ def test_builtins_predicates_and_names():
     out = run(
         """
         from pyfinery import InvalidProblemError, Predicate
-        from pyfinery.jvm._cache import compiled
+        from pyfinery.jvm._matching.cache import compiled
 
         leaf = Dir(name="leaf")
         sub = Dir(name="sub", contents=[leaf])

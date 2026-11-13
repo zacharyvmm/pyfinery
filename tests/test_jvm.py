@@ -11,10 +11,12 @@ from pathlib import Path
 
 import pytest
 
-import pyfinery.jvm as jvm
+import pyfinery.jvm._runtime as jvm  # where the JVM's state lives, to patch
 from pyfinery.errors import RefineryError
-from pyfinery.jvm import _jars, _java, _setup
-from pyfinery.jvm._jars import Jar, Manifest
+from pyfinery.jvm._runtime import jars as _jars
+from pyfinery.jvm._runtime import jdk as _java
+from pyfinery.jvm._runtime import setup as _setup
+from pyfinery.jvm._runtime.jars import Jar, Manifest
 from pyfinery.jvm.errors import JvmError
 
 # -- finding the JDK ----------------------------------------------------------

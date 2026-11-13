@@ -46,7 +46,7 @@ _NAMES = {
 @cache
 def java() -> SimpleNamespace:
     """The classes, by short name; starts the JVM if it hasn't started."""
-    from . import _jpype, start
+    from .._runtime import _jpype, start
 
     start()
     jpype = _jpype()

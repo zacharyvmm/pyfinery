@@ -17,9 +17,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .._mapping import Catalogue
-from .._results import ViolationKind
-from .._schema import Feature, Schema, class_name
+from ..._mapping import Catalogue
+from ..._results import ViolationKind
+from ..._schema import Feature, Schema, class_name
 
 MAX_JOINED = 5
 """The most distinct targets a multiplicity check joins: an upper bound of at most
