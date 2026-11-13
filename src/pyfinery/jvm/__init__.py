@@ -14,6 +14,10 @@ anything starts it::
 
 :func:`start` starts it explicitly; the engines that need it start it
 themselves on first use.
+
+To validate and query on Refinery's own matcher, pass a :class:`JvmEngine`
+where :meth:`~pyfinery.Metamodel.validate` takes a client; to validate a graph
+as it changes, keep it in a :class:`Session`.
 """
 
 from __future__ import annotations
@@ -30,13 +34,18 @@ from typing import Any
 from ._jars import FEATURES, Feature, default_cache_dir, fetch, host_platform, manifest
 from ._java import MINIMUM_VERSION, Jdk, find_jdk
 from ._setup import compile_helpers, ortools_libraries, unpack_natives
-from .errors import JvmError
+from .errors import JvmError, UnsupportedRuleError
 
 __all__ = [
+    "Changes",
+    "Checkpoint",
+    "JvmEngine",
     "JvmError",
     "MINIMUM_VERSION",
+    "Session",
     "Settings",
     "Status",
+    "UnsupportedRuleError",
     "configure",
     "helpers",
     "require",
@@ -289,3 +298,7 @@ def _jpype() -> Any:
             "pyfinery.jvm needs JPype: install the jvm extra, e.g. pip install 'pyfinery[jvm]'."
         ) from error
     return jpype
+
+
+from .engine import JvmEngine  # noqa: E402  (after the functions it uses)
+from .session import Changes, Checkpoint, Session  # noqa: E402

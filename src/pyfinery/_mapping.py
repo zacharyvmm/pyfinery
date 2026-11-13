@@ -183,6 +183,17 @@ class NodeIds:
         self._nodes[node_id] = node
         return node_id
 
+    def put(self, node: Node, node_id: int) -> None:
+        """Give ``node`` the id ``node_id``, which no other node or constant has: to keep
+        the ids an engine gave the nodes of an earlier graph of the same objects."""
+        if self._ids.get(node, node_id) != node_id:
+            raise ValueError(f"Node {node.name or node.obj!r} already has id {self._ids[node]}")
+        if self._nodes.get(node_id, node) is not node or node_id in self._constant_names:
+            raise ValueError(f"Id {node_id} is already taken")
+        self._ids[node] = node_id
+        self._nodes[node_id] = node
+        self._next = max(self._next, node_id + 1)
+
     def remove(self, node: Node) -> int:
         """Forget ``node``; return the id it had."""
         node_id = self._ids.pop(node)

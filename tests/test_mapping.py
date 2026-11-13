@@ -343,3 +343,26 @@ def test_read_back_unknown_ids():
     assert read_facts(catalogue, ids, [generated], strict=False) == {"Service": [((999,), True)]}
     ids.constant("atom", 500)
     assert read_facts(catalogue, ids, [Fact("p", (500,), True)]) == {"p": [(("atom",), True)]}
+
+
+def test_node_ids_put_keeps_ids():
+    from pyfinery._instances import Node
+
+    a, b, c, d = (Node(obj=None, identity=i, name=n) for i, n in enumerate("abcd"))  # type: ignore[arg-type]
+    ids = NodeIds(first=10)
+    ids.constant("E::x", 12)
+    ids.put(a, 20)
+    assert ids.id_of(a) == 20 and ids.node(20) is a
+    ids.put(a, 20)  # again, the same id: nothing changes
+    with pytest.raises(ValueError, match="already has id 20"):
+        ids.put(a, 21)
+    with pytest.raises(ValueError, match="already taken"):
+        ids.put(b, 20)  # another node's
+    with pytest.raises(ValueError, match="already taken"):
+        ids.put(b, 12)  # a constant's
+    assert ids.get(b) is None
+    # add() after put() gives ids past it, never one put() gave.
+    assert ids.add(b) == 21
+    ids.put(c, 15)  # below the next id: add() keeps going from 22
+    assert ids.add(d) == 22
+    assert ids.node(15) is c

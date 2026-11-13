@@ -179,6 +179,34 @@ The matches are the ones Refinery computes, with the same logic values. Relation
   evaluate(rules, both)
   ```
 
+### Validating in this process, incrementally
+
+`pyfinery.jvm` runs Refinery's own Java library inside the Python process, through JPype. Install the `jvm` extra and a JDK 25; the first use fetches Refinery's jars (about 31 MB) into a cache. Pass a `JvmEngine` where `validate()` or `query()` takes a client:
+
+```python
+from pyfinery.jvm import JvmEngine
+
+report = metamodel.validate([deployment], JvmEngine())
+```
+
+Rules are compiled with Refinery's own compiler and matched directly on a plain, two-valued model of the graph by Refinery's incremental (Rete) matcher, with no server and no concretization. The violations are those a server reports for a complete model: rules, multiplicities, containment, and contradictions of the containment hierarchy. Refinery's built-in predicates mean what they say on a complete model: `node` and `exists` hold for every object, `equals` is identity, `container`, `contained` and `contains` come from the containment references, and `must`, `may` and `candidate` change nothing.
+
+To validate a graph as it changes, keep it in a `Session`: each check writes into the live model only the facts that changed, and the matcher updates only what they affect. `attempt()` tries a change and undoes it:
+
+```python
+from pyfinery.jvm import Session
+
+with Session(metamodel, [deployment], RULES) as session:
+    report = session.validate()
+    with session.attempt():
+        session.add(candidate)
+        print(session.changes().added)  # violations the candidate would bring
+```
+
+- **Not yet:** comparisons of attribute values and aggregation (`count`, ...) raise `pyfinery.jvm.UnsupportedRuleError` when an `error` predicate, or a predicate a query selects, uses them; so does a multiplicity bound above 4 (or a lower bound above 5). `query()` matches complete graphs only: an object that only may exist, or a fact that only may hold, raises the same error.
+- **Contradictory graphs:** on a containment cycle, a server also reports rule tuples the contradiction makes `error`; the JVM engine reports the cycle, and evaluates rules on the facts as given.
+- **Cost:** compiling a metamodel and its rules takes about a second the first time in a process (compiled problems are cached), a model of 4,000 objects about 35 MB of heap. A session's check reads the objects again in Python, about 15 ms per 1,000 objects; the matching itself takes well under a millisecond per change.
+
 ## Mapping Pydantic classes to Refinery
 
 `Metamodel(*classes, ...)` collects the given classes, their superclasses, the classes their fields refer to, and the already-imported subclasses of those. It doesn't collect every subclass of a shared base class.
@@ -333,7 +361,7 @@ PYFINERY_DOCKER_TESTS=1 uv run pytest      # plus end-to-end tests against a rea
 PYFINERY_JVM_TESTS=1 uv run pytest         # plus tests that start Refinery's JVM (needs a JDK 25 in PYFINERY_JAVA_HOME or JAVA_HOME)
 ```
 
-`pyfinery.jvm` (in progress, the `jvm` extra) runs Refinery in the Python process through JPype. It fetches Refinery's jars from Maven Central on first use, as pinned in `src/pyfinery/jvm/jars.json`; after upgrading Refinery, write that file again with `gradle -q -p tools/jars manifest` (needs a JDK 25). Its two Java helpers, in `src/pyfinery/jvm/java/`, are compiled with the JDK's `javac` on first use.
+`pyfinery.jvm` (the `jvm` extra) runs Refinery in the Python process through JPype. It fetches Refinery's jars from Maven Central on first use, as pinned in `src/pyfinery/jvm/jars.json`; after upgrading Refinery, write that file again with `gradle -q -p tools/jars manifest` (needs a JDK 25). Its two Java helpers, in `src/pyfinery/jvm/java/`, are compiled with the JDK's `javac` on first use.
 
 `tests/conformance` holds Refinery `.problem` files with expectations, and Refinery's recorded answers to them; its [README](tests/conformance/README.md) says how to add cases and record them again.
 
