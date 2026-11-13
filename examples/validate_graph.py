@@ -9,28 +9,22 @@ Run with: uv run examples/validate_graph.py
 
 from __future__ import annotations
 
-from typing import Annotated
-
-from pydantic import Field
-
 from pyfinery import Container, Contains, Metamodel, RefineryNode, RefineryServer
 
 
 class Filesystem(RefineryNode):
-    root: Annotated[Dir, Contains()]
+    root: Dir = Contains()
 
 
 class FSObject(RefineryNode):
     __abstract__ = True
-    parent: Annotated[Dir | None, Container(opposite="contents")] = None
+    parent: Dir | None = Container()
 
 
 class Dir(FSObject):
     __node_id__ = "name"
     name: str
-    contents: Annotated[list[FSObject], Contains(opposite="parent", multiplicity="0..3")] = Field(
-        default_factory=list
-    )
+    contents: list[FSObject] = Contains(multiplicity="0..3")
 
 
 class File(FSObject):

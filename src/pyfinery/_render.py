@@ -113,7 +113,7 @@ def render_facts(schema: Schema, graph: Graph, *, canonical_opposites: bool = Fa
         lines.append(f"{class_name(type(node.obj))}({name}).")
         for value in node.values:
             feature = value.feature
-            symbol = f"{class_name(feature.owner)}::{quote_id(feature.name)}"
+            symbol = feature_symbol(feature)
             prefix = "" if value.certain else "?"
             if feature.by_key:
                 if value.target is not None:  # others are reported by reference_errors
@@ -122,7 +122,7 @@ def render_facts(schema: Schema, graph: Graph, *, canonical_opposites: bool = Fa
                 assert value.target is not None
                 other = schema.find_feature(type(value.target.obj), feature.opposite)  # type: ignore[arg-type]
                 assert other is not None
-                reverse = f"{class_name(other.owner)}::{quote_id(other.name)}"
+                reverse = feature_symbol(other)
                 lines.append(f"{prefix}{reverse}({value.target.name}, {name}).")
             elif feature.is_attribute:
                 if value.certain:  # an uncertain attribute value is simply unknown
@@ -138,6 +138,11 @@ def render_facts(schema: Schema, graph: Graph, *, canonical_opposites: bool = Fa
 
 
 # -- the metamodel ------------------------------------------------------------
+
+
+def feature_symbol(feature: Feature) -> str:
+    """The Refinery name of a feature, e.g. ``Service::ports``."""
+    return f"{class_name(feature.owner)}::{quote_id(feature.name)}"
 
 
 def _declare_feature(feature: Feature) -> str:
@@ -189,8 +194,7 @@ def _closed_world(schema: Schema, graph: Graph, predicates: Sequence[Predicate])
                     # a node that certainly has one. A default would only
                     # cost time: Refinery refines it for every node pair.
                     continue
-            symbol = f"{class_name(cls)}::{quote_id(feature.name)}"
-            lines.append(f"default !{symbol}(*, *).")
+            lines.append(f"default !{feature_symbol(feature)}(*, *).")
     for predicate in predicates:
         wildcards = ", ".join("*" for _ in predicate.parameters)
         lines.append(f"default !{quote_id(predicate.name)}({wildcards}).")
