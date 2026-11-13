@@ -14,9 +14,11 @@ from ..._results import Match, Violation
 from ..._syntax import quote_id
 from .classes import java
 from .compile import CONTAINED, CONTAINER, NODE, CompiledProblem
+from .values import NO_VALUE, to_java
 
-type Key = tuple[str, tuple[int, ...]]
-"""A fact of a plain model: a relation, and a tuple of node ids that holds in it."""
+type Key = tuple[str, tuple[int, ...], object]
+"""A fact of a plain model: a relation, a tuple of node ids, and its value there: ``True`` (it
+holds), or the Python value of an attribute."""
 
 
 class PlainModel:
@@ -48,8 +50,8 @@ class PlainModel:
         constants: set[Key] = set()
         for name, node_id in problem.constants.items():
             enum_type, _ = problem.catalogue.literals[name]
-            constants.add((NODE, (node_id,)))
-            constants.add((problem.catalogue.name(enum_type), (node_id,)))
+            constants.add((NODE, (node_id,), True))
+            constants.add((problem.catalogue.name(enum_type), (node_id,), True))
         self._constants = constants
         self._write(constants, set())
         self.facts = set(constants)
@@ -70,7 +72,7 @@ class PlainModel:
         wanted.update(self._graph_facts(graph, ids))
         for predicate, nodes, answer in predicate_facts(self.problem.schema, graph, predicates):
             if answer == "true":
-                wanted.add((quote_id(predicate.name), tuple(ids.id_of(n) for n in nodes)))
+                wanted.add((quote_id(predicate.name), tuple(ids.id_of(n) for n in nodes), True))
         added, removed = wanted - self.facts, self.facts - wanted
         self._write(added, removed)
         self.facts = wanted
@@ -79,29 +81,40 @@ class PlainModel:
         return len(added) + len(removed)
 
     def _graph_facts(self, graph: Graph, ids: NodeIds) -> Iterable[Key]:
-        catalogue = self.problem.catalogue
+        catalogue, read = self.problem.catalogue, self.problem.attributes
+        valued = set()
         for fact in facts(catalogue, graph, ids):
-            if (
-                fact.relation in catalogue.features
-                and catalogue.features[fact.relation].is_attribute
-            ):
-                continue  # attribute values: not on the direct path yet
-            yield fact.relation, fact.nodes
+            feature = catalogue.features.get(fact.relation)
+            if feature is None or not feature.is_attribute or fact.relation in read:
+                yield fact.relation, fact.nodes, fact.value  # not an attribute no rule reads
+                valued.add((fact.relation, fact.nodes))
+        for name in read:  # unknown for the objects of the attribute's class without a value
+            owner = catalogue.features[name].owner
+            for node in graph.nodes:
+                key = (ids.id_of(node),)
+                if isinstance(node.obj, owner) and (name, key) not in valued:
+                    yield name, key, NO_VALUE
         for node in graph.nodes:
             node_id = (ids.id_of(node),)
-            yield NODE, node_id
+            yield NODE, node_id, True
             for name in self._class_names.get(type(node.obj), ()):
-                yield name, node_id
+                yield name, node_id, True
 
     def _write(self, added: set[Key], removed: set[Key]) -> None:
-        for value, keys in ((False, removed), (True, added)):
-            grouped: dict[str, list[int]] = {}
-            for relation, nodes in keys:
-                grouped.setdefault(relation, []).extend(nodes)
-            for relation, flat in grouped.items():
+        """Take out ``removed``, then put ``added``: a changed value is in both."""
+        attributes = self.problem.attributes
+        for holds, keys in ((False, removed), (True, added)):
+            grouped: dict[tuple[str, object], list[int]] = {}
+            for relation, nodes, value in keys:
+                grouped.setdefault((relation, value), []).extend(nodes)
+            for (relation, value), flat in grouped.items():
                 interpretation, arity = self._interpretation(relation)
                 array = self._jpype.JArray(self._jpype.JInt)(flat)
-                self._bulk.put(interpretation, array, arity, self._jpype.JBoolean(value))
+                if relation not in attributes:
+                    stored = self._jpype.JBoolean(holds)
+                else:  # no value is the symbol's default
+                    stored = to_java(attributes[relation], value) if holds else None
+                self._bulk.put(interpretation, array, arity, stored)
 
     def _interpretation(self, relation: str) -> tuple[Any, int]:
         found = self._interpretations.get(relation)

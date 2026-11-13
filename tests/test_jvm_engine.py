@@ -195,17 +195,18 @@ def test_unsupported_rules():
 
         objects = [Filesystem(root=Dir(name="home"))]
         out = {}
-        out["attribute"] = raises(UnsupportedRuleError, lambda: violations(
-            objects, ["error pred big(File f) <-> File::size(f) > 3."]))
-        out["count"] = raises(UnsupportedRuleError, lambda: violations(
-            objects, ["error pred full(Dir d) <-> count { Dir::contents(d, _) } > 1."]))
+        meet = "meet { Dir::contents(d, f) -> File::size(f) } > 3"
+        out["aggregator"] = raises(UnsupportedRuleError, lambda: violations(
+            objects, [f"error pred odd(Dir d) <-> {meet}."]))
+        out["reify"] = raises(UnsupportedRuleError, lambda: violations(
+            objects, ["error pred odd(File f) <-> reify { File(f) } == true."]))
         # Through a helper: the error predicate that calls it is unsupported.
         out["helper"] = raises(UnsupportedRuleError, lambda: violations(objects, [
-            "pred large(File f) <-> File::size(f) > 3.",
-            "error pred hasLarge(Dir d) <-> contents(d, f), large(f).",
+            f"pred odd(Dir d) <-> {meet}.",
+            "error pred hasOdd(Dir d) <-> contents(d, e), odd(e).",
         ]))
         # An unsupported helper no error predicate uses is left alone.
-        out["unused"] = violations(objects, ["pred large(File f) <-> File::size(f) > 3."])
+        out["unused"] = violations(objects, [f"pred odd(Dir d) <-> {meet}."])
         out["is_value_error"] = issubclass(UnsupportedRuleError, ValueError)
 
         class Wide(RefineryNode):
@@ -220,8 +221,8 @@ def test_unsupported_rules():
             items: Annotated[list["Two"], Ref(multiplicity="2..4")] = Field(
                 default_factory=list)
 
-        out["wide"] = raises(UnsupportedRuleError, lambda: Metamodel(Wide).validate(
-            [Wide(name="a")], engine))
+        wide = Wide(name="w", items=[Wide(name=f"w{i}") for i in range(11)])
+        out["wide"] = sorted(str(v) for v in Metamodel(Wide).validate([wide], engine).violations)
         a = Two(name="a")
         b = Two(name="b", items=[a])
         c = Two(name="c", items=[a, b])
@@ -229,12 +230,13 @@ def test_unsupported_rules():
         print(json.dumps(out))
         """
     )
-    assert "big: uses attribute values or count" in out["attribute"]
-    assert "full: uses" in out["count"]
-    assert "hasLarge: uses" in out["helper"]
+    assert "odd: uses an aggregator other than count, sum, min and max" in out["aggregator"]
+    assert "odd: uses ReifyTerm" in out["reify"]
+    assert "hasOdd: uses" in out["helper"]
     assert out["unused"] == ["rule: emptyDir(home)"]
     assert out["is_value_error"]
-    assert "the multiplicity of Wide::items [0..10], which needs count" in out["wide"]
+    # A bound of any size is counted: eleven items, at most ten.
+    assert out["wide"] == ["multiplicity: Wide::items::invalidMultiplicity(w)"]
     # At least two: a has none and b one; c has two.
     assert out["two"] == [
         "multiplicity: Two::items::invalidMultiplicity(a)",
@@ -287,7 +289,8 @@ def test_queries():
         out["may_exist"] = raises(UnsupportedRuleError, lambda: maybe.query(
             objects, engine, ["pred one(Dir d) <-> Dir(d)."]))
         out["unsupported"] = raises(UnsupportedRuleError, lambda: mm.query(
-            objects, engine, ["pred big(File f) <-> File::size(f) > 3."], select=["big"]))
+            objects, engine, ["pred odd(File f) <-> reify { File(f) } == true."],
+            select=["odd"]))
         print(json.dumps(out))
         """
     )
@@ -310,7 +313,127 @@ def test_queries():
     assert "nothere" in out["missing"]
     assert "marked(w) only may hold" in out["unknown_fact"]
     assert "file_1 only may exist" in out["may_exist"]
-    assert "big: uses" in out["unsupported"]
+    assert "odd: uses" in out["unsupported"]
+
+
+ATTRIBUTE_PRELUDE = """
+def matched(objects, rules):
+    names = [rule.split()[1].split("(")[0] for rule in rules]
+    result = mm.query(objects, engine, rules, select=names)
+    found = {name: [] for name in names}
+    for match in result.matches:
+        found[match.predicate].append(" ".join(match.node_names))
+    return {name: sorted(rows) for name, rows in found.items()}
+"""
+
+
+def test_attribute_values():
+    out = run(
+        ATTRIBUTE_PRELUDE
+        + """
+a = File(size=7, ratio=0.5, hidden=True, label="x")
+b = File(size=8, ratio=7.5, label="a b")
+c = File(size=2**40, ratio=-1e-3)  # no label
+objects = [Filesystem(root=Dir(name="r", contents=[a, b, c]))]
+out = matched(objects, [
+    "pred big(File f) <-> File::size(f) > 7.",
+    "pred atLeast(File f) <-> File::size(f) >= 8.",
+    "pred small(File f) <-> File::size(f) < 8.",
+    "pred atMost(File f) <-> File::size(f) <= 7.",
+    "pred seven(File f) <-> File::size(f) == 7.",
+    "pred notSeven(File f) <-> File::size(f) != 7.",
+    "pred huge(File f) <-> File::size(f) == 1099511627776.",
+    "pred before(File a, File b) <-> File::size(a) < File::size(b).",
+    "pred next(File a, File b) <-> File::size(a) + 1 == File::size(b).",
+    "pred half(File f) <-> File::ratio(f) == 0.5.",
+    "pred low(File f) <-> File::ratio(f) < 0.0.",
+    "pred double(File f) <-> File::ratio(f) * 2.0 >= 15.0.",
+    "pred isHidden(File f) <-> File::hidden(f).",
+    "pred hiddenTrue(File f) <-> File::hidden(f) == true.",
+    "pred shown(File f) <-> !File::hidden(f).",
+    'pred x(File f) <-> File::label(f) == "x".',
+    'pred spaced(File f) <-> File::label(f) == "a b".',
+    'pred notX(File f) <-> !(File::label(f) == "x").',
+    'pred otherThanX(File f) <-> File::label(f) != "x".',
+    "pred sameLabel(File a, File b) <-> File::label(a) == File::label(b).",
+    "pred large(File f) <-> File::size(f) > 7.",
+    "pred hasLarge(Dir d) <-> contents(d, f), large(f).",
+])
+out["violations"] = violations(objects, ["error pred tooBig(File f) <-> File::size(f) > 7."])
+out["not_finite"] = raises(ValueError, lambda: violations(
+    [Filesystem(root=Dir(name="r", contents=[File(ratio=float("inf"))]))],
+    ["error pred low(File f) <-> File::ratio(f) < 0.0."]))
+print(json.dumps(out))
+"""
+    )
+    a, b, c = "file_1", "file_2", "file_3"
+    assert out["big"] == [b, c] and out["atLeast"] == [b, c]
+    assert out["small"] == [a] and out["atMost"] == [a]
+    assert out["seven"] == [a] and out["notSeven"] == [b, c]
+    assert out["huge"] == [c]  # beyond 32 bits
+    assert out["before"] == [f"{a} {b}", f"{a} {c}", f"{b} {c}"]
+    assert out["next"] == [f"{a} {b}"]
+    assert out["half"] == [a] and out["low"] == [c] and out["double"] == [b]
+    assert out["isHidden"] == [a] and out["hiddenTrue"] == [a] and out["shown"] == [b, c]
+    assert out["x"] == [a] and out["spaced"] == [b]
+    # No value: neither a check nor its negation holds of the file without a label.
+    assert out["notX"] == [b] and out["otherThanX"] == [b]
+    assert out["sameLabel"] == [f"{a} {a}", f"{b} {b}"]
+    assert out["hasLarge"] == ["r"]
+    assert out["violations"] == ["rule: tooBig(file_2)", "rule: tooBig(file_3)"]
+    assert "cannot represent the real value inf" in out["not_finite"]
+
+
+def test_aggregations():
+    out = run(
+        ATTRIBUTE_PRELUDE
+        + """
+full = Dir(name="full", contents=[File(size=7, ratio=0.5), File(size=8, ratio=1.5)])
+empty = Dir(name="empty")
+objects = [Filesystem(root=Dir(name="r", contents=[full, empty]))]
+sizes = "{ Dir::contents(d, f) -> File::size(f) }"
+ratios = "{ Dir::contents(d, f) -> File::ratio(f) }"
+out = matched(objects, [
+    "pred two(Dir d) <-> count { Dir::contents(d, _) } == 2.",
+    "pred none(Dir d) <-> count { Dir::contents(d, _) } == 0.",
+    "pred notTwo(Dir d) <-> !(count { Dir::contents(d, _) } == 2).",
+    "pred big(Dir d) <-> count { bigIn(d, _) } == 1.",
+    "pred bigIn(Dir d, File f) <-> contents(d, f), File::size(f) > 7.",
+    f"pred sum15(Dir d) <-> sum {sizes} == 15.",
+    f"pred sum0(Dir d) <-> sum {sizes} == 0.",
+    f"pred sumReal(Dir d) <-> sum {ratios} == 2.0.",
+    f"pred min7(Dir d) <-> min {sizes} == 7.",
+    f"pred max8(Dir d) <-> max {sizes} == 8.",
+    f"pred maxReal(Dir d) <-> max {ratios} > 1.0.",
+    f"pred spread(Dir d) <-> max {sizes} - min {sizes} == 1.",
+    # Of no file, a min is positive infinity and a max negative infinity.
+    f"pred minAbove(Dir d) <-> min {sizes} > 100.",
+    f"pred minBelow(Dir d) <-> min {sizes} < 100.",
+    f"pred minNotBelow(Dir d) <-> !(min {sizes} < 100).",
+    f"pred maxBelow(Dir d) <-> max {sizes} < 0.",
+    f"pred maxAbove(Dir d) <-> max {sizes} > 0.",
+    "pred grand(Dir d) <-> sum { Dir::contents(d, e) -> count { Dir::contents(e, _) } } == 2.",
+    # Guarded by the class, the sum reads no directory's size.
+    "pred fileIn(Dir d, File f) <-> Dir::contents(d, f).",
+    "pred guarded(Dir d) <-> sum { fileIn(d, f) -> File::size(f) } == 0.",
+])
+print(json.dumps(out))
+"""
+    )
+    assert out["two"] == ["full", "r"] and out["none"] == ["empty"]
+    assert out["notTwo"] == ["empty"]
+    assert out["big"] == ["full"]
+    # The contents of r are directories: File::size of a directory is a contradiction, error,
+    # so every check over r's sizes holds, as on a server.
+    assert out["sum15"] == ["full", "r"] and out["sum0"] == ["empty", "r"]
+    assert out["sumReal"] == ["full", "r"]
+    assert out["min7"] == ["full", "r"] and out["max8"] == ["full", "r"]
+    assert out["maxReal"] == ["full", "r"] and out["spread"] == ["full", "r"]
+    assert out["minAbove"] == ["empty", "r"] and out["minBelow"] == ["full", "r"]
+    assert out["minNotBelow"] == ["empty", "r"]
+    assert out["maxBelow"] == ["empty", "r"] and out["maxAbove"] == ["full", "r"]
+    assert out["grand"] == ["r"]
+    assert out["guarded"] == ["empty", "r"]
 
 
 def test_negation_of_a_pattern_with_only_quantified_variables():

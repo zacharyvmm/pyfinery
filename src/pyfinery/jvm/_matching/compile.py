@@ -19,9 +19,21 @@ On a complete model, Refinery's built-in predicates have their plain meaning:
 - ``Owner::feature::invalidMultiplicity(x)`` is the metamodel's multiplicity check;
 - the modal operators ``must``, ``may`` and ``candidate`` change nothing.
 
-What a plain store can't match yet, attribute values and ``count``, makes the
-predicates that use them, and those that call them, unsupported: they are
-listed in :attr:`CompiledProblem.unsupported` and not matched.
+Attribute values are held as exact values of Refinery's domains
+(:mod:`.values`), and a check over them, ``File::size(f) > 3``, holds when it
+is certainly true. An attribute with no value has an unknown one: neither a
+check over it nor the negation of the check holds. An attribute read on an
+object of another class (``File::size(d)`` for a directory ``d``) is a
+contradiction, ``error``, as on a server: every check over it holds, and so is
+reported. ``count``, ``sum``, ``min``
+and ``max`` aggregate over the matches of their condition; over none, a count
+and a sum are 0, a ``min`` is positive infinity and a ``max`` negative
+infinity, as in Refinery.
+
+What the direct path can't match (e.g. the ``meet``, ``join`` and ``reify``
+aggregators, which are about partial models) makes the predicates that use it,
+and those that call them, unsupported: they are listed in
+:attr:`CompiledProblem.unsupported` and not matched.
 """
 
 from __future__ import annotations
@@ -31,7 +43,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from ..._mapping import Catalogue
+from ..._mapping import AttributeType, Catalogue, attribute_type
 from ..._options import Predicate
 from ..._render import _declare_predicate, render_metamodel
 from ..._results import ViolationKind
@@ -72,7 +84,6 @@ class CompiledProblem:
         self.catalogue = Catalogue(schema)
         self.timings: dict[str, float] = {}
         structural = structure(schema, self.catalogue)
-        self.unchecked_multiplicities = list(structural.unchecked)
         declarations = [_declare_predicate(schema, p) for p in predicates]
         self.source = render_metamodel(schema, [*rules, *declarations])
         text = self.source + "\n" + structural.text + "\n"
@@ -103,7 +114,15 @@ class CompiledProblem:
         self.parameters: dict[str, tuple[str, ...]] = {}
         """The names of each compiled predicate's parameters."""
         self.symbols: dict[str, Any] = {}
-        """Plain symbols by relation name: classes, enums, references, base predicates."""
+        """Plain symbols by relation name: classes, enums, references, base predicates, and
+        the attributes the rules read, whose symbols hold values."""
+        self.attributes: dict[str, AttributeType] = {}
+        """The attributes the rules read, by relation name, and the type of their values."""
+        self._attribute_names = {  # as Refinery names them -> as pyfinery renders them
+            str(trace.getPartialFunction(name).name()): name
+            for name, feature in self.catalogue.features.items()
+            if feature.is_attribute
+        }
         self._views: dict[Any, Any] = {}  # PartialRelation -> KeyOnlyView of its symbol
         self._compiled: dict[Any, Any] = {}  # PartialRelation -> RelationalQuery (partial)
         self._names: dict[Any, str] = {}  # PartialRelation -> name
@@ -171,7 +190,7 @@ class CompiledProblem:
         self.queries: dict[str, Any] = {}
         """Matchable predicates by name, as plain queries."""
         self.unsupported: dict[str, str] = {}
-        """Predicates the direct path can't match yet, and why."""
+        """Predicates the direct path can't match, and why."""
         for partial, query in self._compiled.items():
             name = self._names[partial]
             rewritten = self._rewrite(query.getDnf())
@@ -269,10 +288,15 @@ class CompiledProblem:
     def _rewrite_literal(self, literal: Any) -> tuple[Any, str | None]:
         """The literal on plain symbols, and why it can't be matched, if it can't."""
         j = java()
+        if isinstance(literal, j.PartialCheckLiteral):
+            reasons: list[str] = []
+            term = self._rewrite_term(literal.getTerm(), reasons)
+            check = j.CheckLiteral(j.TruthValueTerms.must(term))  # holds when certainly true
+            return check, reasons[0] if reasons else None
         if not isinstance(literal, j.CallLiteral):
             if isinstance(literal, (j.ConstantLiteral, j.BooleanLiteral)):
                 return literal, None
-            return literal, _why(literal)
+            return literal, f"{literal.getClass().getSimpleName()} ({literal})"
         target = literal.getTarget()
         if isinstance(target, j.ModalConstraint):
             target = target.constraint()  # on a complete model, every modality is the fact
@@ -298,12 +322,77 @@ class CompiledProblem:
             return literal, f"{target.name()}, which has no plain counterpart"
         return literal.withTarget(view), None
 
+    # -- values ------------------------------------------------------------------------------------
 
-def _why(literal: Any) -> str:
-    kind = str(literal.getClass().getSimpleName())
-    if kind == "PartialCheckLiteral":
-        return f"attribute values or count ({literal})"
-    return f"{kind} ({literal})"
+    def _rewrite_term(self, term: Any, reasons: list[str]) -> Any:
+        """``term``, of a check, reading plain symbols; what it can't read is added to
+        ``reasons``. Only attribute reads and aggregations change: the comparisons and
+        arithmetic around them are Refinery's."""
+        j = java()
+        one = j.IntIntervalTerms.constant(j.IntInterval.ONE)
+        if isinstance(term, j.PartialFunctionCallTerm):
+            function = term.getPartialFunction()
+            view = j.FunctionView(self._attribute_symbol(function))
+            # The model holds a value, or unknown, for each object of the attribute's class; on
+            # an object of another class the attribute is a contradiction, error, as on a server.
+            return view.leftJoin(function.abstractDomain().error(), term.getArguments())
+        if isinstance(term, j.PartialCountTerm):  # the sum of a 1 for each match
+            return self._aggregate(term, j.IntIntervalTerms.INT_INTERVAL_SUM, one, reasons)
+        if isinstance(term, j.PartialAggregationTerm):
+            aggregator = term.getAggregator()
+            value = self._rewrite_term(term.getBody(), reasons)
+            if isinstance(aggregator, j.WeightedAggregator):  # sum: each match counts once
+                value = aggregator.withWeight(one, value)
+            elif not isinstance(aggregator, j.UnweightedAggregator):  # not min or max
+                reasons.append(f"an aggregator other than count, sum, min and max ({term})")
+                return term
+            return self._aggregate(term, aggregator.getInnerAggregator(), value, reasons)
+        if isinstance(term, j.PartialTerm):
+            reasons.append(f"{term.getClass().getSimpleName()} ({term})")
+            return term
+        return term.rewriteSubTerms(self._term_rewriter(reasons))
+
+    def _term_rewriter(self, reasons: list[str]) -> Any:
+        from .._runtime import _jpype
+
+        jpype, problem = _jpype(), self
+
+        @jpype.JImplements(java().TermRewriter)
+        class Rewriter:
+            @jpype.JOverride
+            def rewriteTerm(self, term: Any) -> Any:
+                return problem._rewrite_term(term, reasons)
+
+        return Rewriter()
+
+    def _attribute_symbol(self, function: Any) -> Any:
+        """The plain symbol of an attribute, which holds its values: made when a rule reads it."""
+        j = java()
+        name = self._attribute_names[str(function.name())]
+        if name not in self.symbols:
+            self.attributes[name] = attribute_type(self.catalogue.features[name])
+            domain = function.abstractDomain()
+            self.symbols[name] = j.Symbol.of(name, int(function.arity()), domain.abstractType())
+        return self.symbols[name]
+
+    def _aggregate(self, call: Any, aggregator: Any, value: Any, reasons: list[str]) -> Any:
+        """``value`` aggregated over the matches of the condition of ``call`` (a count or an
+        aggregation): of a predicate that gives ``value`` for each match."""
+        j = java()
+        arguments = list(call.getArguments())
+        condition = j.CallLiteral(j.CallPolarity.POSITIVE, call.getTarget(), j.ArrayList(arguments))
+        matched, why = self._rewrite_literal(condition)
+        if why is not None:
+            reasons.append(why)
+        self._quantified += 1
+        result = j.Variable.of("value", value.getType())
+        inner = (
+            j.Dnf.builder(f"pyfinery_values{self._quantified}")
+            .parameters(j.ArrayList([*dict.fromkeys(arguments), result]))
+            .clause(j.ArrayList([matched, j.AssignLiteral(result, value)]))
+            .build()
+        )
+        return inner.aggregateBy(result, aggregator, j.ArrayList([*arguments, result]))
 
 
 def _error(check: Check, order: dict[str, int]) -> ErrorQuery:

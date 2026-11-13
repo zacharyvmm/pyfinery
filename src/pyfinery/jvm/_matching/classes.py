@@ -25,6 +25,11 @@ _NAMES = {
     "ContainmentHierarchyTranslator": (
         "tools.refinery.store.reasoning.translator.containment.ContainmentHierarchyTranslator"
     ),
+    "PartialCheckLiteral": "tools.refinery.store.reasoning.literal.PartialCheckLiteral",
+    "PartialTerm": "tools.refinery.store.reasoning.literal.PartialTerm",
+    "PartialFunctionCallTerm": "tools.refinery.store.reasoning.literal.PartialFunctionCallTerm",
+    "PartialCountTerm": "tools.refinery.store.reasoning.literal.PartialCountTerm",
+    "PartialAggregationTerm": "tools.refinery.store.reasoning.literal.PartialAggregationTerm",
     # Logic: rewriting the compiled rules.
     "Dnf": "tools.refinery.logic.dnf.Dnf",
     "CallLiteral": "tools.refinery.logic.literal.CallLiteral",
@@ -32,9 +37,24 @@ _NAMES = {
     "EquivalenceLiteral": "tools.refinery.logic.literal.EquivalenceLiteral",
     "BooleanLiteral": "tools.refinery.logic.literal.BooleanLiteral",
     "ConstantLiteral": "tools.refinery.logic.literal.ConstantLiteral",
+    "CheckLiteral": "tools.refinery.logic.literal.CheckLiteral",
+    "AssignLiteral": "tools.refinery.logic.literal.AssignLiteral",
+    "Variable": "tools.refinery.logic.term.Variable",
+    "TermRewriter": "tools.refinery.logic.rewriter.TermRewriter",
+    "WeightedAggregator": "tools.refinery.logic.term.PartialAggregator$MultiplicitySensitive",
+    "UnweightedAggregator": "tools.refinery.logic.term.PartialAggregator$MultiplicityInsensitive",
+    # Attribute values: exact values of Refinery's abstract domains.
+    "TruthValue": "tools.refinery.logic.term.truthvalue.TruthValue",
+    "TruthValueTerms": "tools.refinery.logic.term.truthvalue.TruthValueTerms",
+    "IntInterval": "tools.refinery.logic.term.intinterval.IntInterval",
+    "IntIntervalTerms": "tools.refinery.logic.term.intinterval.IntIntervalTerms",
+    "RealInterval": "tools.refinery.logic.term.realinterval.RealInterval",
+    "StringValue": "tools.refinery.logic.term.string.StringValue",
+    "BigInteger": "java.math.BigInteger",
     # The plain store and its queries.
     "Symbol": "tools.refinery.store.representation.Symbol",
     "KeyOnlyView": "tools.refinery.store.query.view.KeyOnlyView",
+    "FunctionView": "tools.refinery.store.query.view.FunctionView",
     "ModelStore": "tools.refinery.store.model.ModelStore",
     "QueryInterpreterAdapter": "tools.refinery.store.query.interpreter.QueryInterpreterAdapter",
     "ModelQueryAdapter": "tools.refinery.store.query.ModelQueryAdapter",

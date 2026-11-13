@@ -11,5 +11,5 @@ class JvmError(RefineryError):
 
 
 class UnsupportedRuleError(JvmError, ValueError):
-    """Rules or a graph that the direct path can't match yet: attribute values, ``count``,
-    multiplicities beyond what it joins, or uncertain facts."""
+    """Rules or a graph that the direct path can't match: aggregators about partial models
+    (``meet``, ``join``, ``reify``), or uncertain facts."""

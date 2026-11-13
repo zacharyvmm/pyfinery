@@ -13,7 +13,6 @@ from pyfinery.jvm._matching import cache as _cache
 from pyfinery.jvm._matching.structure import (
     CONTAINS,
     INVALID_CONTAINER,
-    MAX_JOINED,
     Check,
     structure,
 )
@@ -41,21 +40,8 @@ class Exact(RefineryNode):
     one: Annotated[Exact | None, Ref(multiplicity="1")] = None
     pair: Annotated[list[Exact], Ref(multiplicity="2..4")] = Field(default_factory=list)
     many: Annotated[list[Exact], Ref(multiplicity="0..*")] = Field(default_factory=list)
-    edge: Annotated[list[Exact], Ref(multiplicity=f"0..{MAX_JOINED - 1}")] = Field(
-        default_factory=list
-    )
-    lowest: Annotated[list[Exact], Ref(multiplicity=f"{MAX_JOINED}..*")] = Field(
-        default_factory=list
-    )
-
-
-class Wide(RefineryNode):
-    __node_id__ = "name"
-    name: str
-    upper: Annotated[list[Wide], Ref(multiplicity=f"0..{MAX_JOINED}")] = Field(default_factory=list)
-    lower: Annotated[list[Wide], Ref(multiplicity=f"{MAX_JOINED + 1}..*")] = Field(
-        default_factory=list
-    )
+    wide: Annotated[list[Exact], Ref(multiplicity="0..10")] = Field(default_factory=list)
+    lowest: Annotated[list[Exact], Ref(multiplicity="6..*")] = Field(default_factory=list)
 
 
 class Box(RefineryNode):
@@ -76,7 +62,6 @@ def test_no_containment_no_containment_checks():
     assert not found.containment
     assert CONTAINS not in found.text and INVALID_CONTAINER not in found.text
     assert {check.kind for check in found.checks} == {"multiplicity"}
-    assert found.unchecked == []
 
 
 def test_multiplicity_checks():
@@ -85,44 +70,20 @@ def test_multiplicity_checks():
     checks = {check.constraint: check for check in found.checks}
     # 0..* can't be broken: no check.
     assert set(checks) == {
-        f"Exact::{name}::invalidMultiplicity" for name in ("one", "pair", "edge", "lowest")
+        f"Exact::{name}::invalidMultiplicity" for name in ("one", "pair", "wide", "lowest")
     }
-    for check in checks.values():
+    bodies = {}
+    for name, check in checks.items():
         assert check.kind == "multiplicity"
-        assert check.predicate in lines
-        assert lines[check.predicate].startswith(f"pred {check.predicate}(Exact x) <-> ")
+        head, body = lines[check.predicate].removesuffix(".").split(" <-> ")
+        assert head == f"pred {check.predicate}(Exact x)"
+        bodies[name.split("::")[1]] = body
 
-    # Exactly one: none, or two distinct.
-    one = lines[checks["Exact::one::invalidMultiplicity"].predicate]
-    assert one.endswith("<-> !Exact::one(x, _) ; Exact::one(x, y0), Exact::one(x, y1), y0 != y1.")
-
-    # 2..4: fewer than two distinct (a helper), or five distinct.
-    pair = checks["Exact::pair::invalidMultiplicity"].predicate
-    helper = lines[f"{pair}AtLeast"]
-    assert helper == (
-        f"pred {pair}AtLeast(Exact x) <-> Exact::pair(x, y0), Exact::pair(x, y1), y0 != y1."
-    )
-    body = lines[pair].split(" <-> ")[1].removesuffix(".")
-    first, second = body.split(" ; ")
-    assert first == f"!{pair}AtLeast(x)"
-    assert second.count("Exact::pair(x, ") == 5
-    assert second.count(" != ") == 10  # every pair of five targets
-
-    # The largest bounds that are still joined.
-    edge = lines[checks["Exact::edge::invalidMultiplicity"].predicate]
-    assert edge.count("Exact::edge(x, ") == MAX_JOINED and " ; " not in edge
-    lowest = checks["Exact::lowest::invalidMultiplicity"].predicate
-    assert lines[f"{lowest}AtLeast"].count("Exact::lowest(x, ") == MAX_JOINED
-    assert lines[lowest].endswith(f"<-> !{lowest}AtLeast(x).")
-
-
-def test_multiplicity_beyond_max_joined_is_unchecked():
-    found = _structure(Wide)
-    assert found.unchecked == [
-        f"Wide::upper [0..{MAX_JOINED}]",
-        f"Wide::lower [{MAX_JOINED + 1}..*]",
-    ]
-    assert found.checks == [] and found.text == ""
+    # Each bound is a count of the targets, whatever its size.
+    assert bodies["one"] == "count { Exact::one(x, _) } < 1 ; count { Exact::one(x, _) } > 1"
+    assert bodies["pair"] == "count { Exact::pair(x, _) } < 2 ; count { Exact::pair(x, _) } > 4"
+    assert bodies["wide"] == "count { Exact::wide(x, _) } > 10"
+    assert bodies["lowest"] == "count { Exact::lowest(x, _) } < 6"
 
 
 def test_containment_checks():
@@ -155,7 +116,6 @@ def test_containment_checks():
     assert lines[contradictions["Item::box"]].endswith(f"{CONTAINS}+(x, y).")
     # Containment references have no bounds here, and a container reference is never checked.
     assert "multiplicity" not in by_kind
-    assert found.unchecked == []
 
 
 def test_graph_models_structure():

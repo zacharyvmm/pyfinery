@@ -8,17 +8,25 @@
 
 Unofficial Python library for [Refinery](https://refinery.tools), the graph solver for partial models. pyfinery covers two use cases:
 
-- **Validate and query Pydantic models with Refinery.** Load your data (JSON, YAML, an API response, a parse tree) into Pydantic objects, as you already do. pyfinery derives a Refinery metamodel from the classes and checks the objects against it, along with any rules you write in Refinery's logic language. It reports violations, or pattern matches with their value in Refinery's logic: **true**, or **unknown** if they only may hold.
+- **Validate and query Pydantic models with Refinery.** Load your data (JSON, YAML, an API response, a parse tree) into Pydantic objects, as you already do. pyfinery derives a Refinery metamodel from the classes and checks the objects against it, along with any rules you write in Refinery's logic language. By default it runs Refinery's own compiler and incremental matcher **inside the Python process**, with no server, and can keep a graph live to re-validate it as it changes. A Refinery server is used to reason about uncertain data: pattern matches with their value in Refinery's logic, **true**, or **unknown** if they only may hold.
 - **Call Refinery from Python.** This is a typed client for Refinery's HTTP API, ported from the official JavaScript client [`@tools.refinery/client`](https://github.com/graphs4value/refinery/tree/main/subprojects/client-js). It generates models, computes partial-model semantics, and runs a local server in Docker.
 
 ## Installation
 
 ```sh
-uv add git+https://github.com/zacharyvmm/pyfinery
-# or: pip install git+https://github.com/zacharyvmm/pyfinery
+uv add 'pyfinery[jvm] @ git+https://github.com/zacharyvmm/pyfinery'
+# or: pip install 'pyfinery[jvm] @ git+https://github.com/zacharyvmm/pyfinery'
 ```
 
-pyfinery needs Python 3.12+ and a Refinery server. Either let `RefineryServer` start one in Docker for you, or run one yourself:
+pyfinery needs Python 3.12+. The `jvm` extra runs Refinery in the Python process and needs a **JDK 25 or later**: point `PYFINERY_JAVA_HOME` (or `JAVA_HOME`) at it, or call `pyfinery.jvm.configure(java_home=...)`. pyfinery doesn't search for one. The first use fetches Refinery's jars (about 31 MB) from Maven Central into a cache, checked against pinned hashes.
+
+```sh
+export PYFINERY_JAVA_HOME=/path/to/jdk-25
+```
+
+### A Refinery server, for uncertain data and generation
+
+Querying with **unknown** values, generating models and calling Refinery's API need a Refinery server. Either let `RefineryServer` start one in Docker for you, or run one yourself:
 
 ```sh
 docker run --rm -p 8888:8888 ghcr.io/zacharyvmm/refinery
@@ -58,7 +66,8 @@ deployment = Deployment.model_validate_json(Path("deployment.json").read_text())
 Describe how they map to Refinery, write rules, and validate:
 
 ```python
-from pyfinery import ClassOptions, Metamodel, Predicate, RefineryServer
+from pyfinery import ClassOptions, Metamodel, Predicate
+from pyfinery.jvm import JvmEngine
 
 metamodel = Metamodel(
     Deployment,
@@ -79,8 +88,7 @@ print(metamodel.source)   # the generated Refinery metamodel
 # What Refinery can't express, such as a regular expression, is computed in Python.
 floating_tag = Predicate("floatingTag", (Service,), lambda s: re.search(r":(latest)?$", s.image) is not None)
 
-with RefineryServer() as server, server.client() as refinery:
-    report = metamodel.validate([deployment], refinery, predicates=[floating_tag])
+report = metamodel.validate([deployment], JvmEngine(), predicates=[floating_tag])
 
 for violation in report.violations:
     print(violation)
@@ -100,11 +108,56 @@ Each `Violation` has a `kind`, the Refinery `constraint` that failed, and the of
 | `reference` | a key in a reference-by-key field matched no object (`::unresolved`) or several (`::ambiguous`) |
 | `contradiction` | facts that contradict the metamodel, such as a reference to an object of the wrong class |
 
-`validate()` asserts the objects as facts and closes the world with Refinery's `concretize` operation: anything not asserted is false. `metamodel.problem(objects)` shows exactly what is sent, so you can paste it into the [Refinery web editor](https://refinery.services). `avalidate()` is the async variant.
+`JvmEngine` compiles the rules with Refinery's own compiler and matches them directly on a plain, two-valued model of the graph with Refinery's incremental (Rete) matcher: no server, and no partial-model reasoning. The violations are those a Refinery server reports for the same complete graph: rules, multiplicities, containment, and contradictions of the containment hierarchy. Refinery's built-in predicates mean what they say on a complete model: `node` and `exists` hold for every object, `equals` is identity, `container`, `contained` and `contains` come from the containment references, and `must`, `may` and `candidate` change nothing. `metamodel.problem(objects)` shows the Refinery problem of the graph, which you can paste into the [Refinery web editor](https://refinery.services).
+
+### Validating as the graph changes
+
+To validate a graph as it changes, keep it in a `Session`: each check writes into the live model only the facts that changed, and the matcher updates only what they affect. `attempt()` tries a change and undoes it:
+
+```python
+from pyfinery.jvm import Session
+
+with Session(metamodel, [deployment], predicates=[floating_tag]) as session:
+    report = session.validate()
+    with session.attempt():
+        session.add(candidate)
+        print(session.changes().added)  # violations the candidate would bring
+```
+
+### What the JVM engine matches
+
+- **Attribute values:** rules compare them and compute with them (`File::size(a) + 1 == File::size(b)`, `File::hidden(f)`, `File::label(f) != "x"`), for `int`, `real`, `boolean` and `string` attributes. An attribute that is `None` has no value: no check over it holds, and neither does the negation of one (`!(File::label(f) == "x")` doesn't match a file without a label), as on a server.
+- **Aggregation:** `count`, `sum`, `min` and `max`. Over no match, a `count` and a `sum` are 0, a `min` is positive infinity and a `max` negative infinity, as on a server; an aggregate over an attribute with no value has no value either. Reading an attribute of an object of another class, such as `File::size(d)` for a directory `d` in `sum { Dir::contents(d, f) -> File::size(f) }`, is a contradiction, `error`, as on a server: every check over it holds and is reported. Guard such reads with the class, e.g. through a helper `pred fileIn(Dir d, File f) <-> Dir::contents(d, f).` and `sum { fileIn(d, f) -> File::size(f) }`. Multiplicities of any size are checked.
+- **Not supported:** the aggregators about partial models (`meet`, `join`, `reify`) raise `pyfinery.jvm.UnsupportedRuleError` when an `error` predicate, or a predicate a query selects, uses them. `query()` matches complete graphs only: an object that only may exist, or a fact that only may hold, raises the same error.
+- **Contradictory graphs:** on a containment cycle, a server also reports rule tuples the contradiction makes `error`; the JVM engine reports the cycle, and evaluates rules on the facts as given. And where `query()` meets a contradiction, such as an attribute read on an object of another class, a server reports the tuple as a contradiction in `result.errors`, while the JVM engine reports it as a match.
+- **Cost:** compiling a metamodel and its rules takes about a second the first time in a process (compiled problems are cached), a model of 4,000 objects about 35 MB of heap. A session's check reads the objects again in Python, about 15 ms per 1,000 objects; the matching itself takes well under a millisecond per change.
+
+### Validating with a Refinery server
+
+Pass a Refinery client instead of the engine, and `validate()` sends the problem to the server, which asserts the objects as facts and closes the world with Refinery's `concretize` operation. `avalidate()` is the async variant, for an `AsyncRefinery` client.
+
+```python
+from pyfinery import RefineryServer
+
+with RefineryServer() as server, server.client() as refinery:
+    report = metamodel.validate([deployment], refinery, predicates=[floating_tag])
+```
 
 ## Querying with true and unknown
 
-`query()` asks *which parts of the graph match a pattern*, rather than *does the graph follow the rules*. Patterns are Refinery predicates. When parts of your data are uncertain, Refinery's four-valued logic keeps track of it, and each match is either **true** (it certainly holds) or **unknown** (it only may hold):
+`query()` asks *which parts of the graph match a pattern*, rather than *does the graph follow the rules*. Patterns are Refinery predicates. On complete data, the JVM engine answers in the process, every match **true**:
+
+```python
+result = metamodel.query([deployment], JvmEngine(), [
+    "pred reachesUnencrypted(Service s, Database d) <-> "
+    "Service::depends_on+(s, d), !Database::encrypted(d).",
+], predicates=[floating_tag])
+# true: reachesUnencrypted(web, db)
+# true: reachesUnencrypted(api, db)
+# true: reachesUnencrypted(worker, db)
+```
+
+When parts of your data are uncertain, Refinery's four-valued logic keeps track of it, and each match is either **true** (it certainly holds) or **unknown** (it only may hold). That needs a Refinery server (`refinery`, a client as in [Validating with a Refinery server](#validating-with-a-refinery-server)), or the bits engine below; the JVM engine refuses uncertain data with `UnsupportedRuleError`:
 
 ```python
 guessed = Metamodel(
@@ -179,34 +232,6 @@ The matches are the ones Refinery computes, with the same logic values. Relation
   evaluate(rules, both)
   ```
 
-### Validating in this process, incrementally
-
-`pyfinery.jvm` runs Refinery's own Java library inside the Python process, through JPype. Install the `jvm` extra and a JDK 25; the first use fetches Refinery's jars (about 31 MB) into a cache. Pass a `JvmEngine` where `validate()` or `query()` takes a client:
-
-```python
-from pyfinery.jvm import JvmEngine
-
-report = metamodel.validate([deployment], JvmEngine())
-```
-
-Rules are compiled with Refinery's own compiler and matched directly on a plain, two-valued model of the graph by Refinery's incremental (Rete) matcher, with no server and no concretization. The violations are those a server reports for a complete model: rules, multiplicities, containment, and contradictions of the containment hierarchy. Refinery's built-in predicates mean what they say on a complete model: `node` and `exists` hold for every object, `equals` is identity, `container`, `contained` and `contains` come from the containment references, and `must`, `may` and `candidate` change nothing.
-
-To validate a graph as it changes, keep it in a `Session`: each check writes into the live model only the facts that changed, and the matcher updates only what they affect. `attempt()` tries a change and undoes it:
-
-```python
-from pyfinery.jvm import Session
-
-with Session(metamodel, [deployment], RULES) as session:
-    report = session.validate()
-    with session.attempt():
-        session.add(candidate)
-        print(session.changes().added)  # violations the candidate would bring
-```
-
-- **Not yet:** comparisons of attribute values and aggregation (`count`, ...) raise `pyfinery.jvm.UnsupportedRuleError` when an `error` predicate, or a predicate a query selects, uses them; so does a multiplicity bound above 4 (or a lower bound above 5). `query()` matches complete graphs only: an object that only may exist, or a fact that only may hold, raises the same error.
-- **Contradictory graphs:** on a containment cycle, a server also reports rule tuples the contradiction makes `error`; the JVM engine reports the cycle, and evaluates rules on the facts as given.
-- **Cost:** compiling a metamodel and its rules takes about a second the first time in a process (compiled problems are cached), a model of 4,000 objects about 35 MB of heap. A session's check reads the objects again in Python, about 15 ms per 1,000 objects; the matching itself takes well under a millisecond per change.
-
 ## Mapping Pydantic classes to Refinery
 
 `Metamodel(*classes, ...)` collects the given classes, their superclasses, the classes their fields refer to, and the already-imported subclasses of those. It doesn't collect every subclass of a shared base class.
@@ -246,7 +271,10 @@ Fields with no Refinery counterpart (`list[str]`, `dict`, …) raise `TypeError`
 When you build the graph in Python yourself, subclass `RefineryNode`. You get identity semantics, and markers for Refinery's containment and opposite references:
 
 ```python
+from __future__ import annotations
+
 from pyfinery import Container, Contains, Metamodel, RefineryNode
+from pyfinery.jvm import JvmEngine
 
 class Filesystem(RefineryNode):
     root: Dir = Contains()                                 # contains Dir[1] root
@@ -265,7 +293,7 @@ class File(FSObject):
 
 metamodel = Metamodel(Filesystem, rules=["error pred emptyDir(Dir d) <-> !contents(d, _)."])
 home = Dir(name="home", contents=[File(size=10)])
-report = metamodel.validate([Filesystem(root=home), Dir(name="orphan")], refinery)
+report = metamodel.validate([Filesystem(root=home), Dir(name="orphan")], JvmEngine())
 # containment: builtin::invalidContainer(orphan)
 # rule: emptyDir(orphan)
 ```
@@ -278,12 +306,12 @@ report = metamodel.validate([Filesystem(root=home), Dir(name="orphan")], refiner
 ### Things to know
 
 - **Reachability:** `validate()` and `query()` follow only *outgoing* references from the objects you pass. An object that nothing refers to, such as a child that only sets its own `parent`, must be passed too.
-- **Timeouts:** `validate()` and `query()` run under the server's semantics timeout, which is 1 second by default and enough for about a thousand objects. Raise it with `RefineryServer(semantics_timeout=10_000)` or `REFINERY_SEMANTICS_TIMEOUT_MS`. `RefineryServer` warms the server up, so the first call doesn't time out while the JVM starts. See [Performance](#performance) for what makes calls slow.
+- **Timeouts, with a server:** `validate()` and `query()` run under the server's semantics timeout, which is 1 second by default and enough for about a thousand objects. Raise it with `RefineryServer(semantics_timeout=10_000)` or `REFINERY_SEMANTICS_TIMEOUT_MS`. `RefineryServer` warms the server up, so the first call doesn't time out while the JVM starts. See [Performance with a server](#performance-with-a-server) for what makes calls slow.
 - **Rule syntax** is Refinery's. See its [language reference](https://refinery.tools/learn/language/). Inside rules, features are written `Class::field`. Boolean attributes are used as literals (`Port::public(p)`), and other attributes are compared with operators (`Service::replicas(s) > 1`).
 
-### Performance
+### Performance with a server
 
-Each `validate()` or `query()` call sends the whole problem. Refinery parses it and computes every relation over every object, both what is true and what is unknown. It doesn't limit the work to the predicates you report. With the default image, a `validate()` or `query()` over about 4,000 objects takes about 2 seconds.
+The JVM engine's costs are under [What the JVM engine matches](#what-the-jvm-engine-matches). With a server, each `validate()` or `query()` call sends the whole problem. Refinery parses it and computes every relation over every object, both what is true and what is unknown. It doesn't limit the work to the predicates you report. With the default image, a `validate()` or `query()` over about 4,000 objects takes about 2 seconds.
 
 - **Keep helper predicates small.** A predicate with three parameters, such as `between(Resource r, Effect a, Effect b)`, can hold for hundreds of thousands of tuples over a few hundred objects. Refinery computes them all and sends them back, because any relation can hold a contradiction that `validate()` and `query()` report. With the default image, a `query()` whose helper holds 300,000 tuples takes about 7 seconds. `result.model.tuple_counts()` lists the largest relations. Declaring helpers `shadow` would leave them out of the response, but Refinery doesn't let a reported predicate use a `shadow` one.
 - **Pass fewer objects.** The number of objects matters more than the number of attribute values. Leave out fields that rules don't need with `exclude=[...]`.

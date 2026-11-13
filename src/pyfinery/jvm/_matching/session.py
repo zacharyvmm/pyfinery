@@ -74,7 +74,7 @@ class Session:
     ``rules`` are added to the metamodel's, and ``predicates`` give relations
     computed in Python, as in :meth:`~pyfinery.Metamodel.validate`; validation is
     two-valued in the same way. Raises :class:`~pyfinery.jvm.UnsupportedRuleError`
-    if an error predicate uses what the direct path can't match yet.
+    if an error predicate uses what the direct path can't match.
     """
 
     def __init__(

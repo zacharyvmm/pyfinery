@@ -7,7 +7,15 @@ from pydantic import BaseModel
 
 from pyfinery import ClassOptions, Metamodel
 from pyfinery._instances import Graph, build_graph
-from pyfinery._mapping import Catalogue, Fact, NodeIds, facts, objects, read_facts
+from pyfinery._mapping import (
+    Catalogue,
+    Fact,
+    NodeIds,
+    attribute_type,
+    facts,
+    objects,
+    read_facts,
+)
 from pyfinery._render import render_facts
 
 from . import deployment_models, generic_models, graph_models, nested_models
@@ -104,6 +112,19 @@ def test_catalogue_quotes_names_like_the_metamodel():
     catalogue = Catalogue(mm.schema)
     assert set(catalogue.features) == {"Thing::'default'", "Thing::'error'"}
     assert "int 'default'" in mm.source
+
+
+def test_attribute_types():
+    catalogue = Catalogue(graph_models.metamodel().schema)
+    File = graph_models.File
+    types = {
+        name: attribute_type(catalogue.feature(File, name))
+        for name in ("size", "ratio", "hidden", "label")
+    }
+    assert types == {"size": "int", "ratio": "real", "hidden": "boolean", "label": "string"}
+    for cls, name in ((File, "permission"), (graph_models.Dir, "contents")):  # an enum, a reference
+        with pytest.raises(ValueError, match=f"{cls.__name__}::{name} is not an attribute"):
+            attribute_type(catalogue.feature(cls, name))
 
 
 def test_supertypes_include_superclasses_and_unions():

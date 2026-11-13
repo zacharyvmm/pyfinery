@@ -187,9 +187,9 @@ def test_predicates_lifetime_and_unsupported_rules():
         out["managed"] = raises(RuntimeError, managed.validate)
 
         out["unsupported"] = raises(UnsupportedRuleError, lambda: Session(
-            mm, rules=["error pred big(File f) <-> File::size(f) > 3."]))
+            mm, rules=["error pred odd(File f) <-> reify { File(f) } == true."]))
         # Unsupported, but no error predicate: fine.
-        with Session(mm, [fs], ["pred big(File f) <-> File::size(f) > 3."]) as fine:
+        with Session(mm, [fs], ["pred odd(File f) <-> reify { File(f) } == true."]) as fine:
             out["fine"] = names(fine.validate().violations)
         print(json.dumps(out))
         """
@@ -203,8 +203,57 @@ def test_predicates_lifetime_and_unsupported_rules():
     assert out["predicates"] == ["marked"]
     assert out["closed"] == ["This session is closed"] * 3
     assert out["managed"] == "This session is closed"
-    assert "big: uses" in out["unsupported"]
+    assert "odd: uses" in out["unsupported"]
     assert out["fine"] == []
+
+
+def test_attribute_values_follow_the_objects():
+    out = run(
+        """
+        a, b = File(size=1, label="x"), File(size=9)
+        root = Dir(name="r", contents=[a, b])
+        rules = [
+            "error pred big(File f) <-> File::size(f) > 3.",
+            "error pred labelled(File f) <-> File::label(f) == \\"x\\".",
+            "error pred heavy(Dir d) <-> sum { Dir::contents(d, f) -> File::size(f) } > 20.",
+        ]
+        out = {}
+        with Session(mm, [Filesystem(root=root)], rules) as session:
+            out["first"] = names(session.validate().violations)
+            a.size = 5  # a value changed
+            out["changed"] = changed(session.changes())
+            checkpoint = session.checkpoint()
+            a.label = None  # a value cleared
+            b.label = "x"  # and one set
+            b.size = 16
+            out["cleared"] = changed(session.changes())
+            session.rollback(checkpoint)
+            out["rolled_back"] = names(session.validate().violations)
+            a.label, b.label, b.size = "x", None, 9  # the objects, as at the checkpoint
+            out["restored"] = changed(session.changes())
+        print(json.dumps(out))
+        """
+    )
+    assert out["first"] == ["rule: big(file_2)", "rule: labelled(file_1)"]
+    assert out["changed"] == {"added": ["rule: big(file_1)"], "removed": [], "any": True}
+    assert out["cleared"] == {
+        "added": ["rule: heavy(r)", "rule: labelled(file_2)"],
+        "removed": ["rule: labelled(file_1)"],
+        "any": True,
+    }
+    # The model is as at the checkpoint, and so are the reported violations; the objects were
+    # changed in place since, which the next call sees.
+    assert out["rolled_back"] == [
+        "rule: big(file_1)",
+        "rule: big(file_2)",
+        "rule: heavy(r)",
+        "rule: labelled(file_2)",
+    ]
+    assert out["restored"] == {
+        "added": ["rule: labelled(file_1)"],
+        "removed": ["rule: heavy(r)", "rule: labelled(file_2)"],
+        "any": True,
+    }
 
 
 def test_negation_follows_what_is_added_and_removed():

@@ -40,6 +40,18 @@ class Fact:
     value: object
 
 
+type AttributeType = Literal["boolean", "int", "real", "string"]
+"""The Refinery data type of an attribute."""
+
+
+def attribute_type(feature: Feature) -> AttributeType:
+    """The data type of the values of ``feature``, an attribute: what an engine converts the
+    Python value of its :class:`Fact` by."""
+    if not feature.is_attribute:
+        raise ValueError(f"{feature_symbol(feature)} is not an attribute")
+    return feature.target  # type: ignore[return-value]
+
+
 # -- names ---------------------------------------------------------------------
 
 

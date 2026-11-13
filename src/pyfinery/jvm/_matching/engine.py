@@ -83,21 +83,15 @@ class JvmEngine(Engine):
 
 
 def require_supported(problem: CompiledProblem, predicates: Sequence[str]) -> None:
-    """Raise :class:`UnsupportedRuleError` if any of ``predicates``, or a multiplicity of the
-    metamodel, can't be matched on the direct path."""
+    """Raise :class:`UnsupportedRuleError` if any of ``predicates`` can't be matched on the
+    direct path."""
     reasons = [
         f"{name}: uses {problem.unsupported[name]}"
         for name in predicates
         if name in problem.unsupported
     ]
-    reasons += [
-        f"the multiplicity of {feature}, which needs count"
-        for feature in problem.unchecked_multiplicities
-    ]
     if reasons:
-        raise UnsupportedRuleError(
-            "The JVM engine can't match these yet:\n  " + "\n  ".join(reasons)
-        )
+        raise UnsupportedRuleError("The JVM engine can't match these:\n  " + "\n  ".join(reasons))
 
 
 def problem_name(problem: CompiledProblem, name: str) -> str:
