@@ -40,7 +40,8 @@ depends on the identity of that class:
   ``ClassOptions(references=...)``;
 - :class:`RefineryNode` subclasses are entities by object identity, for
   hand-built graphs, with :func:`Contains`, :func:`Container` and
-  :class:`Ref` markers for containment, opposites, and multiplicities.
+  :func:`Ref` as field defaults for containment, opposites, and
+  multiplicities.
 
 :class:`ClassOptions` configure classes from outside, so generated or
 third-party models can be used unchanged; :class:`Predicate` provides

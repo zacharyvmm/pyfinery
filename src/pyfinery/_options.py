@@ -12,7 +12,8 @@ from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, ClassVar, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic.fields import FieldInfo
 
 ReferenceKind = Literal["refers", "contains", "container"]
 # The values of Refinery's four-valued logic. Facts are asserted, and matches
@@ -21,32 +22,71 @@ LogicValue = Literal["true", "false", "unknown", "error"]
 
 
 @dataclass(frozen=True, slots=True)
-class Ref:
-    """Refinery-specific options of a reference field, used with ``Annotated``.
-
-    :param opposite: Name of the opposite reference in the target class.
-    :param kind: ``"contains"`` for containment, ``"container"`` for the
-        opposite of a containment reference.
-    :param multiplicity: Overrides the multiplicity inferred from the type,
-        e.g. ``"1..*"``, ``"2"`` or ``(1, None)``.
-    """
+class RefOptions:
+    """The Refinery-specific options of a reference field, as :func:`Ref`,
+    :func:`Contains` and :func:`Container` record them in the field's metadata."""
 
     opposite: str | None = None
     kind: ReferenceKind = "refers"
     multiplicity: str | tuple[int, int | None] | None = None
 
 
-def Contains(  # noqa: N802 - reads like a type annotation
+def Ref(  # noqa: N802 - reads like a type annotation
     opposite: str | None = None,
     multiplicity: str | tuple[int, int | None] | None = None,
-) -> Ref:
-    """Marks a containment reference (``contains``)."""
-    return Ref(opposite=opposite, kind="contains", multiplicity=multiplicity)
+    **field: Any,
+) -> Any:
+    """A reference field with Refinery-specific options, as the field's default::
+
+        class Link(RefineryNode):
+            backups: list[FSObject] = Ref(multiplicity="0..3")
+
+    Like Pydantic's ``Field``, whose arguments (``description``, ``alias``,
+    ``default_factory``...) it also takes. In a :class:`RefineryNode`, a
+    collection field left out when creating an object is empty, and an
+    optional one ``None``; other fields are required unless given a default.
+    It also works inside ``Annotated``: ``Annotated[list[FSObject], Ref()]``.
+
+    :param opposite: Name of the opposite reference in the target class.
+    :param multiplicity: Overrides the multiplicity inferred from the type,
+        e.g. ``"1..*"``, ``"2"`` or ``(1, None)``.
+    """
+    return _field(RefOptions(opposite, "refers", multiplicity), field)
 
 
-def Container(opposite: str) -> Ref:  # noqa: N802
-    """Marks the container side of a containment reference (``container``)."""
-    return Ref(opposite=opposite, kind="container")
+def Contains(  # noqa: N802
+    opposite: str | None = None,
+    multiplicity: str | tuple[int, int | None] | None = None,
+    **field: Any,
+) -> Any:
+    """A containment reference (``contains``): the targets live inside this object.
+
+    Takes the arguments of :func:`Ref`::
+
+        class Dir(RefineryNode):
+            contents: list[FSObject] = Contains(multiplicity="0..3")
+    """
+    return _field(RefOptions(opposite, "contains", multiplicity), field)
+
+
+def Container(opposite: str | None = None, **field: Any) -> Any:  # noqa: N802
+    """The container side of a containment reference (``container``): the object this
+    one lives in::
+
+        class FSObject(RefineryNode):
+            parent: Dir | None = Container()
+
+    ``opposite`` names the containment reference of the target class it is the
+    opposite of; it can be left out when exactly one fits. Takes Pydantic's
+    ``Field`` arguments too.
+    """
+    return _field(RefOptions(opposite, "container"), field)
+
+
+def _field(options: RefOptions, field: dict[str, Any]) -> FieldInfo:
+    info: FieldInfo = Field(**field)
+    info.metadata.append(options)
+    return info
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +184,20 @@ class RefineryNode(BaseModel):
     __abstract__: ClassVar[bool] = False
     __node_id__: ClassVar[str | None] = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _empty_references(cls, data: Any) -> Any:
+        """Fill in the reference fields declared with a marker and no default: a collection
+        is empty, an optional field ``None``."""
+        if not isinstance(data, dict):
+            return data
+        missing = {
+            cls.model_fields[name].alias or name: empty()
+            for name, empty in _empty_defaults(cls).items()
+            if name not in data and cls.model_fields[name].alias not in data
+        }
+        return {**data, **missing} if missing else data
+
     def model_post_init(self, context: Any, /) -> None:
         if type(self).__dict__.get("__abstract__", False):
             raise TypeError(f"Cannot instantiate abstract Refinery class {type(self).__name__}")
@@ -177,3 +231,22 @@ def _short_repr(value: Any) -> Any:
     if isinstance(value, set | frozenset):
         return [_short_repr(v) for v in value]
     return value
+
+
+_EMPTY: dict[type, dict[str, Callable[[], Any]]] = {}
+
+
+def _empty_defaults(cls: type[BaseModel]) -> dict[str, Callable[[], Any]]:
+    """How to make the value of each of ``cls``'s required reference fields declared with a
+    marker when left out: an empty collection, or ``None`` if optional."""
+    if cls not in _EMPTY:
+        from ._schema import empty_factory  # _schema imports this module
+
+        found = {}
+        for name, info in cls.model_fields.items():
+            if info.is_required() and any(isinstance(m, RefOptions) for m in info.metadata):
+                factory = empty_factory(info)
+                if factory is not None:
+                    found[name] = factory
+        _EMPTY[cls] = found
+    return _EMPTY[cls]

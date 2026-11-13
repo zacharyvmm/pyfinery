@@ -7,9 +7,6 @@
 from __future__ import annotations
 
 import enum
-from typing import Annotated
-
-from pydantic import Field
 
 from pyfinery import Container, Contains, Metamodel, Ref, RefineryNode
 
@@ -20,20 +17,18 @@ class Permission(enum.Enum):
 
 
 class Filesystem(RefineryNode):
-    root: Annotated[Dir, Contains()]
+    root: Dir = Contains()
 
 
 class FSObject(RefineryNode):
     __abstract__ = True
-    parent: Annotated[Dir | None, Container(opposite="contents")] = None
+    parent: Dir | None = Container()
 
 
 class Dir(FSObject):
     __node_id__ = "name"
     name: str
-    contents: Annotated[list[FSObject], Contains(opposite="parent", multiplicity="0..3")] = Field(
-        default_factory=list
-    )
+    contents: list[FSObject] = Contains(multiplicity="0..3")
 
 
 class File(FSObject):
@@ -46,7 +41,7 @@ class File(FSObject):
 
 class Link(FSObject):
     target: FSObject
-    backups: Annotated[list[FSObject], Ref()] = Field(default_factory=list, min_length=0)
+    backups: list[FSObject] = Ref(min_length=0)
 
 
 RULES = ["error pred emptyDir(Dir d) <-> !contents(d, _)."]

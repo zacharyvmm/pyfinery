@@ -249,16 +249,16 @@ When you build the graph in Python yourself, subclass `RefineryNode`. You get id
 from pyfinery import Container, Contains, Metamodel, RefineryNode
 
 class Filesystem(RefineryNode):
-    root: Annotated[Dir, Contains()]                      # contains Dir[1] root
+    root: Dir = Contains()                                 # contains Dir[1] root
 
 class FSObject(RefineryNode):
     __abstract__ = True
-    parent: Annotated[Dir | None, Container(opposite="contents")] = None
+    parent: Dir | None = Container()                       # the opposite of Dir.contents
 
 class Dir(FSObject):
     __node_id__ = "name"                                   # name nodes after this field
     name: str
-    contents: Annotated[list[FSObject], Contains(opposite="parent", multiplicity="0..3")] = []
+    contents: list[FSObject] = Contains(multiplicity="0..3")
 
 class File(FSObject):
     size: int = 0
@@ -270,7 +270,9 @@ report = metamodel.validate([Filesystem(root=home), Dir(name="orphan")], refiner
 # rule: emptyDir(orphan)
 ```
 
-- **Markers:** `Contains(opposite=..., multiplicity=...)`, `Container(opposite=...)` and `Ref(opposite=..., multiplicity=...)` go in `Annotated[...]`. `Ref(multiplicity=...)` is only checked by Refinery, unlike Pydantic's `min_length`, which is handy when you build graphs step by step.
+- **Markers:** `Contains(opposite=..., multiplicity=...)`, `Container(opposite=...)` and `Ref(opposite=..., multiplicity=...)` are the field's default, as Pydantic's `Field` is, and take `Field`'s arguments too (`description=`, `alias=`, ...). `Ref(multiplicity=...)` is only checked by Refinery, unlike Pydantic's `min_length`, which is handy when you build graphs step by step. They also work inside `Annotated[...]`, e.g. `Annotated[list[Dir], Contains()]`.
+- **Defaults:** a collection field with a marker is empty when left out, and an optional one is `None`; a single reference that isn't optional, like `root`, is required. (Type checkers don't know this: they treat every field with a marker as optional.)
+- **Container opposites:** `Container()` may leave out `opposite=` when exactly one containment reference of its target class holds objects of its class; that reference becomes its opposite too. Otherwise pyfinery raises `TypeError` asking for `opposite=`.
 - **Opposites:** you only need to set one side of an `opposite` pair. Refinery infers the other. `metamodel.link_opposites(objects)` fills in the missing sides on your Python objects too.
 
 ### Things to know
