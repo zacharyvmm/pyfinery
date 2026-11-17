@@ -8,11 +8,12 @@ predicates, and :class:`RefineryNode`.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal, get_args
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AliasChoices, AliasPath, BaseModel, ConfigDict, Field, model_validator
 from pydantic.fields import FieldInfo
 
 ReferenceKind = Literal["refers", "contains", "container"]
@@ -34,6 +35,8 @@ class RefOptions:
 def Ref(  # noqa: N802 - reads like a type annotation
     opposite: str | None = None,
     multiplicity: str | tuple[int, int | None] | None = None,
+    *,
+    kind: ReferenceKind = "refers",
     **field: Any,
 ) -> Any:
     """A reference field with Refinery-specific options, as the field's default::
@@ -50,8 +53,13 @@ def Ref(  # noqa: N802 - reads like a type annotation
     :param opposite: Name of the opposite reference in the target class.
     :param multiplicity: Overrides the multiplicity inferred from the type,
         e.g. ``"1..*"``, ``"2"`` or ``(1, None)``.
+    :param kind: ``"contains"`` for containment, ``"container"`` for the
+        opposite of a containment reference; :func:`Contains` and
+        :func:`Container` say the same.
     """
-    return _field(RefOptions(opposite, "refers", multiplicity), field)
+    if kind not in get_args(ReferenceKind):
+        raise ValueError(f"Ref(kind={kind!r}): kind is one of {', '.join(get_args(ReferenceKind))}")
+    return _field("Ref", RefOptions(opposite, kind, multiplicity), field)
 
 
 def Contains(  # noqa: N802
@@ -66,7 +74,7 @@ def Contains(  # noqa: N802
         class Dir(RefineryNode):
             contents: list[FSObject] = Contains(multiplicity="0..3")
     """
-    return _field(RefOptions(opposite, "contains", multiplicity), field)
+    return _field("Contains", RefOptions(opposite, "contains", multiplicity), field)
 
 
 def Container(opposite: str | None = None, **field: Any) -> Any:  # noqa: N802
@@ -80,10 +88,20 @@ def Container(opposite: str | None = None, **field: Any) -> Any:  # noqa: N802
     opposite of; it can be left out when exactly one fits. Takes Pydantic's
     ``Field`` arguments too.
     """
-    return _field(RefOptions(opposite, "container"), field)
+    return _field("Container", RefOptions(opposite, "container"), field)
 
 
-def _field(options: RefOptions, field: dict[str, Any]) -> FieldInfo:
+_FIELD_ARGUMENTS = frozenset(
+    name
+    for name, parameter in inspect.signature(Field).parameters.items()
+    if parameter.kind is not inspect.Parameter.VAR_KEYWORD
+)
+
+
+def _field(marker: str, options: RefOptions, field: dict[str, Any]) -> FieldInfo:
+    unknown = sorted(set(field) - _FIELD_ARGUMENTS)
+    if unknown:  # Pydantic would keep them as JSON schema extras, and they'd do nothing
+        raise TypeError(f"{marker}() got unexpected keyword arguments: {', '.join(unknown)}")
     info: FieldInfo = Field(**field)
     info.metadata.append(options)
     return info
@@ -192,9 +210,9 @@ class RefineryNode(BaseModel):
         if not isinstance(data, dict):
             return data
         missing = {
-            cls.model_fields[name].alias or name: empty()
-            for name, empty in _empty_defaults(cls).items()
-            if name not in data and cls.model_fields[name].alias not in data
+            default.path[0]: _nested(default.path[1:], default.empty())
+            for default in _empty_defaults(cls)
+            if not any(key in data for key in default.given_as)
         }
         return {**data, **missing} if missing else data
 
@@ -233,20 +251,66 @@ def _short_repr(value: Any) -> Any:
     return value
 
 
-_EMPTY: dict[type, dict[str, Callable[[], Any]]] = {}
+@dataclass(frozen=True, slots=True)
+class _EmptyDefault:
+    """The value of a required reference field declared with a marker, when left out."""
+
+    empty: Callable[[], Any]
+    """Makes an empty collection, or ``None`` for an optional field."""
+    given_as: tuple[str, ...]
+    """The input keys, any of which gives the field (the first item of an ``AliasPath``)."""
+    path: tuple[str | int, ...]
+    """Where to put the value in the input: a key, or an ``AliasPath``'s keys and indexes."""
 
 
-def _empty_defaults(cls: type[BaseModel]) -> dict[str, Callable[[], Any]]:
-    """How to make the value of each of ``cls``'s required reference fields declared with a
-    marker when left out: an empty collection, or ``None`` if optional."""
+_EMPTY: dict[type, list[_EmptyDefault]] = {}
+
+
+def _empty_defaults(cls: type[BaseModel]) -> list[_EmptyDefault]:
+    """The defaults of ``cls``'s required reference fields declared with a marker."""
     if cls not in _EMPTY:
         from ._schema import empty_factory  # _schema imports this module
 
-        found = {}
+        found = []
         for name, info in cls.model_fields.items():
             if info.is_required() and any(isinstance(m, RefOptions) for m in info.metadata):
                 factory = empty_factory(info)
                 if factory is not None:
-                    found[name] = factory
+                    found.append(_EmptyDefault(factory, *_input_keys(cls, name, info)))
         _EMPTY[cls] = found
     return _EMPTY[cls]
+
+
+def _input_keys(
+    cls: type[BaseModel], name: str, info: FieldInfo
+) -> tuple[tuple[str, ...], tuple[str | int, ...]]:
+    """The keys Pydantic reads field ``name`` from (``validation_alias``, else ``alias``, and
+    the name if the model validates by name), and the path of the first."""
+    alias = info.validation_alias if info.validation_alias is not None else info.alias
+    config = cls.model_config
+    by_alias = alias is not None and config.get("validate_by_alias", True) is not False
+    by_name = (
+        alias is None
+        or not by_alias
+        or bool(config.get("validate_by_name") or config.get("populate_by_name"))
+    )
+    choices = alias.choices if isinstance(alias, AliasChoices) else [alias]
+    paths: list[tuple[str | int, ...]] = []
+    for choice in choices if by_alias else []:
+        if isinstance(choice, AliasPath):
+            paths.append(tuple(choice.path))
+        elif isinstance(choice, str):
+            paths.append((choice,))
+    if by_name:
+        paths.append((name,))
+    return tuple(str(path[0]) for path in paths), paths[0]
+
+
+def _nested(path: Sequence[str | int], value: Any) -> Any:
+    """``value`` at ``path`` in new dicts (for keys) and lists (for indexes)."""
+    if not path:
+        return value
+    step, inner = path[0], _nested(path[1:], value)
+    if isinstance(step, int):
+        return [None] * step + [inner]
+    return {step: inner}

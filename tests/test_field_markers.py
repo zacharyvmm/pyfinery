@@ -6,7 +6,7 @@ from __future__ import annotations
 from typing import Annotated
 
 import pytest
-from pydantic import Field, ValidationError
+from pydantic import AliasChoices, AliasPath, ConfigDict, Field, ValidationError
 
 from pyfinery import Container, Contains, Metamodel, Ref, RefineryNode
 
@@ -195,3 +195,52 @@ class Car(RefineryNode):
 def test_opposites_that_cant_be_inferred(root, message):
     with pytest.raises(TypeError, match=message):
         Metamodel(root)
+
+
+# -- Ref(kind=...) and Pydantic's aliases ------------------------------------------------------
+
+
+class Holder(RefineryNode):
+    kept: Annotated[list[Held], Ref(kind="contains", opposite="holder")]
+    loose: list[Held] = Ref(kind="contains")
+
+
+class Held(RefineryNode):
+    holder: Annotated[Holder | None, Ref(kind="container", opposite="kept")] = None
+
+
+def test_ref_kind_declares_containment():
+    features = _features(Metamodel(Holder))
+    assert ("Holder", "kept", "contains", "holder", 0, None) in features
+    assert ("Holder", "loose", "contains", None, 0, None) in features
+    assert ("Held", "holder", "container", "kept", 0, 1) in features
+    with pytest.raises(ValueError, match="kind is one of refers, contains, container"):
+        Ref(kind="owns")
+
+
+@pytest.mark.parametrize("marker", [Ref, Contains, Container])
+def test_unknown_arguments_are_refused(marker):
+    # Pydantic's Field would keep them as JSON schema extras, and they'd change nothing.
+    with pytest.raises(TypeError, match=r"got unexpected keyword arguments: knd"):
+        marker(knd="contains")
+
+
+def test_fields_left_out_are_empty_under_any_alias():
+    class Hub(RefineryNode):
+        either: list[Hub] = Ref(validation_alias=AliasChoices("either", "or_this"))
+        deep: list[Hub] = Ref(validation_alias=AliasPath("outer", 1, "inner"))
+        named: list[Hub] = Ref(alias="called")
+
+    class ByName(RefineryNode):
+        model_config = ConfigDict(validate_by_name=True)
+        named: list[ByName] = Ref(alias="called")
+
+    other = Hub()
+    hub = Hub()
+    assert (hub.either, hub.deep, hub.named) == ([], [], [])
+    assert Hub(or_this=[other]).either == [other]
+    assert Hub(outer=[None, {"inner": [other]}]).deep == [other]
+    assert Hub(called=[other]).named == [other]
+    by_name = ByName()
+    assert ByName().named == [] and ByName(named=[by_name]).named == [by_name]
+    assert ByName(called=[by_name]).named == [by_name]
