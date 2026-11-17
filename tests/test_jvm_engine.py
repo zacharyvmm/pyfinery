@@ -492,13 +492,27 @@ def test_what_a_plain_model_cant_hold_is_refused():
         out["session"] = raises(UnsupportedRuleError, lambda: Session(mm, objects, flag))
         out["node"] = raises(UnsupportedRuleError, lambda: violations(
             objects, ["atom extra.", "error lonely(Dir d) <-> !contents(d, _)."]))
+        # Declarations that bring nodes, and rules that add facts: only predicates are taken.
+        out["enum"] = raises(UnsupportedRuleError, lambda: violations(
+            objects, ["enum Color { red, green }", "error bad(Color c) <-> Color(c)."]))
+        out["class"] = raises(UnsupportedRuleError, lambda: violations(
+            objects, ["class Extra.", "error bad(Extra e) <-> Extra(e)."]))
+        out["propagation"] = raises(UnsupportedRuleError, lambda: violations(objects, [
+            "pred flag().", "propagation rule set() ==> flag().", "error bad() <-> flag()."]))
+        # The metamodel's own declarations, and predicates of every kind, are fine.
+        out["predicates"] = violations(objects, [
+            "pred big(Dir d) <-> contents(d, _).", "shadow pred any(Dir d) <-> big(d).",
+            "error pred huge(Dir d) <-> big(d), !Dir(d)."])
         print(json.dumps(out))
         """
     )
-    for case in ("assertion", "query", "session"):
+    for case in ("assertion", "default", "query", "session"):
         assert "an assertion about flag in the rules" in out[case], case
-    assert "an assertion about flag in the rules" in out["default"]
-    assert "nodes declared in the rules (extra)" in out["node"]
+    assert "nodes (extra) in the rules" in out["node"]
+    assert "an enum Color in the rules" in out["enum"]
+    assert "a class Extra in the rules" in out["class"]
+    assert "RuleDefinition set in the rules" in out["propagation"]
+    assert out["predicates"] == ["rule: emptyDir(home)"]
 
 
 def test_one_child_twice_in_one_parent():
@@ -514,13 +528,32 @@ def test_one_child_twice_in_one_parent():
             first: list[Thing] = Contains()
             second: list[Thing] = Contains()
 
+        class Three(RefineryNode):
+            p: list[Thing] = Contains()
+            q: list[Thing] = Contains()
+            r: list[Thing] = Contains()
+
+        class Tree(RefineryNode):
+            first: list["Tree"] = Contains()
+            second: list["Tree"] = Contains()
+
         x = Thing()
         both = Owner(first=[x], second=[x])
         one = Owner(first=[Thing()], second=[Thing()])
         owners = Metamodel(Owner)
+        t = Thing()
+        a, b, c = Tree(), Tree(), Tree()
+        a.first, a.second, b.first = [b, c], [c], [a]  # c twice in a; a and b on a cycle
+
+        def found(metamodel, objects):
+            return [str(v) for v in metamodel.validate(objects, engine).violations]
+
         out = {
-            "both": [str(v) for v in owners.validate([both], engine).violations],
-            "one": [str(v) for v in owners.validate([one], engine).violations],
+            "both": found(owners, [both]),
+            "one": found(owners, [one]),
+            "three_empty": found(Metamodel(Three), [Three()]),
+            "three": found(Metamodel(Three), [Three(p=[t], r=[t])]),
+            "merged": found(Metamodel(Tree), [a]),
         }
         print(json.dumps(out))
         """
@@ -531,6 +564,22 @@ def test_one_child_twice_in_one_parent():
         "contradiction: Owner::second(owner_1, thing_1)",
     ]
     assert out["one"] == []
+    assert out["three_empty"] == []
+    assert out["three"] == [
+        "containment: builtin::invalidContainer(thing_1)",
+        "contradiction: Three::p(three_1, thing_1)",
+        "contradiction: Three::r(three_1, thing_1)",
+    ]
+    # Both checks of Tree::first (twice, and on a cycle) are listed as one, in order.
+    assert out["merged"] == [
+        "containment: builtin::invalidContainer(tree_1)",
+        "containment: builtin::invalidContainer(tree_2)",
+        "containment: builtin::invalidContainer(tree_3)",
+        "contradiction: Tree::first(tree_1, tree_2)",
+        "contradiction: Tree::first(tree_1, tree_3)",
+        "contradiction: Tree::first(tree_2, tree_1)",
+        "contradiction: Tree::second(tree_1, tree_3)",
+    ]
 
 
 def test_a_query_evaluates_each_predicate_once():

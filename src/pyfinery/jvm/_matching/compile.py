@@ -36,9 +36,11 @@ and those that call them, unsupported: they are listed in
 :attr:`CompiledProblem.unsupported` and not matched.
 
 The model holds the graph's facts and those of :class:`~pyfinery.Predicate`
-objects only. Assertions in the rules (``flag().``, ``default !link(*, *).``)
-and nodes they declare (``atom a.``) are not held, so they are listed in
-:attr:`CompiledProblem.refused`, rather than left out without a word.
+objects only. So the rules may define predicates (``pred``, ``error``,
+``shadow``) and nothing else: anything that would add facts or nodes, such as
+an assertion (``flag().``), a node, class or enum declaration, or a
+propagation rule, is listed in :attr:`CompiledProblem.refused`, rather than
+left out without a word.
 """
 
 from __future__ import annotations
@@ -52,7 +54,8 @@ from ..._mapping import AttributeType, Catalogue, attribute_type
 from ..._options import Predicate
 from ..._render import _declare_predicate, render_metamodel
 from ..._results import ViolationKind
-from ..._schema import Schema
+from ..._schema import Schema, class_name
+from ..._syntax import quote_id
 from ...errors import InvalidProblemError
 from .classes import java
 from .structure import CONTAINS, INVALID_CONTAINER, Check, structure
@@ -99,8 +102,8 @@ class CompiledProblem:
             problem = injector.getInstance(j.ProblemLoader).loadString(text)
         except j.InvalidProblemException as error:
             raise InvalidProblemError(str(error.getMessage())) from None
-        self.refused = _refused_statements(problem)
-        """What the rules state that a plain model can't hold: assertions and node declarations."""
+        self.refused = _refused_statements(schema, problem)
+        """Why the rules can't be matched on a plain model: what they state besides predicates."""
         initializer = injector.getInstance(j.ModelInitializer)
         initializer.readProblem(problem)
         trace = initializer.getProblemTrace()
@@ -402,19 +405,30 @@ class CompiledProblem:
         return inner.aggregateBy(result, aggregator, j.ArrayList([*arguments, result]))
 
 
-def _refused_statements(problem: Any) -> list[str]:
-    """Why the statements of ``problem`` that a plain model can't hold are refused. pyfinery
-    renders neither assertions nor node declarations, so these come from the rules."""
+def _refused_statements(schema: Schema, problem: Any) -> list[str]:
+    """Why the statements of ``problem`` that a plain model can't hold are refused: all but
+    predicate definitions and the declarations pyfinery renders for ``schema``."""
     j = java()
+    rendered = {class_name(t) for t in (*schema.classes, *schema.unions, *schema.enums)}
     reasons = []
     for statement in problem.getStatements():
-        if isinstance(statement, j.AbstractAssertion):
+        if isinstance(statement, j.PredicateDefinition):
+            continue
+        if isinstance(statement, (j.ClassDeclaration, j.EnumDeclaration)):
+            name = quote_id(str(statement.getName()))
+            if name in rendered:
+                continue
+            what = f"{'a class' if isinstance(statement, j.ClassDeclaration) else 'an enum'} {name}"
+        elif isinstance(statement, j.AbstractAssertion):
             relation = statement.getRelation()
-            name = str(relation.getName()) if relation is not None else "?"
-            reasons.append(f"an assertion about {name} in the rules: give facts as Predicates")
+            what = f"an assertion about {relation.getName() if relation is not None else '?'}"
         elif isinstance(statement, j.NodeDeclaration):
-            names = ", ".join(str(node.getName()) for node in statement.getNodes())
-            reasons.append(f"nodes declared in the rules ({names}): the model holds the graph's")
+            what = f"nodes ({', '.join(str(node.getName()) for node in statement.getNodes())})"
+        else:
+            what = f"a {statement.eClass().getName()}"  # e.g. a RuleDefinition: a propagation rule
+            if isinstance(statement, j.NamedElement) and statement.getName() is not None:
+                what += f" {statement.getName()}"
+        reasons.append(f"{what} in the rules: only predicates; give facts as Predicate objects")
     return reasons
 
 

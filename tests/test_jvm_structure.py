@@ -102,10 +102,10 @@ def test_containment_checks():
     # The same container twice, through both containment references: one link in CONTAINS.
     assert "pyfinery_twice0(_, y) ; pyfinery_twice1(_, y)" in invalid
     assert lines["pyfinery_twice0"] == (
-        "pred pyfinery_twice0(node x, node y) <-> Box::items(x, y), (Box::extra(x, y))."
+        "pred pyfinery_twice0(node x, node y) <-> Box::items(x, y), Box::extra(x, y)."
     )
     assert lines["pyfinery_twice1"] == (
-        "pred pyfinery_twice1(node x, node y) <-> Box::extra(x, y), (Box::items(x, y))."
+        "pred pyfinery_twice1(node x, node y) <-> Box::extra(x, y), Box::items(x, y)."
     )
 
     by_kind: dict[str, list[Check]] = {}

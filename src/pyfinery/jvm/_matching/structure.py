@@ -61,11 +61,13 @@ def structure(schema: Schema, catalogue: Catalogue) -> Structure:
         if len(containment) > 1:
             for i, feature in enumerate(containment):
                 name = catalogue.name(feature)
-                others = " ; ".join(
-                    f"{catalogue.name(other)}(x, y)" for other in containment if other != feature
+                clauses = " ; ".join(
+                    f"{name}(x, y), {catalogue.name(other)}(x, y)"
+                    for other in containment
+                    if other != feature
                 )
                 predicate = f"pyfinery_twice{i}"
-                lines.append(f"pred {predicate}(node x, node y) <-> {name}(x, y), ({others}).")
+                lines.append(f"pred {predicate}(node x, node y) <-> {clauses}.")
                 found.checks.append(Check(predicate, "contradiction", name))
                 twice.append(f"{predicate}(_, y)")
         # As Refinery's builtin::invalidContainer: no container, several, or a cycle.

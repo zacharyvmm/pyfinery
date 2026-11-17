@@ -9,7 +9,7 @@ from typing import Any
 from ..._instances import Graph, Node
 from ..._mapping import NodeIds, facts
 from ..._options import Predicate
-from ..._results import Match, Violation
+from ..._results import Match, Violation, ViolationKind
 from ..._syntax import quote_id
 from .classes import java
 from .compile import CONTAINED, CONTAINER, NODE, CompiledProblem
@@ -148,14 +148,19 @@ class PlainModel:
 
     def violations(self) -> list[Violation]:
         """The tuples of the error predicates and structural checks, as a server lists them."""
-        found: dict[tuple[str, str, tuple[int, ...]], Violation] = {}
+        # Checks that report the same relation (a link on a cycle, a link twice) are listed as
+        # one: each tuple once, in order.
+        reported: dict[tuple[ViolationKind, str], set[tuple[int, ...]]] = {}
         for error in self.problem.errors:
-            for key in self.tuples(error.predicate):
-                if (error.kind, error.constraint, key) not in found:  # e.g. a link on a cycle twice
-                    names, nodes = self.label(key)
-                    violation = Violation(error.kind, error.constraint, names, nodes)
-                    found[(error.kind, error.constraint, key)] = violation
-        return list(found.values())
+            reported.setdefault((error.kind, error.constraint), set()).update(
+                self.tuples(error.predicate)
+            )
+        found = []
+        for (kind, constraint), keys in reported.items():
+            for key in sorted(keys):
+                names, nodes = self.label(key)
+                found.append(Violation(kind, constraint, names, nodes))
+        return found
 
     def matches(self, predicate: str, reported: str) -> list[Match]:
         """The tuples of ``predicate`` as :class:`Match` es named ``reported``."""
