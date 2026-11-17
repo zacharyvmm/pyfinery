@@ -6,7 +6,7 @@ from __future__ import annotations
 from typing import Annotated
 
 import pytest
-from pydantic import AliasChoices, AliasPath, ConfigDict, Field, ValidationError
+from pydantic import AliasChoices, AliasPath, ConfigDict, Field, ValidationError, field_validator
 
 from pyfinery import Container, Contains, Metamodel, Ref, RefineryNode
 
@@ -218,6 +218,7 @@ def test_ref_kind_declares_containment():
         Ref(kind="owns")
 
 
+@pytest.mark.filterwarnings("ignore:Using extra keyword arguments on `Field`")
 @pytest.mark.parametrize("marker", [Ref, Contains, Container])
 def test_unknown_arguments_are_refused(marker):
     # Pydantic's Field would keep them as JSON schema extras, and they'd change nothing.
@@ -292,3 +293,26 @@ def test_left_out_fields_have_a_default():
     with pytest.raises(ValidationError, match="root"):
         Filesystem()
     assert Filesystem.model_json_schema()["required"] == ["root"]
+
+
+class Checked(RefineryNode):
+    some: list[Checked] = Ref(min_length=1)
+    seen: list[Checked] = Ref()
+
+    @field_validator("seen")
+    @classmethod
+    def _mark(cls, value: list[Checked]) -> list[Checked]:
+        if not value:
+            raise ValueError("seen is empty")
+        return value
+
+
+def test_left_out_values_are_validated():
+    # As a given empty value is: the bound and the field validator apply.
+    with pytest.raises(ValidationError) as left_out:
+        Checked()
+    errors = {(e["loc"], e["type"]) for e in left_out.value.errors()}
+    assert errors == {(("some",), "too_short"), (("seen",), "value_error")}
+    with pytest.raises(ValidationError) as given:
+        Checked(some=[], seen=[])
+    assert {(e["loc"], e["type"]) for e in given.value.errors()} == errors

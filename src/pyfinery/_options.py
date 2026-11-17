@@ -9,7 +9,6 @@ predicates, and :class:`RefineryNode`.
 from __future__ import annotations
 
 import inspect
-import warnings
 from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, ClassVar, Literal, get_args
@@ -100,25 +99,23 @@ _FIELD_PARAMETERS = frozenset(
 
 
 def _field(marker: str, options: RefOptions, field: dict[str, Any]) -> FieldInfo:
-    unknown = _unknown_arguments(field)
-    if unknown:
-        raise TypeError(f"{marker}() got unexpected keyword arguments: {', '.join(unknown)}")
-    info: FieldInfo = Field(**field)
+    """Pydantic's ``Field(**field)``, with ``options`` in its metadata.
+
+    ``Field`` keeps the arguments it doesn't take as JSON schema extras, where they change
+    nothing: those are refused. Its deprecated arguments, such as ``min_items``, still work.
+    """
+    given = field.get("json_schema_extra")
+    beyond = [name for name in field if name not in _FIELD_PARAMETERS]
+    # Without json_schema_extra, Field puts what it doesn't take there, and only that.
+    probe = {name: value for name, value in field.items() if name != "json_schema_extra"}
+    info: FieldInfo = Field(**probe)
+    if beyond and isinstance(info.json_schema_extra, dict) and info.json_schema_extra:
+        unknown = ", ".join(sorted(info.json_schema_extra))
+        raise TypeError(f"{marker}() got unexpected keyword arguments: {unknown}")
+    if given is not None:
+        info = Field(**field)
     info.metadata.append(options)
     return info
-
-
-def _unknown_arguments(field: dict[str, Any]) -> list[str]:
-    """The arguments of ``field`` that Pydantic's ``Field`` would only keep as JSON schema
-    extras, which change nothing. Pydantic says which: its deprecated arguments, such as
-    ``min_items``, still take effect, and its removed ones raise."""
-    beyond = {name: value for name, value in field.items() if name not in _FIELD_PARAMETERS}
-    if not beyond:
-        return []
-    with warnings.catch_warnings():  # Field warns again when the marker calls it
-        warnings.simplefilter("ignore")
-        kept = Field(**beyond).json_schema_extra  # what it doesn't recognize, as extras
-    return sorted(kept) if isinstance(kept, dict) else []
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,8 +232,10 @@ class RefineryNode(BaseModel):
         for info in marked:
             factory = empty_factory(info)
             if factory is not None:
+                # Validated as a given value is: constraints and field validators apply.
                 info.default_factory = factory
-                info._attributes_set["default_factory"] = factory
+                info.validate_default = True
+                info._attributes_set.update(default_factory=factory, validate_default=True)
                 changed = True
         if changed:  # inherited fields have their default already: once per declaring class
             cls.model_rebuild(force=True)
