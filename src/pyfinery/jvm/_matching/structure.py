@@ -90,6 +90,15 @@ def structure(schema: Schema, catalogue: Catalogue) -> Structure:
             predicate = f"pyfinery_cycleOpposite{i}"
             lines.append(f"pred {predicate}(node x, node y) <-> {name}(x, y), {CONTAINS}+(x, y).")
             found.checks.append(Check(predicate, "contradiction", name))
+            # The opposite of a link held twice contradicts it too.
+            other = catalogue.opposite(feature)
+            if twice and other in containment:
+                held_twice = f"pyfinery_twice{containment.index(other)}"
+                predicate = f"pyfinery_twiceOpposite{i}"
+                lines.append(
+                    f"pred {predicate}(node x, node y) <-> {name}(x, y), {held_twice}(y, x)."
+                )
+                found.checks.append(Check(predicate, "contradiction", name))
 
     for i, feature in enumerate(features):
         if feature.is_attribute or feature.kind == "container":

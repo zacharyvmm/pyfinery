@@ -119,7 +119,12 @@ def test_containment_checks():
     assert twice == [
         Check("pyfinery_twice0", "contradiction", "Box::items"),
         Check("pyfinery_twice1", "contradiction", "Box::extra"),
+        # and its opposite, Item::box of Box::items
+        Check("pyfinery_twiceOpposite0", "contradiction", "Item::box"),
     ]
+    assert lines["pyfinery_twiceOpposite0"] == (
+        "pred pyfinery_twiceOpposite0(node x, node y) <-> Item::box(x, y), pyfinery_twice0(y, x)."
+    )
     # A contradiction on a cycle for each containment reference, and each container reference.
     contradictions = {c.constraint: c.predicate for c in by_kind["contradiction"] if c not in twice}
     assert set(contradictions) == {"Box::items", "Box::extra", "Item::box"}

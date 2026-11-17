@@ -519,7 +519,7 @@ def test_one_child_twice_in_one_parent():
     # Checked against a Refinery server: the same violations.
     out = run(
         """
-        from pyfinery import Contains, Metamodel, RefineryNode
+        from pyfinery import Container, Contains, Metamodel, RefineryNode
 
         class Thing(RefineryNode):
             pass
@@ -527,6 +527,13 @@ def test_one_child_twice_in_one_parent():
         class Owner(RefineryNode):
             first: list[Thing] = Contains()
             second: list[Thing] = Contains()
+
+        class Parent(RefineryNode):
+            first: list["Child"] = Contains(opposite="parent")
+            second: list["Child"] = Contains()
+
+        class Child(RefineryNode):
+            parent: Parent | None = Container(opposite="first")
 
         class Three(RefineryNode):
             p: list[Thing] = Contains()
@@ -555,6 +562,8 @@ def test_one_child_twice_in_one_parent():
             "three": found(Metamodel(Three), [Three(p=[t], r=[t])]),
             "merged": found(Metamodel(Tree), [a]),
         }
+        kid = Child()
+        out["opposite"] = found(Metamodel(Parent), [Parent(first=[kid], second=[kid])])
         print(json.dumps(out))
         """
     )
@@ -569,6 +578,14 @@ def test_one_child_twice_in_one_parent():
         "containment: builtin::invalidContainer(thing_1)",
         "contradiction: Three::p(three_1, thing_1)",
         "contradiction: Three::r(three_1, thing_1)",
+    ]
+    # The opposite of the link held twice is a contradiction too (the parent isn't set in
+    # Python: the opposite holds as Refinery reads it). Checked against a server.
+    assert out["opposite"] == [
+        "containment: builtin::invalidContainer(child_1)",
+        "contradiction: Child::parent(child_1, parent_1)",
+        "contradiction: Parent::first(parent_1, child_1)",
+        "contradiction: Parent::second(parent_1, child_1)",
     ]
     # Both checks of Tree::first (twice, and on a cycle) are listed as one, in order.
     assert out["merged"] == [
