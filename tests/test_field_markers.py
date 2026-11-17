@@ -221,26 +221,74 @@ def test_ref_kind_declares_containment():
 @pytest.mark.parametrize("marker", [Ref, Contains, Container])
 def test_unknown_arguments_are_refused(marker):
     # Pydantic's Field would keep them as JSON schema extras, and they'd change nothing.
-    with pytest.raises(TypeError, match=r"got unexpected keyword arguments: knd"):
+    with pytest.raises(TypeError, match=r"got unexpected keyword arguments: knd$"):
         marker(knd="contains")
+    with pytest.raises(TypeError, match=r"got unexpected keyword arguments: knd$"):
+        marker(knd="contains", json_schema_extra={"shown": True})
+
+
+def test_deprecated_field_arguments_still_work():
+    # Field still honours these (with a deprecation warning): they aren't refused.
+    with pytest.warns(DeprecationWarning):
+
+        class Bounded(RefineryNode):
+            items: list[Bounded] = Ref(min_items=1, max_items=2)
+
+    with pytest.raises(ValidationError, match="too_short|at least 1"):
+        Bounded(items=[])
+    assert _features(Metamodel(Bounded)) == {("Bounded", "items", "refers", None, 1, 2)}
+
+
+class Hub(RefineryNode):
+    either: list[Hub] = Ref(validation_alias=AliasChoices("either", "or_this"))
+    deep: list[Hub] = Ref(validation_alias=AliasPath("outer", 1, "inner"))
+    behind: list[Hub] = Ref(validation_alias=AliasPath("outer", -2, "inner"))
+    named: list[Hub] = Ref(alias="called")
+    # Two fields whose aliases share their first key.
+    a: list[Hub] = Ref(validation_alias=AliasChoices(AliasPath("shared", "a"), "a"))
+    b: list[Hub] = Ref(validation_alias=AliasChoices(AliasPath("shared", "b"), "b"))
+    one: Hub | None = Ref(validation_alias=AliasChoices("one", "single"))
+
+
+class ByName(RefineryNode):
+    model_config = ConfigDict(validate_by_name=True)
+    named: list[ByName] = Ref(alias="called")
+
+
+class NotByAlias(RefineryNode):
+    model_config = ConfigDict(validate_by_alias=False)
+    named: list[NotByAlias] = Ref(alias="called")
 
 
 def test_fields_left_out_are_empty_under_any_alias():
-    class Hub(RefineryNode):
-        either: list[Hub] = Ref(validation_alias=AliasChoices("either", "or_this"))
-        deep: list[Hub] = Ref(validation_alias=AliasPath("outer", 1, "inner"))
-        named: list[Hub] = Ref(alias="called")
-
-    class ByName(RefineryNode):
-        model_config = ConfigDict(validate_by_name=True)
-        named: list[ByName] = Ref(alias="called")
-
     other = Hub()
     hub = Hub()
-    assert (hub.either, hub.deep, hub.named) == ([], [], [])
+    fields = ("either", "deep", "behind", "named", "a", "b")
+    assert all(getattr(hub, name) == [] for name in fields) and hub.one is None
     assert Hub(or_this=[other]).either == [other]
+    assert Hub(outer=[]).deep == []  # the path isn't complete: left out
     assert Hub(outer=[None, {"inner": [other]}]).deep == [other]
     assert Hub(called=[other]).named == [other]
+    assert Hub(shared={"b": [other]}).a == []
+    assert Hub(single=other).one is other
+    assert Hub.model_validate_json("{}").a == []
     by_name = ByName()
     assert ByName().named == [] and ByName(named=[by_name]).named == [by_name]
     assert ByName(called=[by_name]).named == [by_name]
+    # Pydantic's per-call settings decide which keys are read.
+    assert NotByAlias.model_validate({}, by_alias=True, by_name=False).named == []
+    assert NotByAlias.model_validate_json("{}", by_alias=True, by_name=False).named == []
+
+
+def test_left_out_fields_have_a_default():
+    # A Pydantic default: model_construct fills it, a subclass inherits it, and a single
+    # reference that isn't optional stays required.
+    class Child(Hub):
+        more: list[Hub] = Contains()
+
+    assert Child().either == [] and Child().more == []
+    assert Hub.model_construct().a == []
+    assert Hub.model_fields["a"].default_factory is list
+    with pytest.raises(ValidationError, match="root"):
+        Filesystem()
+    assert Filesystem.model_json_schema()["required"] == ["root"]

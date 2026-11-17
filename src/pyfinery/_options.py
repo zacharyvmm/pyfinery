@@ -9,11 +9,12 @@ predicates, and :class:`RefineryNode`.
 from __future__ import annotations
 
 import inspect
+import warnings
 from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, ClassVar, Literal, get_args
 
-from pydantic import AliasChoices, AliasPath, BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic.fields import FieldInfo
 
 ReferenceKind = Literal["refers", "contains", "container"]
@@ -91,7 +92,7 @@ def Container(opposite: str | None = None, **field: Any) -> Any:  # noqa: N802
     return _field("Container", RefOptions(opposite, "container"), field)
 
 
-_FIELD_ARGUMENTS = frozenset(
+_FIELD_PARAMETERS = frozenset(
     name
     for name, parameter in inspect.signature(Field).parameters.items()
     if parameter.kind is not inspect.Parameter.VAR_KEYWORD
@@ -99,12 +100,25 @@ _FIELD_ARGUMENTS = frozenset(
 
 
 def _field(marker: str, options: RefOptions, field: dict[str, Any]) -> FieldInfo:
-    unknown = sorted(set(field) - _FIELD_ARGUMENTS)
-    if unknown:  # Pydantic would keep them as JSON schema extras, and they'd do nothing
+    unknown = _unknown_arguments(field)
+    if unknown:
         raise TypeError(f"{marker}() got unexpected keyword arguments: {', '.join(unknown)}")
     info: FieldInfo = Field(**field)
     info.metadata.append(options)
     return info
+
+
+def _unknown_arguments(field: dict[str, Any]) -> list[str]:
+    """The arguments of ``field`` that Pydantic's ``Field`` would only keep as JSON schema
+    extras, which change nothing. Pydantic says which: its deprecated arguments, such as
+    ``min_items``, still take effect, and its removed ones raise."""
+    beyond = {name: value for name, value in field.items() if name not in _FIELD_PARAMETERS}
+    if not beyond:
+        return []
+    with warnings.catch_warnings():  # Field warns again when the marker calls it
+        warnings.simplefilter("ignore")
+        kept = Field(**beyond).json_schema_extra  # what it doesn't recognize, as extras
+    return sorted(kept) if isinstance(kept, dict) else []
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,19 +216,30 @@ class RefineryNode(BaseModel):
     __abstract__: ClassVar[bool] = False
     __node_id__: ClassVar[str | None] = None
 
-    @model_validator(mode="before")
     @classmethod
-    def _empty_references(cls, data: Any) -> Any:
-        """Fill in the reference fields declared with a marker and no default: a collection
-        is empty, an optional field ``None``."""
-        if not isinstance(data, dict):
-            return data
-        missing = {
-            default.path[0]: _nested(default.path[1:], default.empty())
-            for default in _empty_defaults(cls)
-            if not any(key in data for key in default.given_as)
-        }
-        return {**data, **missing} if missing else data
+    def __pydantic_on_complete__(cls) -> None:
+        """Give the reference fields declared with a marker and no default one, once their
+        types are known: an empty collection, or ``None`` if optional. Pydantic then fills
+        them in itself, under whatever key or alias it reads them from."""
+        super().__pydantic_on_complete__()
+        marked = [
+            info
+            for info in cls.model_fields.values()
+            if info.is_required() and any(isinstance(m, RefOptions) for m in info.metadata)
+        ]
+        if not marked:
+            return
+        from ._schema import empty_factory  # _schema imports this module
+
+        changed = False
+        for info in marked:
+            factory = empty_factory(info)
+            if factory is not None:
+                info.default_factory = factory
+                info._attributes_set["default_factory"] = factory
+                changed = True
+        if changed:  # inherited fields have their default already: once per declaring class
+            cls.model_rebuild(force=True)
 
     def model_post_init(self, context: Any, /) -> None:
         if type(self).__dict__.get("__abstract__", False):
@@ -249,68 +274,3 @@ def _short_repr(value: Any) -> Any:
     if isinstance(value, set | frozenset):
         return [_short_repr(v) for v in value]
     return value
-
-
-@dataclass(frozen=True, slots=True)
-class _EmptyDefault:
-    """The value of a required reference field declared with a marker, when left out."""
-
-    empty: Callable[[], Any]
-    """Makes an empty collection, or ``None`` for an optional field."""
-    given_as: tuple[str, ...]
-    """The input keys, any of which gives the field (the first item of an ``AliasPath``)."""
-    path: tuple[str | int, ...]
-    """Where to put the value in the input: a key, or an ``AliasPath``'s keys and indexes."""
-
-
-_EMPTY: dict[type, list[_EmptyDefault]] = {}
-
-
-def _empty_defaults(cls: type[BaseModel]) -> list[_EmptyDefault]:
-    """The defaults of ``cls``'s required reference fields declared with a marker."""
-    if cls not in _EMPTY:
-        from ._schema import empty_factory  # _schema imports this module
-
-        found = []
-        for name, info in cls.model_fields.items():
-            if info.is_required() and any(isinstance(m, RefOptions) for m in info.metadata):
-                factory = empty_factory(info)
-                if factory is not None:
-                    found.append(_EmptyDefault(factory, *_input_keys(cls, name, info)))
-        _EMPTY[cls] = found
-    return _EMPTY[cls]
-
-
-def _input_keys(
-    cls: type[BaseModel], name: str, info: FieldInfo
-) -> tuple[tuple[str, ...], tuple[str | int, ...]]:
-    """The keys Pydantic reads field ``name`` from (``validation_alias``, else ``alias``, and
-    the name if the model validates by name), and the path of the first."""
-    alias = info.validation_alias if info.validation_alias is not None else info.alias
-    config = cls.model_config
-    by_alias = alias is not None and config.get("validate_by_alias", True) is not False
-    by_name = (
-        alias is None
-        or not by_alias
-        or bool(config.get("validate_by_name") or config.get("populate_by_name"))
-    )
-    choices = alias.choices if isinstance(alias, AliasChoices) else [alias]
-    paths: list[tuple[str | int, ...]] = []
-    for choice in choices if by_alias else []:
-        if isinstance(choice, AliasPath):
-            paths.append(tuple(choice.path))
-        elif isinstance(choice, str):
-            paths.append((choice,))
-    if by_name:
-        paths.append((name,))
-    return tuple(str(path[0]) for path in paths), paths[0]
-
-
-def _nested(path: Sequence[str | int], value: Any) -> Any:
-    """``value`` at ``path`` in new dicts (for keys) and lists (for indexes)."""
-    if not path:
-        return value
-    step, inner = path[0], _nested(path[1:], value)
-    if isinstance(step, int):
-        return [None] * step + [inner]
-    return {step: inner}
