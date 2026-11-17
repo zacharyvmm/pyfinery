@@ -27,6 +27,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
+from numpy.typing import NDArray
 
 from ..._instances import Graph, Value
 from ..._options import LogicValue, Predicate
@@ -102,10 +103,7 @@ class ModelBuilder:
         literals too), they have no value, an error."""
         self.attributes: dict[str, tuple[DataType, dict[NodeIndex, object]]] = {}
         """Each attribute's type and values (``None`` if unknown), by name."""
-        self.by_type: dict[type, list[NodeIndex]] = {}
-        """The graph's nodes, by the type of their object."""
-        for i, node in enumerate(graph.nodes):
-            self.by_type.setdefault(type(node.obj), []).append(i)
+        self.types = Membership(graph)
         self.named: dict[int, FeatureNames] = {}
         """What each feature's values are put under, by the feature's ``id()``."""
         exists = self.relation("builtin::exists", 1)
@@ -122,12 +120,7 @@ class ModelBuilder:
 
     def members(self, classes: type | tuple[type, ...]) -> list[NodeIndex]:
         """The graph's nodes whose object is an instance of ``classes``, in order."""
-        found: list[NodeIndex] = []
-        for nodes in self.by_type.values():
-            if isinstance(self.graph.nodes[nodes[0]].obj, classes):
-                found += nodes
-        found.sort()
-        return found
+        return self.types.of(classes)
 
     def enum(self, enum_type: EnumLike) -> None:
         """The enum's literals are atoms, and its class holds them."""
@@ -212,6 +205,33 @@ class ModelBuilder:
             for name, (data_type, values) in self.attributes.items()
         ]
         return PartialModel(self.nodes, relations, attributes)
+
+
+class Membership:
+    """Which of a graph's nodes are instances of classes, found from one ``isinstance``
+    per type of object, not per node."""
+
+    def __init__(self, graph: Graph) -> None:
+        self.graph = graph
+        self.by_type: dict[type, list[NodeIndex]] = {}
+        """The graph's nodes, by the type of their object."""
+        for i, node in enumerate(graph.nodes):
+            self.by_type.setdefault(type(node.obj), []).append(i)
+
+    def of(self, classes: type | tuple[type, ...]) -> list[NodeIndex]:
+        """The nodes whose object is an instance of ``classes``, in order."""
+        found: list[NodeIndex] = []
+        for nodes in self.by_type.values():
+            if isinstance(self.graph.nodes[nodes[0]].obj, classes):
+                found += nodes
+        found.sort()
+        return found
+
+    def mask(self, classes: type | tuple[type, ...]) -> NDArray[np.bool_]:
+        """Whether each node's object is an instance of ``classes``."""
+        found = np.zeros(len(self.graph.nodes), bool)
+        found[self.of(classes)] = True
+        return found
 
 
 class FeatureNames(NamedTuple):

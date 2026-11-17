@@ -88,13 +88,29 @@ class Schema:
     """Fields left out: ``(class, field, reason)``."""
     type_names: set[str] = field(default_factory=set)
     """The Refinery names of the classes, unions and enums, which nodes can't take."""
+    options_of: dict[type, ClassOptions] = field(default_factory=dict, repr=False, compare=False)
+    """:meth:`options_for` of each class asked about (``options`` don't change)."""
+    features_of: dict[type, tuple[Feature, ...]] = field(
+        default_factory=dict, repr=False, compare=False
+    )
+    """:meth:`all_features` of each class asked about, once the classes are discovered."""
 
     def options_for(self, cls: type) -> ClassOptions:
         """The options of the nearest class in the MRO of ``cls`` that has some."""
-        for base in cls.__mro__:
-            if base in self.options:
-                return self.options[base]
-        return _DEFAULT_OPTIONS
+        found = self.options_of.get(cls)
+        if found is None:
+            options = (self.options[base] for base in cls.__mro__ if base in self.options)
+            found = self.options_of[cls] = next(options, _DEFAULT_OPTIONS)
+        return found
+
+    def all_features(self, cls: type) -> tuple[Feature, ...]:
+        """The features of ``cls``, its own and inherited, by its MRO: for objects, once
+        the classes are discovered (the answer is remembered)."""
+        found = self.features_of.get(cls)
+        if found is None:
+            declared = (self.features.get(base, ()) for base in cls.__mro__)  # type: ignore[call-overload]
+            found = self.features_of[cls] = tuple(f for features in declared for f in features)
+        return found
 
     def is_entity(self, cls: type) -> bool:
         """Whether instances are shared nodes (RefineryNode or keyed), not owned values."""

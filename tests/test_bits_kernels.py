@@ -104,6 +104,13 @@ def test_transpose_and_projections(n):
         assert (k.to_host(k.contains(k.row(matrix, j), 0)) == dense[:, j, 0]).all()
 
 
+@pytest.mark.parametrize("density", [0.0, 0.001, 0.01, 0.5])  # listed as pairs, or unpacked
+def test_transpose_of_sparse_and_dense_matrices(density):
+    for n in (70, 300):
+        dense = _random(n, density, 7)
+        assert (_dense(k.transpose(_packed(dense), n), n) == dense.transpose(0, 2, 1)).all()
+
+
 @pytest.mark.parametrize("n", SIZES)
 def test_complements_keep_padding_clear(n):
     vector = k.vector_of(GRAPHS, n, [0, 1], [0, 0])

@@ -13,17 +13,17 @@ contradictory (an object in two containers, a containment cycle).
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Mapping
-from dataclasses import dataclass
 from itertools import chain
 from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
+from numpy.typing import NDArray
 
 from ..._instances import Graph
 from ..._schema import Feature, Schema, UnionClass
 from ..errors import UnsupportedRuleError
 from ..matrices import kernels as k
-from ..matrices.kernels import NodeIndex
+from ..matrices.kernels import Indices, NodeIndex
 from ..matrices.model import LogicValue, PartialModel
 from ..matrices.values import Tuples
 from ..rules.syntax import Atom, Call, Source
@@ -32,7 +32,7 @@ from ..rules.syntax import Predicate as RulePredicate
 if TYPE_CHECKING:
     pass
 
-from .build import feature_name, opposite_name
+from .build import Membership, feature_name, opposite_name
 
 
 class Refinement(NamedTuple):
@@ -43,25 +43,20 @@ class Refinement(NamedTuple):
     """The relations it would change; ``None`` if it would change what exists."""
 
 
-@dataclass
-class ValueCount:
-    """How many values a reference has on an object, certain and uncertain."""
+class Tally(NamedTuple):
+    """The values of each reference on each object, and the possible containers of each
+    object: arrays over the model's nodes."""
 
-    certain: int = 0
-    uncertain: int = 0
-
-
-type Counts = dict[tuple[str, NodeIndex], ValueCount]
-"""The values of each reference (by name) on each object."""
-
-
-class PossibleContainer(NamedTuple):
-    parent: NodeIndex
-    certain: bool
-
-
-type Containers = dict[NodeIndex, list[PossibleContainer]]
-"""The possible containers of each contained object."""
+    certain: dict[str, Indices]
+    """How many values each reference (by name) certainly has on each node."""
+    uncertain: dict[str, Indices]
+    """How many it only may have."""
+    parents: Indices
+    """The possible containment links: each one's container, ..."""
+    children: Indices
+    """... what it contains, ..."""
+    links_certain: NDArray[np.bool_]
+    """... and whether it certainly holds."""
 
 
 def refuse_assertions(parsed: Source) -> None:
@@ -92,10 +87,10 @@ def refuse_containment_refinement(
     every_containment = contains | {
         opposite_name(schema, f) for f in references if f.kind == "contains" and f.opposite
     }
-    counts, containers = tally(model, contains)
+    counts = tally(model, contains)
     refinements = chain(
         refined_by_multiplicity(schema, graph, references, counts),
-        refined_by_containers(graph, references, containers, every_containment),
+        refined_by_containers(graph, references, counts, every_containment),
         refined_by_cycles(graph, model, contains, every_containment),
     )
     for refinement in refinements:
@@ -103,63 +98,73 @@ def refuse_containment_refinement(
             raise UnsupportedRuleError(refinement.reason)
 
 
-def tally(model: PartialModel, contains: set[str]) -> tuple[Counts, Containers]:
+def tally(model: PartialModel, contains: set[str]) -> Tally:
     """The values of each reference on each object, and the possible containers of each
-    object (``contains`` names the containment references)."""
-    counts: Counts = {}
-    containers: Containers = {}
+    object (``contains`` names the containment references): counted in arrays."""
+    n = max(model.size, 1)
+    certain: dict[str, Indices] = {}
+    uncertain: dict[str, Indices] = {}
+    links: list[tuple[Indices, NDArray[np.bool_]]] = []
     for relation in model.relations:
         if relation.arity != 2:
             continue
-        must = {tuple(t) for t in relation.must.tolist()}
-        for key in {tuple(t) for t in relation.may.tolist()} | must:
-            certain = key in must
-            count = counts.setdefault((relation.name, key[0]), ValueCount())
-            if certain:
-                count.certain += 1
-            else:
-                count.uncertain += 1
-            if relation.name in contains:
-                containers.setdefault(key[1], []).append(PossibleContainer(key[0], certain))
-    return counts, containers
+        must = np.unique(relation.must[:, 0] * n + relation.must[:, 1])
+        keys = np.union1d(must, relation.may[:, 0] * n + relation.may[:, 1])
+        sure = np.isin(keys, must)
+        sources = keys // n
+        certain[relation.name] = np.bincount(sources[sure], minlength=n)
+        uncertain[relation.name] = np.bincount(sources[~sure], minlength=n)
+        if relation.name in contains:
+            links.append((keys, sure))
+    keys = np.concatenate([k for k, _ in links]) if links else np.empty(0, np.intp)
+    sure = np.concatenate([c for _, c in links]) if links else np.empty(0, bool)
+    return Tally(certain, uncertain, keys // n, keys % n, sure)
 
 
 def refined_by_multiplicity(
     schema: Schema,
     graph: Graph,
     references: list[Feature],
-    counts: Counts,
+    counts: Tally,
 ) -> Iterator[Refinement]:
     """With ``c`` values certain and ``u`` uncertain, against ``[lower..upper]``:
     the uncertain ones must hold if ``c + u <= lower``, and can't if ``c >= upper``;
     an object that only may exist can't if ``c + u < lower`` or ``c > upper``."""
+    size = len(graph.nodes)
+    types = Membership(graph)
+    maybe = np.array([node.exists == "unknown" for node in graph.nodes], bool)
+    none = np.zeros(size, np.intp)
     for feature in references:
         name = feature_name(feature)
         changed = {name} | ({opposite_name(schema, feature)} if feature.opposite else set())
-        for i, node in enumerate(graph.nodes):
-            if not isinstance(node.obj, feature.owner):
-                continue
-            count = counts.get((name, i), ValueCount())
-            certain, uncertain = count.certain, count.uncertain
-            upper = feature.upper
-            if uncertain and (
-                certain + uncertain <= feature.lower or (upper is not None and certain >= upper)
-            ):
+        certain = counts.certain.get(name, none)[:size]
+        uncertain = counts.uncertain.get(name, none)[:size]
+        lower, upper = feature.lower, feature.upper
+        owned = types.mask(feature.owner)
+        refined = owned & (uncertain > 0) & (certain + uncertain <= lower)
+        too_few = owned & (certain + uncertain < lower) & maybe
+        too_many = np.zeros(size, bool)
+        if upper is not None:
+            refined |= owned & (uncertain > 0) & (certain >= upper)
+            too_many = owned & (certain > upper) & maybe
+        for i in np.flatnonzero(refined | too_few | too_many).tolist():
+            node = graph.nodes[i]
+            if refined[i]:
                 yield Refinement(
                     f"uncertain values of {name} on {node.name}, which Refinery would refine "
-                    f"from its multiplicity [{feature.lower}..{'*' if upper is None else upper}]",
+                    f"from its multiplicity [{lower}..{'*' if upper is None else upper}]",
                     changed,
                 )
-            if certain + uncertain < feature.lower and node.exists == "unknown":
+            if too_few[i]:
                 yield Refinement(
                     f"{node.name}, which only may exist and lacks the values {name} needs: "
                     "Refinery would conclude it doesn't exist",
                     None,
                 )
-            if upper is not None and certain > upper and node.exists == "unknown":
+            if too_many[i]:
                 yield Refinement(
                     f"{node.name}, which only may exist and has more values of {name} than "
-                    f"[{feature.lower}..{upper}] allows: Refinery would conclude it doesn't exist",
+                    f"[{lower}..{upper}] allows: Refinery would conclude it doesn't exist",
                     None,
                 )
 
@@ -167,41 +172,47 @@ def refined_by_multiplicity(
 def refined_by_containers(
     graph: Graph,
     references: list[Feature],
-    containers: Containers,
+    counts: Tally,
     every_containment: set[str],
 ) -> Iterator[Refinement]:
     """An object has one container at most, and exactly one if a containment can hold
     its class."""
     held = tuple(target_classes(f.target) for f in references if f.kind == "contains")
     contained = tuple(c for classes in held for c in classes)
-    for child, node in enumerate(graph.nodes):
-        found = containers.get(child, [])
-        holders = [container.parent for container in found if container.certain]
-        certain, uncertain = len(holders), len(found) - len(holders)
-        if certain > 1:
+    size = len(graph.nodes)
+    children, sure = counts.children, counts.links_certain
+    certain = np.bincount(children[sure], minlength=size)[:size]
+    uncertain = np.bincount(children[~sure], minlength=size)[:size]
+    maybe = np.array([node.exists == "unknown" for node in graph.nodes], bool)
+    needs = Membership(graph).mask(contained) if contained else np.zeros(size, bool)
+    flagged = (certain > 1) | ((uncertain > 0) & (certain > 0))
+    flagged |= needs & (certain == 0) & ((uncertain == 1) | ((uncertain == 0) & maybe))
+    for child in np.flatnonzero(flagged).tolist():
+        node = graph.nodes[child]
+        if certain[child] > 1:
             # A contradiction: Refinery makes the containment links errors, and rules
             # out the objects involved that only may exist.
-            involved = [child, *holders]
-            uncertain_objects = any(only_may_exist(graph, i) for i in involved)
+            holders = counts.parents[(children == child) & sure].tolist()
+            uncertain_objects = any(only_may_exist(graph, i) for i in [child, *holders])
             yield Refinement(
-                f"{node.name}, in {certain} containers at once: Refinery contradicts it",
+                f"{node.name}, in {certain[child]} containers at once: Refinery contradicts it",
                 None if uncertain_objects else every_containment,
             )
-        if uncertain and certain:
+        if uncertain[child] and certain[child]:
             yield Refinement(
                 f"uncertain containers of {node.name}, which has a certain one: "
                 "Refinery would rule them out",
                 every_containment,
             )
-        if not contained or not isinstance(node.obj, contained):
+        if not needs[child]:
             continue
-        if uncertain == 1 and not certain:
+        if uncertain[child] == 1 and not certain[child]:
             yield Refinement(
                 f"the one possible container of {node.name}, uncertain: Refinery would "
                 "conclude it holds, as the object needs a container",
                 every_containment,
             )
-        if not certain and not uncertain and node.exists == "unknown":
+        if not certain[child] and not uncertain[child] and node.exists == "unknown":
             yield Refinement(
                 f"{node.name}, which only may exist and has no possible container: "
                 "Refinery would conclude it doesn't exist",

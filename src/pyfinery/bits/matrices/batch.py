@@ -31,7 +31,7 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from functools import cached_property
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
 from numpy.typing import NDArray
@@ -40,7 +40,7 @@ from . import kernels as k
 from .kernels import Device, Indices, NodeIndex, Vector
 from .model import BUILTINS, Attribute, DataType, Node, PartialModel, lookup
 from .packed import PackedModel
-from .values import BatchBits, Size, Tuples, Value, from_tuples, of_graph, to_tuples, with_graph
+from .values import BatchBits, Size, Tuples, Value, from_tuples, of_graph, to_tuples
 
 if TYPE_CHECKING:
     from ..evaluation.pipeline import BatchValues
@@ -214,7 +214,7 @@ def of_model(model: PackedModel) -> PackedBatch:
     atoms = tuple((node, i) for i, node in enumerate(model.nodes) if node.kind == "atom")
     strings: dict[str, int] = {}
     attributes = {
-        name: batch_attribute([(0, a)], size, [placement], strings)
+        name: batch_attribute([(0, a)], size, Layout.of([placement]), strings)
         for name, a in model.attributes.items()
     }
     nodes = k.full_vector(1, n)
@@ -241,34 +241,60 @@ def of_models(models: Sequence[PartialModel | PackedModel]) -> PackedBatch:
     size = Size(len(models), n)
     placements = []
     for nodes in graph_nodes:
-        placement = np.empty(len(nodes), np.intp)
-        own = 0
-        for i, node in enumerate(nodes):
-            if node.kind == "atom":
-                placement[i] = first_atom + atom_slots[node.name]
-            else:
-                placement[i] = own
-                own += 1
-        placements.append(placement)
+        # Own nodes count up from 0; atoms go to their slot after ``first_atom``.
+        atom = [first_atom + atom_slots[node.name] if node.kind == "atom" else -1 for node in nodes]
+        at = np.array(atom, np.intp).reshape(len(nodes))
+        owned = at < 0
+        at[owned] = np.arange(int(owned.sum()))
+        placements.append(at)
     atoms = tuple((atom_nodes[name], first_atom + slot) for name, slot in atom_slots.items())
-    graphs = np.repeat(np.arange(len(models)), [len(p) for p in placements])
-    slots = k.vector_of(*size, graphs, np.concatenate(placements))
-    relations = batch_relations(models, size, placements)
+    layout = Layout.of(placements)
+    slots = k.vector_of(*size, layout.graphs, layout.flat)
+    relations = batch_relations(models, size, layout)
     strings: dict[str, int] = {}
     attributes: dict[str, list[tuple[int, Attribute]]] = {}
     for graph, model in enumerate(models):
         for attribute in model_attributes(model):
             attributes.setdefault(attribute.name, []).append((graph, attribute))
     batched = {
-        name: batch_attribute(given, size, placements, strings)
-        for name, given in attributes.items()
+        name: batch_attribute(given, size, layout, strings) for name, given in attributes.items()
     }
     sizes = tuple(len(nodes) for nodes in graph_nodes)
     return PackedBatch(size, sizes, tuple(placements), slots, atoms, relations, batched, strings)
 
 
+class Layout(NamedTuple):
+    """Where each graph's nodes go in a batch, as flat arrays, to place every graph's
+    tuples at once."""
+
+    placements: list[Indices]
+    """Each graph's nodes' slots."""
+    flat: Indices
+    """Every graph's, one after the other."""
+    offsets: Indices
+    """Where each graph's start in :attr:`flat`."""
+    graphs: Indices
+    """The graph of each entry of :attr:`flat`."""
+
+    @classmethod
+    def of(cls, placements: list[Indices]) -> Layout:
+        sizes = np.array([len(p) for p in placements], np.intp)
+        offsets = np.concatenate([[0], np.cumsum(sizes)[:-1]]).astype(np.intp)
+        flat = np.concatenate(placements) if placements else np.empty(0, np.intp)
+        graphs = np.repeat(np.arange(len(placements)), sizes)
+        return cls(placements, flat, offsets, graphs)
+
+    def place(self, given: Sequence[tuple[int, NDArray[Any]]]) -> tuple[Indices, NDArray[Any]]:
+        """Arrays of node indices of some graphs (``(graph, array)``), as one: the graph
+        of each entry, and its slot."""
+        graphs = np.repeat(np.array([g for g, _ in given], np.intp), [len(a) for _, a in given])
+        found = np.concatenate([np.asarray(a, np.intp) for _, a in given])
+        shape = (len(found),) + (1,) * (found.ndim - 1)
+        return graphs, self.flat[found + self.offsets[graphs].reshape(shape)]
+
+
 def batch_relations(
-    models: Sequence[PartialModel | PackedModel], size: Size, placements: list[Indices]
+    models: Sequence[PartialModel | PackedModel], size: Size, layout: Layout
 ) -> dict[str, BatchRelation]:
     """Each relation of any graph, with the tuples of every graph that has it."""
     found: dict[str, list[tuple[int, Tuples, Tuples]]] = {}
@@ -282,23 +308,22 @@ def batch_relations(
     for name, given in found.items():
         arity, simple_name = named[name]
         musts = [(graph, m) for graph, m, _ in given]
-        must_bits = from_tuples(arity, size, placed(musts, arity, placements)).data
+        must_bits = from_tuples(arity, size, placed(musts, arity, layout)).data
         if all(m is y or np.array_equal(m, y) for _, m, y in given):
             may_bits = must_bits
         else:
             mays = [(graph, y) for graph, _, y in given]
-            may_bits = from_tuples(arity, size, placed(mays, arity, placements)).data
+            may_bits = from_tuples(arity, size, placed(mays, arity, layout)).data
         relations[name] = BatchRelation(name, arity, must_bits, may_bits, simple_name)
     return relations
 
 
-def placed(given: list[tuple[int, Tuples]], arity: int, placements: list[Indices]) -> Tuples:
+def placed(given: list[tuple[int, Tuples]], arity: int, layout: Layout) -> Tuples:
     """The tuples of each graph (``(graph, tuples)``), at their slots, after the graph."""
-    parts = []
-    for graph, tuples in given:
-        at = placements[graph][tuples]
-        parts.append(with_graph(at.reshape(len(at), arity), graph))
-    return np.concatenate(parts) if parts else np.empty((0, 1 + arity), np.intp)
+    if not given:
+        return np.empty((0, 1 + arity), np.intp)
+    graphs, slots = layout.place([(g, t.reshape(len(t), arity)) for g, t in given])
+    return np.column_stack([graphs, slots.reshape(len(slots), arity)])
 
 
 def relation_tuples(
@@ -325,7 +350,7 @@ def model_attributes(model: PartialModel | PackedModel) -> Sequence[Attribute]:
 def batch_attribute(
     given: list[tuple[int, Attribute]],
     size: Size,
-    placements: Sequence[Indices],
+    layout: Layout,
     strings: dict[str, int],
 ) -> BatchAttribute:
     """An attribute of the batch, from the graphs that have it (``(graph, attribute)``):
@@ -336,25 +361,24 @@ def batch_attribute(
         raise ValueError(f"{named.name} has a different type in each graph")
     exact = any(a.lower.dtype == object for _, a in given)
     dtype = object if exact else np.float64
-    if len(given) == 1 and len(placements) == 1 and given[0][0] == 0:
+    if len(given) == 1 and len(layout.placements) == 1 and given[0][0] == 0:
         lower, upper = named.lower[None].astype(dtype), named.upper[None].astype(dtype)
     else:
         lower = np.full(size, math.inf, dtype)
         upper = np.full(size, -math.inf, dtype)
-        for graph, attribute in given:
-            lower[graph, placements[graph]] = attribute.lower
-            upper[graph, placements[graph]] = attribute.upper
+        graphs, at = layout.place([(g, np.arange(len(a.lower))) for g, a in given])
+        lower[graphs, at] = np.concatenate([a.lower.astype(dtype) for _, a in given])
+        upper[graphs, at] = np.concatenate([a.upper.astype(dtype) for _, a in given])
     codes = None
     if named.data_type == "string":
         codes = np.full(size, ERROR_STRING, np.intp)
         for graph, attribute in given:
-            placement = placements[graph]
-            texts = attribute.strings or (None,) * len(attribute.lower)
-            for i, text in enumerate(texts):
-                if attribute.lower[i] > attribute.upper[i]:
-                    continue  # an error
-                code = UNKNOWN_STRING if text is None else strings.setdefault(text, len(strings))
-                codes[graph, placement[i]] = code
+            placement = layout.placements[graph]
+            valued = attribute.lower <= attribute.upper  # else an error
+            codes[graph, placement[valued]] = UNKNOWN_STRING
+            texts = np.array(attribute.strings or (None,) * len(attribute.lower), object)
+            for i in np.flatnonzero(valued & (texts != None)).tolist():  # noqa: E711
+                codes[graph, placement[i]] = strings.setdefault(texts[i], len(strings))
     return BatchAttribute(named.name, named.data_type, lower, upper, codes, named.simple_name)
 
 
