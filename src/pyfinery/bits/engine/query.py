@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+from ..._engines import QueryEngine
 from ..._instances import Graph
 from ..._options import Predicate
 from ..._render import _declare_predicate
@@ -34,7 +35,7 @@ from .refinement import (
 )
 
 
-class BitsEngine:
+class BitsEngine(QueryEngine):
     """Evaluates :meth:`~pyfinery.Metamodel.query` in Python, without a Refinery server.
 
     Pass it where :meth:`~pyfinery.Metamodel.query` takes a client::

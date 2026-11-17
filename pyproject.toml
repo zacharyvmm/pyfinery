@@ -46,6 +46,10 @@ Upstream = "https://github.com/graphs4value/refinery"
 bits = [
     "numpy>=2.0",
 ]
+# Refinery in this process (pyfinery.jvm), through JPype; needs a JDK 25 or later.
+jvm = [
+    "jpype1>=1.7",
+]
 
 [build-system]
 requires = ["uv_build>=0.11,<0.12"]
@@ -53,6 +57,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "jpype1>=1.7",
     "numpy>=2.0",
     "pytest>=9.1.1",
 ]
@@ -61,6 +66,7 @@ dev = [
 testpaths = ["tests"]
 markers = [
     "docker: tests that start a real Refinery server in Docker (opt in with PYFINERY_DOCKER_TESTS=1)",
+    "jvm: tests that start Refinery's JVM in a subprocess (opt in with PYFINERY_JVM_TESTS=1)",
 ]
 
 [tool.ruff]

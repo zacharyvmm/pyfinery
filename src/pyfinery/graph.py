@@ -40,7 +40,8 @@ depends on the identity of that class:
   ``ClassOptions(references=...)``;
 - :class:`RefineryNode` subclasses are entities by object identity, for
   hand-built graphs, with :func:`Contains`, :func:`Container` and
-  :class:`Ref` markers for containment, opposites, and multiplicities.
+  :func:`Ref` as field defaults for containment, opposites, and
+  multiplicities.
 
 :class:`ClassOptions` configure classes from outside, so generated or
 third-party models can be used unchanged; :class:`Predicate` provides
@@ -49,19 +50,18 @@ relations computed in Python (e.g. regular expressions) to rules.
 This module holds :class:`Metamodel` and re-exports the rest, which lives in
 private modules: the options in ``_options``, the types and fields in
 ``_schema``, the graph of nodes built from objects in ``_instances``, the
-problems sent to Refinery in ``_render``, Refinery syntax in ``_syntax``, and
-reports in ``_results``.
+problems sent to Refinery in ``_render``, the engines that validate and query
+in ``_engines``, Refinery syntax in ``_syntax``, and reports in ``_results``.
 """
 
 from __future__ import annotations
 
-import sys
-from collections.abc import Hashable, Iterable, Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import Hashable, Iterable, Mapping
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel
 
+from ._engines import Problems, async_engine, async_query_engine, engine, query_engine
 from ._instances import build_graph, collect, link_opposites
 from ._options import (
     ClassOptions,
@@ -73,12 +73,7 @@ from ._options import (
     ReferenceKind,
     RefineryNode,
 )
-from ._render import (
-    render_facts,
-    render_metamodel,
-    render_query_problem,
-    render_validation_problem,
-)
+from ._render import render_facts, render_metamodel
 from ._results import (
     Match,
     ModelValidationError,
@@ -87,8 +82,6 @@ from ._results import (
     Violation,
     ViolationKind,
     declared_predicates,
-    read_matches,
-    read_violations,
 )
 from ._schema import (
     ClassLike,
@@ -103,11 +96,9 @@ from ._schema import (
 from ._syntax import (
     quote_id,
 )
-from .errors import RefineryTimeoutError
-from .models import JsonOutputFormat, OutputFormats, SourceOutputFormat
 
 if TYPE_CHECKING:
-    from .bits import BitsEngine
+    from ._engines import AsyncEngine, AsyncQueryEngine, Engine, QueryEngine
     from .client import AsyncRefinery, Refinery
 
 __all__ = [
@@ -243,7 +234,7 @@ class Metamodel:
     def validate(
         self,
         objects: Iterable[BaseModel],
-        refinery: Refinery,
+        refinery: Refinery | Engine,
         rules: Iterable[str] = (),
         *,
         predicates: Iterable[Predicate] = (),
@@ -260,42 +251,41 @@ class Metamodel:
         object exists (``ClassOptions(exists=...)`` is ignored). Use
         :meth:`query` to reason about what may hold.
 
+        Pass a :class:`~pyfinery.jvm.JvmEngine` instead of a client to validate
+        in this process, without a server (see :mod:`pyfinery.jvm`).
+
         Only nodes reachable from ``objects`` through outgoing references are
         checked (see :meth:`collect`). Raises
         :class:`~pyfinery.InvalidProblemError` if the rules don't compile;
         constraint violations are returned in the report.
         """
-        if isinstance(refinery, _engine_types()):
-            raise TypeError("validate() needs a Refinery client; the bits engine only queries")
+        found = engine(refinery, self._problems())
         predicates = list(predicates)
         graph = build_graph(self.schema, objects)
-        source = render_validation_problem(self.schema, self.source, graph, rules, predicates)
-        with _explain_timeout():
-            result = refinery.concretize(source, format=_JSON_ONLY)
-        return read_violations(result.json_, graph, source)
+        rules = [*self.rules, *rules]
+        return found.validate_graph(self.schema, graph, rules, predicates)
 
     async def avalidate(
         self,
         objects: Iterable[BaseModel],
-        refinery: AsyncRefinery,
+        refinery: AsyncRefinery | AsyncEngine | Engine,
         rules: Iterable[str] = (),
         *,
         predicates: Iterable[Predicate] = (),
     ) -> ValidationReport:
         """Asynchronous variant of :meth:`validate`."""
+        found = async_engine(refinery, self._problems())
         predicates = list(predicates)
         graph = build_graph(self.schema, objects)
-        source = render_validation_problem(self.schema, self.source, graph, rules, predicates)
-        with _explain_timeout():
-            result = await refinery.concretize(source, format=_JSON_ONLY)
-        return read_violations(result.json_, graph, source)
+        rules = [*self.rules, *rules]
+        return await found.validate_graph(self.schema, graph, rules, predicates)
 
     # -- queries ------------------------------------------------------------
 
     def query(
         self,
         objects: Iterable[BaseModel],
-        refinery: Refinery | BitsEngine,
+        refinery: Refinery | QueryEngine,
         rules: Iterable[str] = (),
         *,
         predicates: Iterable[Predicate] = (),
@@ -315,37 +305,29 @@ class Metamodel:
         Pass a :class:`~pyfinery.bits.BitsEngine` instead of a client to
         evaluate the rules in Python, without a server (see :mod:`pyfinery.bits`).
         """
+        found = query_engine(refinery, self._problems())
         rules, predicates = list(rules), list(predicates)
         graph = build_graph(self.schema, objects, existence=True)
         selected = list(select) if select is not None else declared_predicates(rules)
-        if isinstance(refinery, _engine_types()):
-            rules = [*self.rules, *rules]
-            return refinery.query_graph(self.schema, graph, rules, predicates, selected)
-        source = render_query_problem(self.schema, self.source, graph, rules, predicates)
-        with _explain_timeout():
-            result = refinery.semantics(source, format=_JSON_ONLY)
-        return read_matches(result.json_, graph, source, selected)
+        rules = [*self.rules, *rules]
+        return found.query_graph(self.schema, graph, rules, predicates, selected)
 
     async def aquery(
         self,
         objects: Iterable[BaseModel],
-        refinery: AsyncRefinery | BitsEngine,
+        refinery: AsyncRefinery | AsyncQueryEngine | QueryEngine,
         rules: Iterable[str] = (),
         *,
         predicates: Iterable[Predicate] = (),
         select: Iterable[str] | None = None,
     ) -> QueryResult:
         """Asynchronous variant of :meth:`query`."""
+        found = async_query_engine(refinery, self._problems())
         rules, predicates = list(rules), list(predicates)
         graph = build_graph(self.schema, objects, existence=True)
         selected = list(select) if select is not None else declared_predicates(rules)
-        if isinstance(refinery, _engine_types()):
-            rules = [*self.rules, *rules]
-            return refinery.query_graph(self.schema, graph, rules, predicates, selected)
-        source = render_query_problem(self.schema, self.source, graph, rules, predicates)
-        with _explain_timeout():
-            result = await refinery.semantics(source, format=_JSON_ONLY)
-        return read_matches(result.json_, graph, source, selected)
+        rules = [*self.rules, *rules]
+        return await found.query_graph(self.schema, graph, rules, predicates, selected)
 
     def query_problem(
         self,
@@ -355,33 +337,10 @@ class Metamodel:
         predicates: Iterable[Predicate] = (),
     ) -> str:
         """The problem :meth:`query` would send, e.g. to debug it in the web editor."""
-        rules, predicates = list(rules), list(predicates)
+        rules, predicates = [*self.rules, *rules], list(predicates)
         graph = build_graph(self.schema, objects, existence=True)
-        return render_query_problem(self.schema, self.source, graph, rules, predicates)
+        return self._problems().query(self.schema, graph, rules, predicates)
 
-
-def _engine_types() -> tuple[type, ...]:
-    """The engines that evaluate queries in Python: :class:`~pyfinery.bits.BitsEngine`,
-    if :mod:`pyfinery.bits` (which needs NumPy) has been imported."""
-    bits = sys.modules.get("pyfinery.bits")
-    return (bits.BitsEngine,) if bits is not None else ()
-
-
-_JSON_ONLY = OutputFormats(json_=JsonOutputFormat(), source=SourceOutputFormat(enabled=False))
-
-
-@contextmanager
-def _explain_timeout() -> Iterator[None]:
-    """Add what to do about it to a timeout of validation or a query."""
-    try:
-        yield
-    except RefineryTimeoutError as e:
-        raise RefineryTimeoutError(
-            f"{e.message}. Validation runs under the server's semantics timeout (1 second by "
-            "default); raise it with RefineryServer(semantics_timeout=<ms>) or the "
-            "REFINERY_SEMANTICS_TIMEOUT_MS environment variable of the server. Refinery "
-            "computes every relation in full, so helper predicates with many tuples (e.g., "
-            "with three parameters) are often what makes it slow, and the upstream Refinery "
-            "image is much slower than pyfinery's default on large graphs; see Performance in "
-            "pyfinery's README."
-        ) from e
+    def _problems(self) -> Problems:
+        """What a client engine sends for this metamodel: its source, with its rules."""
+        return Problems(self.source, self.rules)

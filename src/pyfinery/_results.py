@@ -182,6 +182,7 @@ def read_matches(
     if model is None:
         raise RefineryError("Refinery did not return a model to query")
     by_name = graph.objects_by_name()
+    node_names = _node_names(model, by_name)
     exists = {node.name: node.exists for node in graph.nodes}
     relations = {r.name: r for r in model.relations}
     matches = []
@@ -193,7 +194,7 @@ def read_matches(
             value: LogicValue = raw[-1]  # type: ignore[assignment]
             if value not in ("true", "unknown"):
                 continue  # errors are reported as contradictions
-            names = tuple(model.nodes[i].name for i in raw[: relation.arity])  # type: ignore[index]
+            names = tuple(node_names[i] for i in raw[: relation.arity])  # type: ignore[index]
             if any(name.endswith("::new") for name in names):
                 continue  # objects that don't exist in a closed world
             # Refinery doesn't weaken a predicate for the existence of
@@ -243,6 +244,7 @@ def _classify(relation: str, is_error_predicate: bool) -> ViolationKind | None:
 
 def _errors(model: JsonOutput, by_name: dict[str, BaseModel]) -> list[Violation]:
     """The tuples of error predicates and builtin constraints that are ``error``."""
+    node_names = _node_names(model, by_name)
     violations = []
     for relation in model.relations:
         is_error_predicate = relation.detail.type == "pred" and relation.detail.kind == "error"
@@ -252,7 +254,22 @@ def _errors(model: JsonOutput, by_name: dict[str, BaseModel]) -> list[Violation]
         for raw in model.partial_interpretation.get(relation.name, []):
             if raw[-1] != "error":
                 continue
-            names = tuple(model.nodes[i].name for i in raw[: relation.arity])  # type: ignore[index]
+            names = tuple(node_names[i] for i in raw[: relation.arity])  # type: ignore[index]
             nodes = tuple(by_name.get(name) for name in names)
             violations.append(Violation(kind, relation.name, names, nodes))
     return violations
+
+
+def _node_names(model: JsonOutput, by_name: dict[str, BaseModel]) -> list[str]:
+    """The name of each node of ``model``, as pyfinery named it in the problem.
+
+    Refinery returns a name without the quotes pyfinery wrote it with when the name
+    doesn't need them in Refinery's syntax, e.g. ``e`` for ``'e'`` (pyfinery quotes
+    more names than Refinery has to, to be safe)."""
+    names = []
+    for node in model.nodes:
+        name = node.name
+        if name not in by_name and quote_id(name) in by_name:
+            name = quote_id(name)
+        names.append(name)
+    return names

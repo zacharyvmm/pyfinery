@@ -248,6 +248,30 @@ def test_validate_classifies_violations():
         report.raise_for_violations()
 
 
+def test_names_refinery_returns_unquoted_find_their_objects():
+    # pyfinery writes a node named like a keyword quoted ('e'); Refinery returns it as e.
+    e, spaced = Dir(name="e"), Dir(name="my dir")
+    fs = Filesystem(root=Dir(name="home", contents=[e]))
+    model = _model_json(
+        ["filesystem_1", "home", "e", "'my dir'"],
+        [_pred("emptyDir"), _pred("big", kind="defined")],
+        {"emptyDir": [[2, "error"], [3, "error"]], "big": [[2, "true"]]},
+    )
+    body = sse({"result": "success", "value": {"issues": [], "json": model}})
+    client = pf.Refinery(
+        "http://x/api/v1",
+        http_client=httpx.Client(transport=httpx.MockTransport(lambda _: sse_response(body))),
+    )
+
+    report = metamodel().validate([fs, spaced], client)
+    names = [str(v) for v in report.violations]
+    assert names == ["rule: emptyDir('e')", "rule: emptyDir('my dir')"]
+    assert [v.nodes for v in report.violations] == [(e,), (spaced,)]
+
+    result = metamodel().query([fs, spaced], client, ["pred big(Dir d) <-> Dir(d)."])
+    assert [(m.node_names, m.nodes) for m in result.matches] == [(("'e'",), (e,))]
+
+
 def test_validate_timeout_hint():
     response = httpx.Response(408, json={"result": "timeout", "message": "Request timed out"})
     client = pf.Refinery(

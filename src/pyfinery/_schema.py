@@ -11,15 +11,15 @@ from __future__ import annotations
 import enum
 import inspect
 import types
-from collections.abc import Hashable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from typing import Annotated, Any, Literal, Union, get_args, get_origin
 
 import annotated_types
 from pydantic import BaseModel
 from pydantic.fields import FieldInfo
 
-from ._options import ClassOptions, Ref, ReferenceKind, RefineryNode
+from ._options import ClassOptions, ReferenceKind, RefineryNode, RefOptions
 from ._syntax import parse_multiplicity, quote_id
 
 _DATA_TYPES: dict[type, str] = {bool: "boolean", int: "int", float: "real", str: "string"}
@@ -179,6 +179,7 @@ def discover(
         if downwards and cls not in expanded:
             expanded.add(cls)
             pending.extend((sub, True) for sub in cls.__subclasses__())
+    _infer_opposites(schema)
     # Superclasses must be declared before subclasses for readability.
     schema.classes.sort(key=lambda c: (len(c.__mro__), c.__qualname__))
     schema.type_names = {class_name(t) for t in [*schema.classes, *schema.unions, *schema.enums]}
@@ -191,6 +192,57 @@ def check(schema: Schema) -> None:
     _check_names(schema)
     _check_opposites(schema)
     _check_key_references(schema)
+
+
+def _infer_opposites(schema: Schema) -> None:
+    """Pair each ``Container()`` without an opposite with the one containment reference it can
+    be the opposite of: declared in (or inherited by) its target class, holding objects that
+    have the container reference. That reference gets the container as its opposite too."""
+    claimed: dict[tuple[type, str], Feature] = {}
+    for features in list(schema.features.values()):
+        for i, feature in enumerate(features):
+            if feature.kind != "container" or feature.opposite is not None:
+                continue
+            where = f"{feature.owner.__name__}.{feature.name}"
+            target = feature.target
+            if not isinstance(target, type):
+                raise TypeError(f"{where}: a container reference must refer to one class")
+            candidates = [
+                other
+                for base in target.__mro__
+                for other in schema.features.get(base, [])  # type: ignore[call-overload]
+                if other.kind == "contains"
+                and isinstance(other.target, type)
+                and issubclass(other.target, feature.owner)
+                and (other.opposite in (None, feature.name) or (other.owner, other.name) in claimed)
+            ]
+            named = [c for c in candidates if c.opposite == feature.name]
+            if len(named) == 1:
+                candidates = named
+            if len(candidates) != 1:
+                found = ", ".join(f"{c.owner.__name__}.{c.name}" for c in candidates)
+                raise TypeError(
+                    f"{where}: give Container(opposite=...): "
+                    + (
+                        f"it could be the opposite of any of {found}"
+                        if candidates
+                        else f"no containment reference of {target.__name__} holds "
+                        f"{feature.owner.__name__} objects"
+                    )
+                )
+            (other,) = candidates
+            key = (other.owner, other.name)
+            if key in claimed:
+                first = claimed[key]
+                raise TypeError(
+                    f"{where}: {first.owner.__name__}.{first.name} could be the opposite of "
+                    f"{other.owner.__name__}.{other.name} too; give Container(opposite=...)"
+                )
+            claimed[key] = feature
+            features[i] = replace(feature, opposite=other.name)
+            if other.opposite is None:
+                own = schema.features[other.owner]
+                own[own.index(other)] = replace(other, opposite=feature.name)
 
 
 # -- fields -----------------------------------------------------------------
@@ -232,10 +284,10 @@ def _feature(schema: Schema, cls: type[BaseModel], name: str) -> Feature | None:
     elif get_origin(annotation) not in (None, Literal) and not _is_union(annotation):
         raise _Unsupported(f"{where}: unsupported field type {info.annotation!r}")
 
-    refs = [m for m in metadata if isinstance(m, Ref)]
+    refs = [m for m in metadata if isinstance(m, RefOptions)]
     if len(refs) > 1:
         raise TypeError(f"{where}: more than one Ref/Contains/Container marker")
-    ref = refs[0] if refs else Ref()
+    ref = refs[0] if refs else RefOptions()
 
     if annotation in _DATA_TYPES:
         if shape.many:
@@ -290,11 +342,8 @@ def _feature(schema: Schema, cls: type[BaseModel], name: str) -> Feature | None:
     lower, upper = shape.bounds(metadata)
     if ref.multiplicity is not None:
         lower, upper = parse_multiplicity(ref.multiplicity)
-    if ref.kind == "container":
-        if shape.many:
-            raise TypeError(f"{where}: a container reference must be a single node")
-        if ref.opposite is None:
-            raise TypeError(f"{where}: a container reference needs an opposite")
+    if ref.kind == "container" and shape.many:
+        raise TypeError(f"{where}: a container reference must be a single node")
     return Feature(cls, name, target, shape.many, lower, upper, kind, ref.opposite)
 
 
@@ -366,6 +415,23 @@ class _Shape:
             (m.max_length for m in metadata if isinstance(m, annotated_types.MaxLen)), None
         )
         return lower, upper
+
+
+def empty_factory(info: FieldInfo) -> Callable[[], Any] | None:
+    """What a reference field holds when left out: an empty collection of its type, ``None``
+    if it is optional; ``None`` (no factory) for a required single reference."""
+    shape = _Shape.of(info)
+    if shape.many:
+        collection = _strip_optional(_strip_annotated(info.annotation)[0])[0]
+        origin = get_origin(collection) or collection
+        return origin if origin in (list, set, frozenset, tuple) else list
+    if shape.optional:
+        return _none
+    return None
+
+
+def _none() -> None:
+    return None
 
 
 def _own_fields(node_class: type[BaseModel]) -> list[str]:
