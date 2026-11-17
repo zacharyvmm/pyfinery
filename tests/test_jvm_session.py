@@ -277,3 +277,43 @@ def test_negation_follows_what_is_added_and_removed():
     assert out["none"] == ["rule: noLink(w)"]
     assert out["with"] == []
     assert out["again"] == ["rule: noLink(w)"]
+
+
+def test_changes_include_reference_errors():
+    out = run(
+        """
+        from pydantic import BaseModel
+        from pyfinery import ClassOptions, Metamodel
+
+        class Keyed(BaseModel):
+            key: str
+            peer: str | None = None
+
+        class Other(BaseModel):
+            key: str
+
+        by_key = lambda k: k.key
+        keyed = Metamodel(Keyed, Other, options={
+            Keyed: ClassOptions(key=by_key, references={"peer": (Keyed, Other)}),
+            Other: ClassOptions(key=by_key)})
+        out = {}
+        with Session(keyed, [Keyed(key="x", peer="missing")]) as session:
+            out["unresolved"] = changed(session.changes())
+            out["again"] = changed(session.changes())
+            session.add(Keyed(key="missing"))
+            out["resolved"] = changed(session.changes())
+            one, other = Keyed(key="twin"), Other(key="twin")
+            session.add(Keyed(key="y", peer="twin"), one, other)
+            out["ambiguous"] = changed(session.changes())
+            session.remove(other)
+            out["unambiguous"] = changed(session.changes())
+        print(json.dumps(out))
+        """
+    )
+    unresolved = "reference: Keyed::peer::unresolved(x, 'missing')"
+    assert out["unresolved"] == {"added": [unresolved], "removed": [], "any": True}
+    assert out["again"] == {"added": [], "removed": [], "any": False}
+    assert out["resolved"] == {"added": [], "removed": [unresolved], "any": True}
+    ambiguous = "reference: Keyed::peer::ambiguous(y, 'twin')"
+    assert out["ambiguous"] == {"added": [ambiguous], "removed": [], "any": True}
+    assert out["unambiguous"] == {"added": [], "removed": [ambiguous], "any": True}

@@ -17,7 +17,7 @@ To validate a graph as it changes, use a :class:`~pyfinery.jvm.Session`.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 
 from ..._engines import Engine
 from ..._instances import Graph
@@ -29,7 +29,7 @@ from ..._syntax import quote_id
 from ..errors import UnsupportedRuleError
 from .cache import compiled
 from .compile import CompiledProblem
-from .model import PlainModel
+from .model import PlainModel, PredicateFact
 
 __all__ = ["JvmEngine"]
 
@@ -54,7 +54,7 @@ class JvmEngine(Engine):
         require_supported(problem, problem.rule_errors)
         model = PlainModel(problem)
         try:
-            model.sync(graph, predicates)
+            model.sync(graph, predicate_facts(schema, graph, predicates))
             violations = reference_errors(graph) + model.violations()
         finally:
             model.close()
@@ -68,13 +68,16 @@ class JvmEngine(Engine):
         predicates: Sequence[Predicate],
         select: Sequence[str],
     ) -> QueryResult:
-        refuse_uncertainty(schema, graph, predicates)
         problem = compiled(schema, rules, predicates)
+        require_supported(problem)  # before the names: a refused assertion declares a relation
         selected = {name: problem_name(problem, name) for name in select}
         require_supported(problem, [*problem.rule_errors, *selected.values()])
+        # Each predicate is evaluated once: what is checked for uncertainty is what is matched.
+        facts = list(predicate_facts(schema, graph, predicates))
+        refuse_uncertainty(graph, facts)
         model = PlainModel(problem)
         try:
-            model.sync(graph, predicates)
+            model.sync(graph, facts)
             matches = [m for name, p in selected.items() for m in model.matches(p, name)]
             errors = reference_errors(graph) + model.violations()
         finally:
@@ -82,10 +85,11 @@ class JvmEngine(Engine):
         return QueryResult(matches, errors, problem.source, None)
 
 
-def require_supported(problem: CompiledProblem, predicates: Sequence[str]) -> None:
-    """Raise :class:`UnsupportedRuleError` if any of ``predicates`` can't be matched on the
-    direct path."""
-    reasons = [
+def require_supported(problem: CompiledProblem, predicates: Sequence[str] = ()) -> None:
+    """Raise :class:`UnsupportedRuleError` if the rules state what the direct path can't hold
+    (:attr:`~.compile.CompiledProblem.refused`), or any of ``predicates`` can't be matched on it."""
+    reasons = [*problem.refused]
+    reasons += [
         f"{name}: uses {problem.unsupported[name]}"
         for name in predicates
         if name in problem.unsupported
@@ -105,9 +109,9 @@ def problem_name(problem: CompiledProblem, name: str) -> str:
     raise ValueError(f"No predicate named {name!r} to report")
 
 
-def refuse_uncertainty(schema: Schema, graph: Graph, predicates: Sequence[Predicate]) -> None:
-    """Raise :class:`UnsupportedRuleError` if ``graph`` (built with existence) or ``predicates``
-    have something that only may hold."""
+def refuse_uncertainty(graph: Graph, predicate_facts: Iterable[PredicateFact]) -> None:
+    """Raise :class:`UnsupportedRuleError` if ``graph`` (built with existence) or
+    ``predicate_facts`` have something that only may hold."""
     for node in graph.nodes:
         if node.exists != "true":
             raise UnsupportedRuleError(
@@ -119,7 +123,7 @@ def refuse_uncertainty(schema: Schema, graph: Graph, predicates: Sequence[Predic
                     f"{node.name}.{value.feature.name} only may hold: "
                     "the JVM engine matches complete graphs"
                 )
-    for predicate, nodes, answer in predicate_facts(schema, graph, predicates):
+    for predicate, nodes, answer in predicate_facts:
         if answer != "true":
             names = ", ".join(n.name for n in nodes)
             raise UnsupportedRuleError(

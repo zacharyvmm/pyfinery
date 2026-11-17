@@ -18,6 +18,9 @@ _NAMES = {
     "ReferenceDeclaration": "tools.refinery.language.model.problem.ReferenceDeclaration",
     "PredicateDefinition": "tools.refinery.language.model.problem.PredicateDefinition",
     "PredicateKind": "tools.refinery.language.model.problem.PredicateKind",
+    "AbstractAssertion": "tools.refinery.language.model.problem.AbstractAssertion",
+    "NodeDeclaration": "tools.refinery.language.model.problem.NodeDeclaration",
+    "NamedElement": "tools.refinery.language.model.problem.NamedElement",
     # Partial-model symbols the compiler targets, and the built-in ones.
     "PartialRelation": "tools.refinery.store.reasoning.representation.PartialRelation",
     "ModalConstraint": "tools.refinery.store.reasoning.literal.ModalConstraint",

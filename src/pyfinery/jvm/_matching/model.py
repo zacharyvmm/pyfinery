@@ -3,18 +3,21 @@ the difference from what it holds, its violations and matches read back."""
 
 from __future__ import annotations
 
-from collections.abc import Hashable, Iterable, Sequence
+from collections.abc import Hashable, Iterable
 from typing import Any
 
-from ..._instances import Graph
+from ..._instances import Graph, Node
 from ..._mapping import NodeIds, facts
 from ..._options import Predicate
-from ..._render import predicate_facts
-from ..._results import Match, Violation
+from ..._results import Match, Violation, ViolationKind
 from ..._syntax import quote_id
 from .classes import java
 from .compile import CONTAINED, CONTAINER, NODE, CompiledProblem
 from .values import NO_VALUE, to_java
+
+type PredicateFact = tuple[Predicate, tuple[Node, ...], str]
+"""A tuple of a :class:`~pyfinery.Predicate` and its logic value, as
+:func:`~pyfinery._render.predicate_facts` gives them."""
 
 type Key = tuple[str, tuple[int, ...], object]
 """A fact of a plain model: a relation, a tuple of node ids, and its value there: ``True`` (it
@@ -58,9 +61,9 @@ class PlainModel:
 
     # -- writing ---------------------------------------------------------------------------------
 
-    def sync(self, graph: Graph, predicates: Sequence[Predicate] = ()) -> int:
-        """Make the model hold the facts of ``graph`` and of ``predicates`` over it (what
-        certainly holds); return how many facts changed."""
+    def sync(self, graph: Graph, predicate_facts: Iterable[PredicateFact] = ()) -> int:
+        """Make the model hold the facts of ``graph`` and ``predicate_facts`` (those that
+        certainly hold); return how many facts changed."""
         ids = self._new_ids()
         for node in graph.nodes:
             node_id = self.known.get(node.identity)
@@ -70,7 +73,7 @@ class PlainModel:
             ids.put(node, node_id)
         wanted = set(self._constants)
         wanted.update(self._graph_facts(graph, ids))
-        for predicate, nodes, answer in predicate_facts(self.problem.schema, graph, predicates):
+        for predicate, nodes, answer in predicate_facts:
             if answer == "true":
                 wanted.add((quote_id(predicate.name), tuple(ids.id_of(n) for n in nodes), True))
         added, removed = wanted - self.facts, self.facts - wanted
@@ -145,11 +148,18 @@ class PlainModel:
 
     def violations(self) -> list[Violation]:
         """The tuples of the error predicates and structural checks, as a server lists them."""
-        found = []
+        # Checks that report the same relation (a link on a cycle, a link twice) are listed as
+        # one: each tuple once, in order.
+        reported: dict[tuple[ViolationKind, str], set[tuple[int, ...]]] = {}
         for error in self.problem.errors:
-            for key in self.tuples(error.predicate):
+            reported.setdefault((error.kind, error.constraint), set()).update(
+                self.tuples(error.predicate)
+            )
+        found = []
+        for (kind, constraint), keys in reported.items():
+            for key in sorted(keys):
                 names, nodes = self.label(key)
-                found.append(Violation(error.kind, error.constraint, names, nodes))
+                found.append(Violation(kind, constraint, names, nodes))
         return found
 
     def matches(self, predicate: str, reported: str) -> list[Match]:

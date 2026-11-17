@@ -474,3 +474,148 @@ def test_containment_builtins_without_containment():
         """
     )
     assert out == []
+
+
+def test_what_a_plain_model_cant_hold_is_refused():
+    # A server reports bad() here; the model holds the graph's facts, not the rules' assertions.
+    out = run(
+        """
+        from pyfinery.jvm import Session
+
+        objects = [Filesystem(root=Dir(name="home"))]
+        flag = ["pred flag().", "flag().", "error bad() <-> flag()."]
+        out = {}
+        out["assertion"] = raises(UnsupportedRuleError, lambda: violations(objects, flag))
+        out["default"] = raises(UnsupportedRuleError, lambda: violations(
+            objects, ["pred flag().", "default !flag().", "error bad() <-> flag()."]))
+        out["query"] = raises(UnsupportedRuleError, lambda: mm.query(objects, engine, flag))
+        out["session"] = raises(UnsupportedRuleError, lambda: Session(mm, objects, flag))
+        out["node"] = raises(UnsupportedRuleError, lambda: violations(
+            objects, ["atom extra.", "error lonely(Dir d) <-> !contents(d, _)."]))
+        # Declarations that bring nodes, and rules that add facts: only predicates are taken.
+        out["enum"] = raises(UnsupportedRuleError, lambda: violations(
+            objects, ["enum Color { red, green }", "error bad(Color c) <-> Color(c)."]))
+        out["class"] = raises(UnsupportedRuleError, lambda: violations(
+            objects, ["class Extra.", "error bad(Extra e) <-> Extra(e)."]))
+        out["propagation"] = raises(UnsupportedRuleError, lambda: violations(objects, [
+            "pred flag().", "propagation rule set() ==> flag().", "error bad() <-> flag()."]))
+        # The metamodel's own declarations, and predicates of every kind, are fine.
+        out["predicates"] = violations(objects, [
+            "pred big(Dir d) <-> contents(d, _).", "shadow pred any(Dir d) <-> big(d).",
+            "error pred huge(Dir d) <-> big(d), !Dir(d)."])
+        print(json.dumps(out))
+        """
+    )
+    for case in ("assertion", "default", "query", "session"):
+        assert "an assertion about flag in the rules" in out[case], case
+    assert "nodes (extra) in the rules" in out["node"]
+    assert "an enum Color in the rules" in out["enum"]
+    assert "a class Extra in the rules" in out["class"]
+    assert "RuleDefinition set in the rules" in out["propagation"]
+    assert out["predicates"] == ["rule: emptyDir(home)"]
+
+
+def test_one_child_twice_in_one_parent():
+    # Checked against a Refinery server: the same violations.
+    out = run(
+        """
+        from pyfinery import Container, Contains, Metamodel, RefineryNode
+
+        class Thing(RefineryNode):
+            pass
+
+        class Owner(RefineryNode):
+            first: list[Thing] = Contains()
+            second: list[Thing] = Contains()
+
+        class Parent(RefineryNode):
+            first: list["Child"] = Contains(opposite="parent")
+            second: list["Child"] = Contains()
+
+        class Child(RefineryNode):
+            parent: Parent | None = Container(opposite="first")
+
+        class Three(RefineryNode):
+            p: list[Thing] = Contains()
+            q: list[Thing] = Contains()
+            r: list[Thing] = Contains()
+
+        class Tree(RefineryNode):
+            first: list["Tree"] = Contains()
+            second: list["Tree"] = Contains()
+
+        x = Thing()
+        both = Owner(first=[x], second=[x])
+        one = Owner(first=[Thing()], second=[Thing()])
+        owners = Metamodel(Owner)
+        t = Thing()
+        a, b, c = Tree(), Tree(), Tree()
+        a.first, a.second, b.first = [b, c], [c], [a]  # c twice in a; a and b on a cycle
+
+        def found(metamodel, objects):
+            return [str(v) for v in metamodel.validate(objects, engine).violations]
+
+        out = {
+            "both": found(owners, [both]),
+            "one": found(owners, [one]),
+            "three_empty": found(Metamodel(Three), [Three()]),
+            "three": found(Metamodel(Three), [Three(p=[t], r=[t])]),
+            "merged": found(Metamodel(Tree), [a]),
+        }
+        kid = Child()
+        out["opposite"] = found(Metamodel(Parent), [Parent(first=[kid], second=[kid])])
+        print(json.dumps(out))
+        """
+    )
+    assert out["both"] == [
+        "containment: builtin::invalidContainer(thing_1)",
+        "contradiction: Owner::first(owner_1, thing_1)",
+        "contradiction: Owner::second(owner_1, thing_1)",
+    ]
+    assert out["one"] == []
+    assert out["three_empty"] == []
+    assert out["three"] == [
+        "containment: builtin::invalidContainer(thing_1)",
+        "contradiction: Three::p(three_1, thing_1)",
+        "contradiction: Three::r(three_1, thing_1)",
+    ]
+    # The opposite of the link held twice is a contradiction too (the parent isn't set in
+    # Python: the opposite holds as Refinery reads it). Checked against a server.
+    assert out["opposite"] == [
+        "containment: builtin::invalidContainer(child_1)",
+        "contradiction: Child::parent(child_1, parent_1)",
+        "contradiction: Parent::first(parent_1, child_1)",
+        "contradiction: Parent::second(parent_1, child_1)",
+    ]
+    # Both checks of Tree::first (twice, and on a cycle) are listed as one, in order.
+    assert out["merged"] == [
+        "containment: builtin::invalidContainer(tree_1)",
+        "containment: builtin::invalidContainer(tree_2)",
+        "containment: builtin::invalidContainer(tree_3)",
+        "contradiction: Tree::first(tree_1, tree_2)",
+        "contradiction: Tree::first(tree_1, tree_3)",
+        "contradiction: Tree::first(tree_2, tree_1)",
+        "contradiction: Tree::second(tree_1, tree_3)",
+    ]
+
+
+def test_a_query_evaluates_each_predicate_once():
+    out = run(
+        """
+        from pyfinery import Predicate
+
+        objects = [Filesystem(root=Dir(name="home"))]
+        calls = []
+
+        def marked(d):  # what may hold after it was found to hold is never seen
+            calls.append(d.name)
+            return True if len(calls) == 1 else "unknown"
+
+        result = mm.query(objects, engine, ["pred tagged(Dir d) <-> marked(d)."],
+                          select=["tagged"],
+                          predicates=[Predicate("marked", (Dir,), evaluate=marked)])
+        out = {"matches": [list(m.node_names) for m in result.matches], "calls": calls}
+        print(json.dumps(out))
+        """
+    )
+    assert out == {"matches": [["home"]], "calls": ["home"]}
