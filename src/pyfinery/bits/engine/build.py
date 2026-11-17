@@ -24,14 +24,16 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
+
+import numpy as np
 
 from ..._instances import Graph, Value
 from ..._options import LogicValue, Predicate
 from ..._render import predicate_facts
 from ..._schema import EnumLike, Feature, LiteralEnum, Schema
 from ..matrices.kernels import NodeIndex
-from ..matrices.model import Attribute, DataType, Node, PartialModel, Relation
+from ..matrices.model import Attribute, DataType, Node, PartialModel, Relation, simple_name_of
 from ..matrices.values import NodeTuple
 from ..names import refinery_name
 
@@ -50,7 +52,7 @@ def partial_model(
 ) -> tuple[PartialModel, list[BaseModel | None]]:
     """The partial model of ``graph`` in a closed world, and the object of each node
     (``None`` for enum literals)."""
-    model = ModelBuilder(graph)
+    model = ModelBuilder(schema, graph)
     for enum_type in schema.enums:
         model.enum(enum_type)
     for cls in schema.classes:
@@ -62,7 +64,7 @@ def partial_model(
             model.feature(feature)
     for i, node in enumerate(graph.nodes):
         for value in node.values:
-            model.value(schema, i, value)
+            model.value(i, value)
     for predicate in predicates:
         model.relation(refinery_name(predicate.name), len(predicate.parameters))
     for predicate, arguments, answer in predicate_facts(schema, graph, predicates):
@@ -76,9 +78,15 @@ type Facts = dict[NodeTuple, LogicValue]
 
 
 class ModelBuilder:
-    """The partial model of a graph, built up from its classes, features and values."""
+    """The partial model of a graph, built up from its classes, features and values.
 
-    def __init__(self, graph: Graph) -> None:
+    Nodes are grouped by their type once, so that the members of a class are found
+    from one ``isinstance`` per type, not per node; a feature's names are worked out
+    once, not per value.
+    """
+
+    def __init__(self, schema: Schema, graph: Graph) -> None:
+        self.schema = schema
         self.graph = graph
         names = [output_name(node.name) for node in graph.nodes]
         self.nodes = [Node(name, name) for name in names]
@@ -89,8 +97,17 @@ class ModelBuilder:
         """Each enum literal, by the enum's name and the member's."""
         self.relations: dict[str, tuple[int, Facts]] = {}
         """Each relation's arity and facts, by name."""
+        self.no_value: dict[str, list[NodeIndex]] = {}
+        """The boolean attributes, by name, and the nodes of their class: on others (enum
+        literals too), they have no value, an error."""
         self.attributes: dict[str, tuple[DataType, dict[NodeIndex, object]]] = {}
         """Each attribute's type and values (``None`` if unknown), by name."""
+        self.by_type: dict[type, list[NodeIndex]] = {}
+        """The graph's nodes, by the type of their object."""
+        for i, node in enumerate(graph.nodes):
+            self.by_type.setdefault(type(node.obj), []).append(i)
+        self.named: dict[int, FeatureNames] = {}
+        """What each feature's values are put under, by the feature's ``id()``."""
         exists = self.relation("builtin::exists", 1)
         for i, node in enumerate(graph.nodes):
             exists[(i,)] = node.exists
@@ -102,6 +119,15 @@ class ModelBuilder:
         tuples = self.relations[name][1]
         if tuples.get(key) != "true":  # of a fact given twice, the surer one
             tuples[key] = value
+
+    def members(self, classes: type | tuple[type, ...]) -> list[NodeIndex]:
+        """The graph's nodes whose object is an instance of ``classes``, in order."""
+        found: list[NodeIndex] = []
+        for nodes in self.by_type.values():
+            if isinstance(self.graph.nodes[nodes[0]].obj, classes):
+                found += nodes
+        found.sort()
+        return found
 
     def enum(self, enum_type: EnumLike) -> None:
         """The enum's literals are atoms, and its class holds them."""
@@ -122,30 +148,39 @@ class ModelBuilder:
 
     def class_(self, name: str, classes: type | tuple[type, ...]) -> None:
         members = self.relation(name, 1)
-        for i, node in enumerate(self.graph.nodes):
-            if isinstance(node.obj, classes):
-                members[(i,)] = "true"
+        for i in self.members(classes):
+            members[(i,)] = "true"
 
     def feature(self, feature: Feature) -> None:
-        name = feature_name(feature)
+        name = self.names(feature).name
         if not feature.is_attribute:
             self.relation(name, 2)
             return
         # Unknown on the nodes of the class, until a value is given; none elsewhere.
-        members = [
-            i for i, node in enumerate(self.graph.nodes) if isinstance(node.obj, feature.owner)
-        ]
-        self.attributes[name] = (feature.target, {i: None for i in members})  # type: ignore[assignment]
+        members = self.members(feature.owner)
+        self.attributes[name] = (feature.target, dict.fromkeys(members))  # type: ignore[assignment]
         if feature.target == "boolean":
             values = self.relation(name, 1)
-            for i in range(len(self.nodes)):  # enum literals too
-                values[(i,)] = "error"  # no value outside the class
             for i in members:
                 values[(i,)] = "unknown"
+            self.no_value[name] = members
 
-    def value(self, schema: Schema, i: NodeIndex, value: Value) -> None:
+    def names(self, feature: Feature) -> FeatureNames:
+        """What ``feature``'s values are put under: worked out once per feature."""
+        found = self.named.get(id(feature))
+        if found is None:
+            opposite = None
+            if feature.opposite is not None:
+                opposite = opposite_name(self.schema, feature)
+            enum = type_name(feature.target) if feature.is_enum else None
+            found = FeatureNames(feature_name(feature), opposite, enum)
+            self.named[id(feature)] = found
+        return found
+
+    def value(self, i: NodeIndex, value: Value) -> None:
         feature = value.feature
-        name = feature_name(feature)
+        names = self.names(feature)
+        name = names.name
         if feature.is_attribute:
             if value.certain:  # an uncertain value is simply unknown
                 self.attributes[name][1][i] = value.value
@@ -153,30 +188,59 @@ class ModelBuilder:
                     self.relations[name][1][(i,)] = "true" if value.value else "false"
             return
         certainty: LogicValue = "true" if value.certain else "unknown"
-        if feature.is_enum:
+        if names.enum is not None:
             member = value.value if isinstance(feature.target, LiteralEnum) else value.value.name
-            target = self.literals[(type_name(feature.target), member)]
+            target = self.literals[(names.enum, member)]
         elif value.target is not None:
             target = self.index[id(value.target)]
         else:
             return  # a key that resolves to no node: reported by reference_errors
         self.holds(name, (i, target), certainty)
-        if feature.opposite is not None:
-            other = schema.find_feature(feature.target, feature.opposite)  # type: ignore[arg-type]
-            assert other is not None
-            self.holds(feature_name(other), (target, i), certainty)
+        if names.opposite is not None:
+            self.holds(names.opposite, (target, i), certainty)
 
     def build(self) -> PartialModel:
         n = len(self.nodes)
-        relations = [
-            Relation.of(name, arity, tuples.items())
-            for name, (arity, tuples) in self.relations.items()
-        ]
+        relations = []
+        for name, (arity, tuples) in self.relations.items():
+            if name in self.no_value:
+                relations.append(boolean_relation(name, n, tuples, self.no_value[name]))
+            else:
+                relations.append(Relation.of(name, arity, tuples.items()))
         attributes = [
             Attribute.of(name, data_type, n, values.items())
             for name, (data_type, values) in self.attributes.items()
         ]
         return PartialModel(self.nodes, relations, attributes)
+
+
+class FeatureNames(NamedTuple):
+    """What a feature's values are put under."""
+
+    name: str
+    """The feature's relation (or attribute)."""
+    opposite: str | None
+    """Its opposite's relation, if it has one."""
+    enum: str | None
+    """The enum it takes literals of, if it does."""
+
+
+def boolean_relation(name: str, n: int, facts: Facts, members: list[NodeIndex]) -> Relation:
+    """A boolean attribute as a relation: ``facts`` on the nodes of its class
+    (``members``), and an error (no value) on the others."""
+    must = np.ones(n, bool)
+    must[members] = False
+    may = np.zeros(n, bool)
+    for (i,), value in facts.items():
+        must[i] = value in ("true", "error")
+        may[i] = value in ("true", "unknown")
+    return Relation(
+        name,
+        1,
+        np.flatnonzero(must).astype(np.intp)[:, None],
+        np.flatnonzero(may).astype(np.intp)[:, None],
+        simple_name_of(name),
+    )
 
 
 def type_name(node_class: object) -> str:

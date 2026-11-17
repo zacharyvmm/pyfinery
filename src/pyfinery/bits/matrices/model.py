@@ -147,23 +147,29 @@ class Attribute:
         rounded outward to 16 significant digits. Nodes not given have no
         value (error).
         """
-        lower: list[Number] = [math.inf] * n
-        upper: list[Number] = [-math.inf] * n
-        strings: list[str | None] = [None] * n
+        given: dict[NodeIndex, tuple[Number, Number]] = {}  # a node given twice: the last
+        strings: list[str | None] = [None] * n if data_type == "string" else []
         for node, value in values:
             if data_type == "string" and isinstance(value, str):
                 strings[node] = value
-                lower[node] = upper[node] = 0
+                given[node] = (0, 0)
                 continue
-            lower[node], upper[node] = as_interval(value, data_type)
-        bounds = [b for b in (*lower, *upper) if not isinstance(b, float)]
+            given[node] = as_interval(value, data_type)
+        # Floats, unless a bound given can't be one exactly (nodes not given: infinities).
+        bounds = [b for pair in given.values() for b in pair if not isinstance(b, float)]
         dtype = np.float64 if all(float(b) == b for b in bounds) else object
+        lower = np.full(n, math.inf, dtype=dtype)
+        upper = np.full(n, -math.inf, dtype=dtype)
+        if given:
+            at = np.fromiter(given, np.intp, len(given))
+            lower[at] = np.array([low for low, _ in given.values()], dtype=dtype)
+            upper[at] = np.array([high for _, high in given.values()], dtype=dtype)
         return cls(
             name,
             data_type,
-            np.array(lower, dtype=dtype),
-            np.array(upper, dtype=dtype),
-            tuple(strings) if data_type == "string" else (),
+            lower,
+            upper,
+            tuple(strings),
             simple_name or simple_name_of(name),
         )
 

@@ -346,3 +346,12 @@ def test_a_selected_predicate_without_a_body_has_the_models_arity():
     ):
         evaluate("pred Person().", model(), select=["Person"])
     assert len(list(evaluate("pred Person(x).", model(), select=["Person"])["Person"].items())) == 3
+
+
+def test_an_attribute_value_given_twice_is_the_last():
+    # The array is exact (object) only if a value kept needs it: 10**30 is replaced.
+    replaced = Attribute.of("A::n", "int", 3, [(1, 10**30), (1, "error"), (2, 4)])
+    assert replaced.lower.dtype == float and replaced.lower[1] > replaced.upper[1]
+    kept = Attribute.of("A::n", "int", 3, [(1, 4), (1, 10**30)])
+    assert kept.lower.dtype == object and kept.lower[1] == 10**30
+    assert Attribute.of("A::s", "string", 2, [(0, "a"), (0, "b")]).strings == ("b", None)

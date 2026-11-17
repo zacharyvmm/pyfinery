@@ -8,6 +8,7 @@ string literals with Java's escapes."""
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 
 # The keywords Refinery quotes when it writes a name: its grammar's keywords, but those
 # its Identifier rule also takes as names (IdentifierValueConverter, Problem.xtext).
@@ -23,9 +24,11 @@ JAVA_ESCAPES = {"\\": "\\\\", "'": "\\'", '"': '\\"', "\n": "\\n", "\t": "\\t", 
 JAVA_ESCAPES |= {"\b": "\\b", "\f": "\\f"}
 
 
+@lru_cache(maxsize=1 << 16)
 def refinery_name(value: str) -> str:
     """A name as Refinery writes it in its output (``IdentifierValueConverter``):
-    as it is if it is an identifier and not a keyword, else quoted, Java-escaped."""
+    as it is if it is an identifier and not a keyword, else quoted, Java-escaped.
+    The names of a metamodel come back for every graph: they are remembered."""
     if SIMPLE_NAME.match(value) and value not in QUOTED_KEYWORDS:
         return value
     return "'" + "".join(JAVA_ESCAPES.get(c, c) for c in value) + "'"
