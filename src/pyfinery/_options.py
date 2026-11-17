@@ -8,11 +8,12 @@ predicates, and :class:`RefineryNode`.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal, get_args
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic.fields import FieldInfo
 
 ReferenceKind = Literal["refers", "contains", "container"]
@@ -34,6 +35,8 @@ class RefOptions:
 def Ref(  # noqa: N802 - reads like a type annotation
     opposite: str | None = None,
     multiplicity: str | tuple[int, int | None] | None = None,
+    *,
+    kind: ReferenceKind = "refers",
     **field: Any,
 ) -> Any:
     """A reference field with Refinery-specific options, as the field's default::
@@ -50,8 +53,13 @@ def Ref(  # noqa: N802 - reads like a type annotation
     :param opposite: Name of the opposite reference in the target class.
     :param multiplicity: Overrides the multiplicity inferred from the type,
         e.g. ``"1..*"``, ``"2"`` or ``(1, None)``.
+    :param kind: ``"contains"`` for containment, ``"container"`` for the
+        opposite of a containment reference; :func:`Contains` and
+        :func:`Container` say the same.
     """
-    return _field(RefOptions(opposite, "refers", multiplicity), field)
+    if kind not in get_args(ReferenceKind):
+        raise ValueError(f"Ref(kind={kind!r}): kind is one of {', '.join(get_args(ReferenceKind))}")
+    return _field("Ref", RefOptions(opposite, kind, multiplicity), field)
 
 
 def Contains(  # noqa: N802
@@ -66,7 +74,7 @@ def Contains(  # noqa: N802
         class Dir(RefineryNode):
             contents: list[FSObject] = Contains(multiplicity="0..3")
     """
-    return _field(RefOptions(opposite, "contains", multiplicity), field)
+    return _field("Contains", RefOptions(opposite, "contains", multiplicity), field)
 
 
 def Container(opposite: str | None = None, **field: Any) -> Any:  # noqa: N802
@@ -80,11 +88,31 @@ def Container(opposite: str | None = None, **field: Any) -> Any:  # noqa: N802
     opposite of; it can be left out when exactly one fits. Takes Pydantic's
     ``Field`` arguments too.
     """
-    return _field(RefOptions(opposite, "container"), field)
+    return _field("Container", RefOptions(opposite, "container"), field)
 
 
-def _field(options: RefOptions, field: dict[str, Any]) -> FieldInfo:
-    info: FieldInfo = Field(**field)
+_FIELD_PARAMETERS = frozenset(
+    name
+    for name, parameter in inspect.signature(Field).parameters.items()
+    if parameter.kind is not inspect.Parameter.VAR_KEYWORD
+)
+
+
+def _field(marker: str, options: RefOptions, field: dict[str, Any]) -> FieldInfo:
+    """Pydantic's ``Field(**field)``, with ``options`` in its metadata.
+
+    ``Field`` keeps the arguments it doesn't take as JSON schema extras, where they change
+    nothing: those are refused. Its deprecated arguments, such as ``min_items``, still work.
+    """
+    beyond = [name for name in field if name not in _FIELD_PARAMETERS]
+    # Without json_schema_extra, Field puts what it doesn't take there, and only that.
+    probe = {name: value for name, value in field.items() if name != "json_schema_extra"}
+    info: FieldInfo = Field(**probe)
+    if beyond and isinstance(info.json_schema_extra, dict) and info.json_schema_extra:
+        unknown = ", ".join(sorted(info.json_schema_extra))
+        raise TypeError(f"{marker}() got unexpected keyword arguments: {unknown}")
+    if "json_schema_extra" in field:  # even None: it replaces what an Annotated Field gave
+        info = Field(**field)
     info.metadata.append(options)
     return info
 
@@ -184,19 +212,32 @@ class RefineryNode(BaseModel):
     __abstract__: ClassVar[bool] = False
     __node_id__: ClassVar[str | None] = None
 
-    @model_validator(mode="before")
     @classmethod
-    def _empty_references(cls, data: Any) -> Any:
-        """Fill in the reference fields declared with a marker and no default: a collection
-        is empty, an optional field ``None``."""
-        if not isinstance(data, dict):
-            return data
-        missing = {
-            cls.model_fields[name].alias or name: empty()
-            for name, empty in _empty_defaults(cls).items()
-            if name not in data and cls.model_fields[name].alias not in data
-        }
-        return {**data, **missing} if missing else data
+    def __pydantic_on_complete__(cls) -> None:
+        """Give the reference fields declared with a marker and no default one, once their
+        types are known: an empty collection, or ``None`` if optional. Pydantic then fills
+        them in itself, under whatever key or alias it reads them from."""
+        super().__pydantic_on_complete__()
+        marked = [
+            info
+            for info in cls.model_fields.values()
+            if info.is_required() and any(isinstance(m, RefOptions) for m in info.metadata)
+        ]
+        if not marked:
+            return
+        from ._schema import empty_factory  # _schema imports this module
+
+        changed = False
+        for info in marked:
+            factory = empty_factory(info)
+            if factory is not None:
+                # Validated as a given value is: constraints and field validators apply.
+                info.default_factory = factory
+                info.validate_default = True
+                info._attributes_set.update(default_factory=factory, validate_default=True)
+                changed = True
+        if changed:  # inherited fields have their default already: once per declaring class
+            cls.model_rebuild(force=True)
 
     def model_post_init(self, context: Any, /) -> None:
         if type(self).__dict__.get("__abstract__", False):
@@ -231,22 +272,3 @@ def _short_repr(value: Any) -> Any:
     if isinstance(value, set | frozenset):
         return [_short_repr(v) for v in value]
     return value
-
-
-_EMPTY: dict[type, dict[str, Callable[[], Any]]] = {}
-
-
-def _empty_defaults(cls: type[BaseModel]) -> dict[str, Callable[[], Any]]:
-    """How to make the value of each of ``cls``'s required reference fields declared with a
-    marker when left out: an empty collection, or ``None`` if optional."""
-    if cls not in _EMPTY:
-        from ._schema import empty_factory  # _schema imports this module
-
-        found = {}
-        for name, info in cls.model_fields.items():
-            if info.is_required() and any(isinstance(m, RefOptions) for m in info.metadata):
-                factory = empty_factory(info)
-                if factory is not None:
-                    found[name] = factory
-        _EMPTY[cls] = found
-    return _EMPTY[cls]
