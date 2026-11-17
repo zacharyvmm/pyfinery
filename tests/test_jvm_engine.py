@@ -474,3 +474,82 @@ def test_containment_builtins_without_containment():
         """
     )
     assert out == []
+
+
+def test_what_a_plain_model_cant_hold_is_refused():
+    # A server reports bad() here; the model holds the graph's facts, not the rules' assertions.
+    out = run(
+        """
+        from pyfinery.jvm import Session
+
+        objects = [Filesystem(root=Dir(name="home"))]
+        flag = ["pred flag().", "flag().", "error bad() <-> flag()."]
+        out = {}
+        out["assertion"] = raises(UnsupportedRuleError, lambda: violations(objects, flag))
+        out["default"] = raises(UnsupportedRuleError, lambda: violations(
+            objects, ["pred flag().", "default !flag().", "error bad() <-> flag()."]))
+        out["query"] = raises(UnsupportedRuleError, lambda: mm.query(objects, engine, flag))
+        out["session"] = raises(UnsupportedRuleError, lambda: Session(mm, objects, flag))
+        out["node"] = raises(UnsupportedRuleError, lambda: violations(
+            objects, ["atom extra.", "error lonely(Dir d) <-> !contents(d, _)."]))
+        print(json.dumps(out))
+        """
+    )
+    for case in ("assertion", "query", "session"):
+        assert "an assertion about flag in the rules" in out[case], case
+    assert "an assertion about flag in the rules" in out["default"]
+    assert "nodes declared in the rules (extra)" in out["node"]
+
+
+def test_one_child_twice_in_one_parent():
+    # Checked against a Refinery server: the same violations.
+    out = run(
+        """
+        from pyfinery import Contains, Metamodel, RefineryNode
+
+        class Thing(RefineryNode):
+            pass
+
+        class Owner(RefineryNode):
+            first: list[Thing] = Contains()
+            second: list[Thing] = Contains()
+
+        x = Thing()
+        both = Owner(first=[x], second=[x])
+        one = Owner(first=[Thing()], second=[Thing()])
+        owners = Metamodel(Owner)
+        out = {
+            "both": [str(v) for v in owners.validate([both], engine).violations],
+            "one": [str(v) for v in owners.validate([one], engine).violations],
+        }
+        print(json.dumps(out))
+        """
+    )
+    assert out["both"] == [
+        "containment: builtin::invalidContainer(thing_1)",
+        "contradiction: Owner::first(owner_1, thing_1)",
+        "contradiction: Owner::second(owner_1, thing_1)",
+    ]
+    assert out["one"] == []
+
+
+def test_a_query_evaluates_each_predicate_once():
+    out = run(
+        """
+        from pyfinery import Predicate
+
+        objects = [Filesystem(root=Dir(name="home"))]
+        calls = []
+
+        def marked(d):  # what may hold after it was found to hold is never seen
+            calls.append(d.name)
+            return True if len(calls) == 1 else "unknown"
+
+        result = mm.query(objects, engine, ["pred tagged(Dir d) <-> marked(d)."],
+                          select=["tagged"],
+                          predicates=[Predicate("marked", (Dir,), evaluate=marked)])
+        out = {"matches": [list(m.node_names) for m in result.matches], "calls": calls}
+        print(json.dumps(out))
+        """
+    )
+    assert out == {"matches": [["home"]], "calls": ["home"]}

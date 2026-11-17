@@ -34,6 +34,11 @@ What the direct path can't match (e.g. the ``meet``, ``join`` and ``reify``
 aggregators, which are about partial models) makes the predicates that use it,
 and those that call them, unsupported: they are listed in
 :attr:`CompiledProblem.unsupported` and not matched.
+
+The model holds the graph's facts and those of :class:`~pyfinery.Predicate`
+objects only. Assertions in the rules (``flag().``, ``default !link(*, *).``)
+and nodes they declare (``atom a.``) are not held, so they are listed in
+:attr:`CompiledProblem.refused`, rather than left out without a word.
 """
 
 from __future__ import annotations
@@ -94,6 +99,8 @@ class CompiledProblem:
             problem = injector.getInstance(j.ProblemLoader).loadString(text)
         except j.InvalidProblemException as error:
             raise InvalidProblemError(str(error.getMessage())) from None
+        self.refused = _refused_statements(problem)
+        """What the rules state that a plain model can't hold: assertions and node declarations."""
         initializer = injector.getInstance(j.ModelInitializer)
         initializer.readProblem(problem)
         trace = initializer.getProblemTrace()
@@ -393,6 +400,22 @@ class CompiledProblem:
             .build()
         )
         return inner.aggregateBy(result, aggregator, j.ArrayList([*arguments, result]))
+
+
+def _refused_statements(problem: Any) -> list[str]:
+    """Why the statements of ``problem`` that a plain model can't hold are refused. pyfinery
+    renders neither assertions nor node declarations, so these come from the rules."""
+    j = java()
+    reasons = []
+    for statement in problem.getStatements():
+        if isinstance(statement, j.AbstractAssertion):
+            relation = statement.getRelation()
+            name = str(relation.getName()) if relation is not None else "?"
+            reasons.append(f"an assertion about {name} in the rules: give facts as Predicates")
+        elif isinstance(statement, j.NodeDeclaration):
+            names = ", ".join(str(node.getName()) for node in statement.getNodes())
+            reasons.append(f"nodes declared in the rules ({names}): the model holds the graph's")
+    return reasons
 
 
 def _error(check: Check, order: dict[str, int]) -> ErrorQuery:

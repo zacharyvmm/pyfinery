@@ -99,6 +99,14 @@ def test_containment_checks():
     assert f"!{CONTAINS}(_, y)" in invalid
     assert f"{CONTAINS}(a, y), {CONTAINS}(b, y), a != b" in invalid
     assert f"{CONTAINS}+(y, y)" in invalid
+    # The same container twice, through both containment references: one link in CONTAINS.
+    assert "pyfinery_twice0(_, y) ; pyfinery_twice1(_, y)" in invalid
+    assert lines["pyfinery_twice0"] == (
+        "pred pyfinery_twice0(node x, node y) <-> Box::items(x, y), (Box::extra(x, y))."
+    )
+    assert lines["pyfinery_twice1"] == (
+        "pred pyfinery_twice1(node x, node y) <-> Box::extra(x, y), (Box::items(x, y))."
+    )
 
     by_kind: dict[str, list[Check]] = {}
     for check in found.checks:
@@ -106,8 +114,14 @@ def test_containment_checks():
     assert by_kind["containment"] == [
         Check(INVALID_CONTAINER, "containment", "builtin::invalidContainer")
     ]
-    # A contradiction for each containment reference, and each container reference.
-    contradictions = {c.constraint: c.predicate for c in by_kind["contradiction"]}
+    # Twice in one container contradicts each containment reference.
+    twice = [c for c in by_kind["contradiction"] if c.predicate.startswith("pyfinery_twice")]
+    assert twice == [
+        Check("pyfinery_twice0", "contradiction", "Box::items"),
+        Check("pyfinery_twice1", "contradiction", "Box::extra"),
+    ]
+    # A contradiction on a cycle for each containment reference, and each container reference.
+    contradictions = {c.constraint: c.predicate for c in by_kind["contradiction"] if c not in twice}
     assert set(contradictions) == {"Box::items", "Box::extra", "Item::box"}
     for constraint, predicate in contradictions.items():
         line = lines[predicate]

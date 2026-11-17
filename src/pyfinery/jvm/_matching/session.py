@@ -31,6 +31,7 @@ from pydantic import BaseModel
 
 from ..._instances import build_graph
 from ..._options import Predicate
+from ..._render import predicate_facts
 from ..._results import ValidationReport, Violation, reference_errors
 from .cache import compiled
 from .engine import require_supported
@@ -152,9 +153,10 @@ class Session:
 
     def _current(self) -> list[Violation]:
         self._check_open()
-        graph = build_graph(self.metamodel.schema, self._roots.values())
-        self._model.sync(graph, self._predicates)
-        found = self._model.violations()
+        schema = self.metamodel.schema
+        graph = build_graph(schema, self._roots.values())
+        self._model.sync(graph, predicate_facts(schema, graph, self._predicates))
+        found = reference_errors(graph) + self._model.violations()
         keys = {}
         for violation in found:
             ids = tuple(
@@ -163,7 +165,7 @@ class Session:
             )
             keys[(violation.kind, violation.constraint, ids)] = violation
         self._reported = keys
-        return reference_errors(graph) + found
+        return found
 
     # -- undoing -----------------------------------------------------------------------------------
 
