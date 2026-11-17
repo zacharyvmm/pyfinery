@@ -8,7 +8,7 @@ Evaluation computes the ``must`` and ``may`` values of each relation the
 selected predicates read, once, in steps that each come after the values
 they read:
 
-The relations of the model are already packed (:class:`~.packed.PackedModel`).
+The relations of the model are already packed (:class:`~.batch.PackedBatch`).
 Beyond them, there are:
 
 - :class:`Undetermined`: a predicate without a body or values, unknown
@@ -32,7 +32,7 @@ from ..rules.syntax import Position, Predicate
 from .clauses import CallLiteral, Clause, Target, normalize, resolve
 
 if TYPE_CHECKING:
-    from ..matrices.packed import PackedModel
+    from ..matrices.batch import PackedBatch
 
 EXISTS_TARGET = Target("base", EXISTS)
 """Which nodes exist: what variables that aren't parameters range over."""
@@ -74,7 +74,7 @@ type Step = Undetermined | Closure | Derivation
 
 def plan(
     targets: Sequence[Target],
-    model: PackedModel,
+    model: PackedBatch,
     defined: Mapping[str, Predicate],
     declared: Mapping[str, Predicate],
 ) -> list[Step]:
@@ -125,7 +125,7 @@ def refuse_recursion(predicate: Predicate, active: list[str]) -> None:
 
 def normalized(
     predicate: Predicate,
-    model: PackedModel,
+    model: PackedBatch,
     defined: Mapping[str, Predicate],
     declared: Mapping[str, Predicate],
 ) -> tuple[Clause, ...]:
@@ -146,7 +146,7 @@ def reading_order(clauses: Iterable[Clause]) -> Iterator[CallLiteral]:
 
 def parameter_types(
     predicate: Predicate,
-    model: PackedModel,
+    model: PackedBatch,
     defined: Mapping[str, Predicate],
     declared: Mapping[str, Predicate],
 ) -> tuple[Target | None, ...]:

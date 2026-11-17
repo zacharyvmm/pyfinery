@@ -34,7 +34,19 @@ import numpy as np
 
 from .kernels import Indices, NodeIndex
 from .model import BUILTINS, Attribute, LogicValue, Node, PartialModel, Relation, atom_index, lookup
-from .values import Bits, NodeTuple, Value, difference, empty, from_tuples, relabel, union
+from .values import (
+    Bits,
+    NodeTuple,
+    Size,
+    difference,
+    empty,
+    from_tuples,
+    graph_bits,
+    of_graph,
+    relabel,
+    union,
+    with_graph,
+)
 
 if TYPE_CHECKING:
     from ..evaluation.pipeline import PredicateValues
@@ -133,11 +145,13 @@ class PackedModel:
                 raise ValueError(f"{found.name} relates {arity} nodes, not {len(key)}: {key}")
             if any(not 0 <= int(i) < n for i in key):
                 raise ValueError(f"{key} names a node beyond the model's {n}")
-        facts = from_tuples(arity, n, np.array(keys, np.intp).reshape(len(keys), arity))
+        size = Size(1, n)
+        keyed = np.array(keys, np.intp).reshape(len(keys), arity)
+        facts = from_tuples(arity, size, with_graph(keyed))
 
         def set_facts(current: Bits, holds: bool) -> Bits:
-            kept = difference(Value(arity, n, current), facts)
-            return union(kept, facts if holds else empty(arity, n)).data
+            kept = difference(of_graph(arity, n, current), facts)
+            return graph_bits(union(kept, facts if holds else empty(arity, size)))
 
         must = set_facts(found.must, value in ("true", "error"))
         may = set_facts(found.may, value in ("true", "unknown"))
@@ -164,11 +178,12 @@ class PackedModel:
 
 def pack(relation: Relation, n: int) -> PackedRelation:
     """A relation's must and may tuples as bits: one array if they're the same tuples."""
-    must = from_tuples(relation.arity, n, relation.must).data
+    size = Size(1, n)
+    must = graph_bits(from_tuples(relation.arity, size, with_graph(relation.must)))
     if np.array_equal(relation.must, relation.may):
         may = must
     else:
-        may = from_tuples(relation.arity, n, relation.may).data
+        may = graph_bits(from_tuples(relation.arity, size, with_graph(relation.may)))
     return PackedRelation(relation.name, relation.arity, must, may, relation.simple_name)
 
 
@@ -208,12 +223,12 @@ def combine_relations(
     named = parts[0][0]
     if any(relation.arity != named.arity for relation, _, _ in parts):
         raise ValueError(f"{named.name} has a different arity in each graph")
-    arity = named.arity
-    must, may = empty(arity, n), empty(arity, n)
+    arity, combined = named.arity, Size(1, n)
+    must, may = empty(arity, combined), empty(arity, combined)
     for relation, size, places in parts:
-        must = union(must, relabel(Value(arity, size, relation.must), n, places))
-        may = union(may, relabel(Value(arity, size, relation.may), n, places))
-    return PackedRelation(named.name, arity, must.data, may.data, named.simple_name)
+        must = union(must, relabel(of_graph(arity, size, relation.must), combined, places[None]))
+        may = union(may, relabel(of_graph(arity, size, relation.may), combined, places[None]))
+    return PackedRelation(named.name, arity, graph_bits(must), graph_bits(may), named.simple_name)
 
 
 def combine_attributes(

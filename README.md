@@ -232,6 +232,25 @@ The matches are the ones Refinery computes, with the same logic values. Relation
   evaluate(rules, both)
   ```
 
+### Querying many graphs at once
+
+`query_batch()` asks the same rules of many graphs, each its own closed world as if queried alone, and returns a `QueryResult` per graph, in order. With a `BitsEngine`, the rules are read once and evaluated on graphs of about the same size together: their relations are stacked into arrays with a leading axis of graphs, and each step of the evaluation (matrix products, closures, joins) is one array operation over all of them. Other engines query the graphs one at a time.
+
+```python
+results = metamodel.query_batch(
+    [[deployment_1], [deployment_2], [deployment_3]],  # the objects of each graph
+    BitsEngine(),
+    rules,
+    predicates=[floating_tag],             # given to every graph
+    graph_predicates=[facts_1, facts_2, facts_3],  # optional: one list per graph
+    return_exceptions=True,                # a refused graph's exception in its place
+)
+```
+
+On 1,000 graphs of about 8 objects each, `query_batch()` takes 1.1 ms a graph and `query()` 5.9 ms; on 100 graphs of about 100 objects, 11 ms and 22 ms. Beyond evaluation, each graph is still built, checked and read back on its own in Python, which is most of what's left for larger graphs.
+
+Without a metamodel, `evaluate_batch(rules, models)` (or `PackedBatch.build(models).evaluate(rules)`) evaluates rules on `PartialModel`s or `PackedModel`s, and `values[g]` is graph `g`'s answer. In a batch, `batch["edge"].must` has shape `(graphs, n, words)`: each graph's nodes take the first slots, padded to the largest graph, and the atoms of every graph one slot each after them.
+
 ## Mapping Pydantic classes to Refinery
 
 `Metamodel(*classes, ...)` collects the given classes, their superclasses, the classes their fields refer to, and the already-imported subclasses of those. It doesn't collect every subclass of a shared base class.

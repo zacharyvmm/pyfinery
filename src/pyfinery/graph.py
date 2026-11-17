@@ -57,12 +57,19 @@ in ``_engines``, Refinery syntax in ``_syntax``, and reports in ``_results``.
 from __future__ import annotations
 
 from collections.abc import Hashable, Iterable, Mapping
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, overload
 
 from pydantic import BaseModel
 
-from ._engines import Problems, async_engine, async_query_engine, engine, query_engine
-from ._instances import build_graph, collect, link_opposites
+from ._engines import (
+    BatchQueryEngine,
+    Problems,
+    async_engine,
+    async_query_engine,
+    engine,
+    query_engine,
+)
+from ._instances import Graph, build_graph, collect, link_opposites
 from ._options import (
     ClassOptions,
     Container,
@@ -328,6 +335,98 @@ class Metamodel:
         selected = list(select) if select is not None else declared_predicates(rules)
         rules = [*self.rules, *rules]
         return await found.query_graph(self.schema, graph, rules, predicates, selected)
+
+    @overload
+    def query_batch(
+        self,
+        graphs: Iterable[Iterable[BaseModel]],
+        refinery: Refinery | QueryEngine,
+        rules: Iterable[str] = (),
+        *,
+        predicates: Iterable[Predicate] = (),
+        graph_predicates: Iterable[Iterable[Predicate]] | None = None,
+        select: Iterable[str] | None = None,
+        return_exceptions: Literal[False] = False,
+    ) -> list[QueryResult]: ...
+
+    @overload
+    def query_batch(
+        self,
+        graphs: Iterable[Iterable[BaseModel]],
+        refinery: Refinery | QueryEngine,
+        rules: Iterable[str] = (),
+        *,
+        predicates: Iterable[Predicate] = (),
+        graph_predicates: Iterable[Iterable[Predicate]] | None = None,
+        select: Iterable[str] | None = None,
+        return_exceptions: Literal[True],
+    ) -> list[QueryResult | Exception]: ...
+
+    def query_batch(
+        self,
+        graphs: Iterable[Iterable[BaseModel]],
+        refinery: Refinery | QueryEngine,
+        rules: Iterable[str] = (),
+        *,
+        predicates: Iterable[Predicate] = (),
+        graph_predicates: Iterable[Iterable[Predicate]] | None = None,
+        select: Iterable[str] | None = None,
+        return_exceptions: bool = False,
+    ) -> list[QueryResult] | list[QueryResult | Exception]:
+        """:meth:`query` each of ``graphs``, the objects of one graph each, with the same
+        rules: the results, in order.
+
+        ``predicates`` are given to every graph (a :class:`Predicate` with
+        ``evaluate`` is called on each graph's nodes); ``graph_predicates``, if
+        given, has an iterable of predicates per graph, given to that graph too.
+        Each graph is its own closed world, as if queried alone.
+
+        A :class:`~pyfinery.bits.BitsEngine` reads the rules once, and evaluates
+        them on graphs of about the same size at once; other engines query the
+        graphs one at a time. A graph that :meth:`query` would raise for raises
+        here, the first in order; with ``return_exceptions=True``, its exception
+        is in the list in its place, and the other graphs are answered.
+        """
+        found = query_engine(refinery, self._problems(), "query_batch")
+        rules, shared = list(rules), list(predicates)
+        objects = [list(g) for g in graphs]
+        own = [list(p) for p in graph_predicates] if graph_predicates is not None else None
+        if own is not None and len(own) != len(objects):
+            raise ValueError(
+                f"graph_predicates has {len(own)} entries for {len(objects)} graphs: give one "
+                "per graph"
+            )
+        given = [[*shared, *mine] for mine in own] if own is not None else [shared] * len(objects)
+        selected = list(select) if select is not None else declared_predicates(rules)
+        rules = [*self.rules, *rules]
+        results: list[QueryResult | Exception | None] = [None] * len(objects)
+        built: list[tuple[int, Graph]] = []
+        for i, roots in enumerate(objects):
+            try:
+                built.append((i, build_graph(self.schema, roots, existence=True)))
+            except Exception as e:
+                if not return_exceptions:
+                    raise
+                results[i] = e
+        if isinstance(found, BatchQueryEngine):
+            answers = found.query_graphs(
+                self.schema, [g for _, g in built], rules, [given[i] for i, _ in built], selected
+            )
+        else:
+            answers = []
+            for i, graph in built:
+                try:
+                    answers.append(found.query_graph(self.schema, graph, rules, given[i], selected))
+                except Exception as e:
+                    if not return_exceptions:
+                        raise
+                    answers.append(e)
+        for (i, _), answer in zip(built, answers, strict=True):
+            if isinstance(answer, Exception) and not return_exceptions:
+                raise answer
+            results[i] = answer
+        assert all(r is not None for r in results)
+        return results  # type: ignore[return-value]
 
     def query_problem(
         self,

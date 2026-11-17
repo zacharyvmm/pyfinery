@@ -18,6 +18,12 @@ is in the head, it joins in bulk: it builds the rows of values of every
 variable at once, one variable (or wide factor) at a time, a bounded block at a
 time, and keeps those every factor allows. Otherwise it splits on one
 variable's values, and solves the rest for each.
+
+Every factor holds the tuples of each graph of a batch (:mod:`..matrices.values`),
+and every step works on all graphs at once: the graph is a variable every factor
+has, which no step eliminates or splits on. Choices (which variable, which
+factor first) are made for the batch as a whole; they change how much work a
+step does, not what it computes.
 """
 
 from __future__ import annotations
@@ -27,11 +33,11 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
-from numpy.typing import NDArray
 
 from ..matrices import kernels as k
-from ..matrices.kernels import Indices, Matrix, NodeIndex, Vector
+from ..matrices.kernels import Indices, Matrix, NodeIndex, Truths, Vector
 from ..matrices.values import (
+    Size,
     Tuples,
     Value,
     complement,
@@ -40,6 +46,8 @@ from ..matrices.values import (
     full,
     intersection,
     is_empty,
+    only_in,
+    row_keys,
     to_tuples,
     transpose,
     union,
@@ -100,65 +108,71 @@ def bind(value: Value, arguments: Sequence[Argument], negated: bool = False) -> 
     if value.arity == 1:  # a node
         assert isinstance(arguments[0], Node)
         node = arguments[0].index
-        return make_factor((), Value(0, value.n, k.contains(value.vector, node)), negated)
-    tuples = to_tuples(value)
+        return make_factor((), Value(0, value.size, k.contains(value.vector, node)), negated)
+    tuples = to_tuples(value)  # each row: its graph, then its nodes
     keep = np.ones(len(tuples), bool)
-    first: dict[VarId, int] = {}  # where each variable is first
+    first: dict[VarId, int] = {}  # the column where each variable is first
     for place, argument in enumerate(arguments):
+        column = 1 + place
         if isinstance(argument, Node):
-            keep &= tuples[:, place] == argument.index
+            keep &= tuples[:, column] == argument.index
         elif argument.id in first:
-            keep &= tuples[:, place] == tuples[:, first[argument.id]]
+            keep &= tuples[:, column] == tuples[:, first[argument.id]]
         else:
-            first[argument.id] = place
-    projected = tuples[keep][:, [first[v] for v in variables]]
-    return make_factor(tuple(variables), from_tuples(len(variables), value.n, projected), negated)
+            first[argument.id] = column
+    projected = tuples[keep][:, [0, *(first[v] for v in variables)]]
+    bound = from_tuples(len(variables), value.size, projected)
+    return make_factor(tuple(variables), bound, negated)
 
 
 def bind_pair(value: Value, arguments: Sequence[Argument]) -> Value:
     left, right = arguments
-    matrix, n = value.matrix, value.n
+    matrix, size = value.matrix, value.size
     if isinstance(left, Node) and isinstance(right, Node):
-        return Value(0, n, k.contains(matrix[left.index], right.index))
+        return Value(0, size, k.contains(matrix[:, left.index], right.index))
     if isinstance(left, Node):
-        return Value(1, n, k.row(matrix, left.index))
+        return Value(1, size, k.row(matrix, left.index))
     if isinstance(right, Node):
-        return Value(1, n, k.column(matrix, right.index, n))
-    return Value(1, n, k.diagonal(matrix, n))  # the same variable twice
+        return Value(1, size, k.column(matrix, right.index, size.nodes))
+    return Value(1, size, k.diagonal(matrix, size.nodes))  # the same variable twice
 
 
-def solve(factors: Sequence[Factor], head: tuple[VarId, ...], n: int) -> Value:
-    """The tuples of ``head`` (distinct variables) that some values of the other
-    variables extend to a tuple of every factor."""
+def solve(factors: Sequence[Factor], head: tuple[VarId, ...], size: Size) -> Value:
+    """The tuples of ``head`` (distinct variables), in each graph, that some values of the
+    other variables extend to a tuple of every factor."""
+    graphs = np.ones(size.graphs, bool)  # where every factor of no variables holds
     kept: list[Factor] = []
     for factor in factors:
         if factor.value.arity == 0:
-            if factor.value.truth == factor.negated:
-                return empty(len(head), n)
+            graphs &= factor.value.truth != factor.negated
             continue
         if not factor.negated and is_empty(factor.value):
-            return empty(len(head), n)
+            return empty(len(head), size)
         kept.append(factor)
+    if not graphs.any():
+        return empty(len(head), size)
     if len(head) > 2 or any(f.value.arity > 2 for f in kept):
-        return join(kept, head, n)
-    return eliminate(kept, head, n)
+        result = join(kept, head, size)
+    else:
+        result = eliminate(kept, head, size)
+    return result if graphs.all() else only_in(result, graphs)
 
 
 # -- eliminating variables --------------------------------------------------------
 
 
-def eliminate(factors: list[Factor], head: tuple[VarId, ...], n: int) -> Value:
+def eliminate(factors: list[Factor], head: tuple[VarId, ...], size: Size) -> Value:
     """Solve factors of at most two variables, for a head of at most two."""
     factors = list(factors)
     while True:
         others = {v for f in factors for v in f.variables} - set(head)
         if not others:
-            return combine(factors, head, n)
+            return combine(factors, head, size)
         variable = min(others, key=lambda v: (len(neighbours_of(factors, v)), v))
         neighbours = neighbours_of(factors, variable)
         if len(neighbours) > 2:
-            return join(factors, head, n)
-        factors = eliminate_one(factors, variable, neighbours, n)
+            return join(factors, head, size)
+        factors = eliminate_one(factors, variable, neighbours, size)
 
 
 def neighbours_of(factors: list[Factor], variable: VarId) -> list[VarId]:
@@ -166,45 +180,57 @@ def neighbours_of(factors: list[Factor], variable: VarId) -> list[VarId]:
 
 
 def eliminate_one(
-    factors: list[Factor], variable: VarId, neighbours: list[VarId], n: int
+    factors: list[Factor], variable: VarId, neighbours: list[VarId], size: Size
 ) -> list[Factor]:
     touching = [f for f in factors if variable in f.variables]
     rest = [f for f in factors if variable not in f.variables]
-    domain = k.full_vector(n)
-    for factor in touching:
-        if factor.variables == (variable,):
-            domain = domain & factor.value.vector
+    domain = unary_domain(touching, variable, size)
+    n = size.nodes
     if not neighbours:
-        return [*rest, Factor((), Value(0, n, bool(np.any(domain))))]
+        return [*rest, Factor((), Value(0, size, domain.any(axis=1)))]
     if len(neighbours) == 1:
         (a,) = neighbours
-        pairs = pairs_between(touching, a, variable, n)
-        return [*rest, Factor((a,), Value(1, n, k.row_any(k.mask_columns(pairs, domain), n)))]
+        pairs = pairs_between(touching, a, variable, size)
+        return [*rest, Factor((a,), Value(1, size, k.row_any(k.mask_columns(pairs, domain), n)))]
     a, b = neighbours
-    left = k.mask_columns(pairs_between(touching, a, variable, n), domain)
-    right = pairs_between(touching, variable, b, n)
-    return [*rest, Factor((a, b), Value(2, n, k.product(left, right, n)))]
+    left = k.mask_columns(pairs_between(touching, a, variable, size), domain)
+    right = pairs_between(touching, variable, b, size)
+    return [*rest, Factor((a, b), Value(2, size, k.product(left, right, n)))]
 
 
-def pairs_between(factors: list[Factor], row: VarId, column: VarId, n: int) -> Matrix:
+def unary_domain(factors: list[Factor], variable: VarId, size: Size) -> Vector:
+    """The intersection of the factors over exactly ``variable``."""
+    domain = None
+    for factor in factors:
+        if factor.variables == (variable,):
+            vector = factor.value.vector
+            domain = vector if domain is None else domain & vector
+    return k.full_vector(*size) if domain is None else domain
+
+
+def pairs_between(factors: list[Factor], row: VarId, column: VarId, size: Size) -> Matrix:
     """The intersection of the factors over exactly ``{row, column}``, as a matrix."""
-    matrix = full(2, n)
+    matrix = None
     for factor in factors:
         if factor.variables == (row, column):
-            matrix = intersection(matrix, factor.value)
+            value = factor.value
         elif factor.variables == (column, row):
-            matrix = intersection(matrix, transpose(factor.value))
-    return matrix.matrix
+            value = transpose(factor.value)
+        else:
+            continue
+        matrix = value if matrix is None else intersection(matrix, value)
+    return full(2, size).matrix if matrix is None else matrix.matrix
 
 
-def combine(factors: list[Factor], head: tuple[VarId, ...], n: int) -> Value:
+def combine(factors: list[Factor], head: tuple[VarId, ...], size: Size) -> Value:
     """The intersection of factors over head variables only."""
-    result = full(len(head), n)
+    result = full(len(head), size)
+    graphs = np.ones(size.graphs, bool)
+    n = size.nodes
     for factor in factors:
         match len(factor.variables):
             case 0:
-                if not factor.value.truth:
-                    return empty(len(head), n)
+                graphs &= factor.value.truth
             case 1 if len(head) == 1:
                 result = intersection(result, factor.value)
             case 1:
@@ -213,18 +239,19 @@ def combine(factors: list[Factor], head: tuple[VarId, ...], n: int) -> Value:
                     data = k.mask_rows(result.matrix, factor.value.vector, n)
                 else:
                     data = k.mask_columns(result.matrix, factor.value.vector)
-                result = Value(2, n, data)
+                result = Value(2, size, data)
             case _:
                 value = factor.value
                 if factor.variables != head:
                     value = transpose(value)
                 result = intersection(result, value)
-    return result
+    return result if graphs.all() else only_in(result, graphs)
 
 
-def domain_of(factors: list[Factor], variable: VarId, n: int) -> Vector:
-    """The values ``variable`` can take: those every (positive) factor on it allows."""
-    domain = k.full_vector(n)
+def domain_of(factors: list[Factor], variable: VarId, size: Size) -> Vector:
+    """The values ``variable`` can take in each graph: those every (positive) factor on it
+    allows."""
+    domain = k.full_vector(*size)
     for factor in factors:
         if factor.negated or variable not in factor.variables:
             continue
@@ -234,9 +261,13 @@ def domain_of(factors: list[Factor], variable: VarId, n: int) -> Vector:
                 domain = domain & factor.value.vector
             case 2:
                 matrix = factor.value.matrix
-                domain = domain & (k.row_any(matrix, n) if place == 0 else k.column_any(matrix))
+                if place == 0:
+                    domain = domain & k.row_any(matrix, size.nodes)
+                else:
+                    domain = domain & k.column_any(matrix)
             case _:
-                domain = domain & k.vector_of(n, np.unique(factor.value.array[:, place]))
+                tuples = factor.value.array
+                domain = domain & k.vector_of(*size, tuples[:, 0], tuples[:, 1 + place])
     return domain
 
 
@@ -252,16 +283,24 @@ CHUNK_WORDS = 1 << 20
 @dataclass(frozen=True)
 class Rows:
     """Values of some variables that agree with the factors so far: a row per tuple,
-    a column per variable."""
+    its graph and then a column per variable."""
 
     variables: tuple[VarId, ...]
     tuples: Tuples
 
+    @property
+    def graphs(self) -> Indices:
+        return self.tuples[:, 0]
+
     def column(self, variable: VarId) -> Indices:
-        return self.tuples[:, self.variables.index(variable)]
+        return self.tuples[:, 1 + self.variables.index(variable)]
+
+    def columns(self, variables: Sequence[VarId]) -> Tuples:
+        """The graph's column, then those of ``variables``."""
+        return self.tuples[:, [0, *(1 + self.variables.index(v) for v in variables)]]
 
 
-def join(factors: list[Factor], head: tuple[VarId, ...], n: int) -> Value:
+def join(factors: list[Factor], head: tuple[VarId, ...], size: Size) -> Value:
     """Solve factors of any width, for a head of any size.
 
     Variables outside the head that matrix products can eliminate are eliminated
@@ -272,22 +311,22 @@ def join(factors: list[Factor], head: tuple[VarId, ...], n: int) -> Value:
     (:func:`split_variable`) and solves the rest for each of its values, so that
     what's left can be eliminated by matrix products.
     """
-    remaining = eliminate_existentials(factors, head, n)
-    if remaining is None:
-        return empty(len(head), n)
+    remaining, graphs = eliminate_existentials(factors, head, size)
+    if not graphs.any():
+        return empty(len(head), size)
     variables = sorted({v for f in remaining for v in f.variables} | set(head))
     if not set(variables) <= set(head):
-        return split_on(remaining, head, split_variable(remaining, head, n), n)
-    start = Rows((), np.empty((1, 0), np.intp))  # one row, of no variables
+        holds = Factor((), Value(0, size, graphs))
+        return split_on([*remaining, holds], head, split_variable(remaining, head, size), size)
+    start = Rows((), np.flatnonzero(graphs).astype(np.intp)[:, None])  # a row per graph
     found = [
-        block.tuples[:, [block.variables.index(v) for v in head]]
-        for block in complete(start, remaining, variables, n, {})
+        block.columns(head) for block in complete(start, remaining, variables, size, {})
     ]  # distinct rows: each binds every variable
-    tuples = np.concatenate(found) if found else np.empty((0, len(head)), np.intp)
-    return from_tuples(len(head), n, tuples)
+    tuples = np.concatenate(found) if found else np.empty((0, 1 + len(head)), np.intp)
+    return from_tuples(len(head), size, tuples)
 
 
-def split_variable(factors: list[Factor], head: tuple[VarId, ...], n: int) -> VarId:
+def split_variable(factors: list[Factor], head: tuple[VarId, ...], size: Size) -> VarId:
     """The variable to split on: of the head, if it has more than two, the one with the
     fewest values; else of the wide factors, the one with the fewest values; else the
     variable outside the head with the fewest neighbours."""
@@ -296,30 +335,37 @@ def split_variable(factors: list[Factor], head: tuple[VarId, ...], n: int) -> Va
     else:
         choices = sorted({v for f in factors if f.value.arity > 2 for v in f.variables})
     if choices:
-        return min(choices, key=lambda v: (k.count(domain_of(factors, v, n)), v))
+        return min(choices, key=lambda v: (k.count(domain_of(factors, v, size)), v))
     others = {v for f in factors for v in f.variables} - set(head)
     return min(others, key=lambda v: (len(neighbours_of(factors, v)), v))
 
 
-def split_on(factors: list[Factor], head: tuple[VarId, ...], variable: VarId, n: int) -> Value:
+def split_on(factors: list[Factor], head: tuple[VarId, ...], variable: VarId, size: Size) -> Value:
     """The rest solved for each value ``variable`` can take: with the value put in
-    place if ``variable`` is in the head, else their union."""
+    place if ``variable`` is in the head, else their union.
+
+    A value is tried in every graph at once, and holds in those whose domain has it.
+    """
     rest = tuple(v for v in head if v != variable)
-    union_of_rest = empty(len(rest), n)
+    union_of_rest = empty(len(rest), size)
     found: list[Tuples] = []
-    for node in k.indices(domain_of(factors, variable, n), n):
-        value = solve([select(f, variable, int(node)) for f in factors], rest, n)
+    domain = domain_of(factors, variable, size)
+    values = np.flatnonzero(k.unpack(np.bitwise_or.reduce(domain, axis=0), size.nodes))
+    for node in values.tolist():
+        allowed = Factor((), Value(0, size, k.contains(domain, node)))
+        value = solve([allowed, *(select(f, variable, node) for f in factors)], rest, size)
         if variable in head:
             if not is_empty(value):
-                found.append(np.insert(to_tuples(value), head.index(variable), node, axis=1))
+                tuples = to_tuples(value)
+                found.append(np.insert(tuples, 1 + head.index(variable), node, axis=1))
             continue
         union_of_rest = union(union_of_rest, value)
-        if not head and union_of_rest.truth:
-            break  # holds: no need for more values
+        if not head and union_of_rest.truth.all():
+            break  # holds everywhere: no need for more values
     if variable not in head:
         return union_of_rest
-    tuples = np.concatenate(found) if found else np.empty((0, len(head)), np.intp)
-    return from_tuples(len(head), n, tuples)
+    tuples = np.concatenate(found) if found else np.empty((0, 1 + len(head)), np.intp)
+    return from_tuples(len(head), size, tuples)
 
 
 def select(factor: Factor, variable: VarId, node: NodeIndex) -> Factor:
@@ -328,35 +374,35 @@ def select(factor: Factor, variable: VarId, node: NodeIndex) -> Factor:
         return factor
     place = factor.variables.index(variable)
     variables = factor.variables[:place] + factor.variables[place + 1 :]
-    value, n = factor.value, factor.value.n
+    value, size = factor.value, factor.value.size
     match value.arity:
         case 1:
-            return Factor((), Value(0, n, k.contains(value.vector, node)))
+            return Factor((), Value(0, size, k.contains(value.vector, node)))
         case 2:
             matrix = value.matrix
-            vector = k.row(matrix, node) if place == 0 else k.column(matrix, node, n)
-            return Factor(variables, Value(1, n, vector))
+            vector = k.row(matrix, node) if place == 0 else k.column(matrix, node, size.nodes)
+            return Factor(variables, Value(1, size, vector))
         case _:
-            tuples = value.array[value.array[:, place] == node]
-            rest = np.delete(tuples, place, axis=1)
-            return make_factor(variables, from_tuples(len(variables), n, rest), factor.negated)
+            tuples = value.array[value.array[:, 1 + place] == node]
+            rest = np.delete(tuples, 1 + place, axis=1)
+            return make_factor(variables, from_tuples(len(variables), size, rest), factor.negated)
 
 
 def complete(
-    rows: Rows, pending: list[Factor], unbound: list[VarId], n: int, lookups: Lookups
+    rows: Rows, pending: list[Factor], unbound: list[VarId], size: Size, lookups: Lookups
 ) -> Iterator[Rows]:
     """Blocks of complete rows from ``rows``: bind one more variable or wide factor
     (:func:`grow`), and complete each block of the result before the next."""
     if not unbound:
         yield rows
         return
-    blocks, used = grow(rows, pending, unbound, n, lookups)
+    blocks, used = grow(rows, pending, unbound, size, lookups)
     left = [f for i, f in enumerate(pending) if i not in used]
     for block in blocks:
         block, rest = keep(block, left, lookups)
         if len(block.tuples):
             still_unbound = [v for v in unbound if v not in block.variables]
-            yield from complete(block, rest, still_unbound, n, lookups)
+            yield from complete(block, rest, still_unbound, size, lookups)
 
 
 def blocks_of(counts: Indices, limit: int) -> Iterator[tuple[int, int]]:
@@ -373,10 +419,11 @@ def blocks_of(counts: Indices, limit: int) -> Iterator[tuple[int, int]]:
 
 
 def eliminate_existentials(
-    factors: list[Factor], head: tuple[VarId, ...], n: int
-) -> list[Factor] | None:
+    factors: list[Factor], head: tuple[VarId, ...], size: Size
+) -> tuple[list[Factor], Truths]:
     """The factors, with the variables outside the head and wide factors that have at most
-    two neighbours eliminated; ``None`` if that shows nothing satisfies them."""
+    two neighbours eliminated, but for those of no variables; and the graphs where those
+    hold (where nothing satisfies the factors, they don't)."""
     while True:
         wide = {v for f in factors if f.value.arity > 2 for v in f.variables}
         others = {v for f in factors for v in f.variables} - set(head) - wide
@@ -384,14 +431,16 @@ def eliminate_existentials(
         if not candidates:
             break
         variable = min(candidates, key=lambda v: (len(neighbours_of(factors, v)), v))
-        factors = eliminate_one(factors, variable, neighbours_of(factors, variable), n)
-    if any(not f.variables and not f.value.truth for f in factors):
-        return None
-    return [f for f in factors if f.variables]
+        factors = eliminate_one(factors, variable, neighbours_of(factors, variable), size)
+    graphs = np.ones(size.graphs, bool)
+    for factor in factors:
+        if not factor.variables:
+            graphs &= factor.value.truth
+    return [f for f in factors if f.variables], graphs
 
 
 def grow(
-    rows: Rows, pending: list[Factor], unbound: list[VarId], n: int, lookups: Lookups
+    rows: Rows, pending: list[Factor], unbound: list[VarId], size: Size, lookups: Lookups
 ) -> tuple[Iterator[Rows], set[int]]:
     """The rows with more variables bound, in blocks, and which pending factors that used up.
 
@@ -417,21 +466,22 @@ def grow(
     variable = max(unbound, key=lambda v: len(links[v]))
     if links[variable]:
         used = {*links[variable], *unary[variable]}
-        return extend(rows, variable, [pending[i] for i in sorted(used)], k.full_vector(n), n), used
+        factors = [pending[i] for i in sorted(used)]
+        return extend(rows, variable, factors, k.full_vector(*size), size), used
     if wide:
         i = min(wide, key=lambda i: len(pending[i].value.array))
         return join_tuples(rows, pending[i], lookups), {i}
-    variable = min(unbound, key=lambda v: k.count(domain_of(pending, v, n)))
-    domain = domain_of(pending, variable, n)  # the unary factors on it, and more
-    return extend(rows, variable, [], domain, n), set(unary[variable])
+    variable = min(unbound, key=lambda v: k.count(domain_of(pending, v, size)))
+    domain = domain_of(pending, variable, size)  # the unary factors on it, and more
+    return extend(rows, variable, [], domain, size), set(unary[variable])
 
 
 def extend(
-    rows: Rows, variable: VarId, factors: list[Factor], domain: Vector, n: int
+    rows: Rows, variable: VarId, factors: list[Factor], domain: Vector, size: Size
 ) -> Iterator[Rows]:
-    """Each row, with each value of ``variable`` in ``domain`` that ``factors`` (unary on
-    it, or binary from a bound variable to it) allow with that row: in blocks of at most
-    :data:`BLOCK_ROWS` rows (but for a single row with more values)."""
+    """Each row, with each value of ``variable`` in its graph's ``domain`` that ``factors``
+    (unary on it, or binary from a bound variable to it) allow with that row: in blocks
+    of at most :data:`BLOCK_ROWS` rows (but for a single row with more values)."""
     links: list[tuple[Indices, Matrix]] = []  # a bound variable's values, rows of what it allows
     for factor in factors:
         if factor.value.arity == 1:
@@ -439,40 +489,37 @@ def extend(
             continue
         matrix = factor.value.matrix
         if factor.variables[1] != variable:
-            matrix = k.transpose(matrix, n)
+            matrix = k.transpose(matrix, size.nodes)
         (other,) = set(factor.variables) - {variable}
         links.append((rows.column(other), matrix))
     variables = (*rows.variables, variable)
-    words = max(k.words(n), 1)
+    graphs = rows.graphs
+    words = max(k.words(size.nodes), 1)
     chunk = max(1, min(BLOCK_ROWS, CHUNK_WORDS // words))
     for start in range(0, len(rows.tuples), chunk):
         stop = min(start + chunk, len(rows.tuples))
-        candidates = np.tile(domain, (stop - start, 1))
+        of = graphs[start:stop]
+        candidates = domain[of]  # a copy: the domain of each row's graph
         for values, matrix in links:
-            candidates &= matrix[values[start:stop]]
+            candidates &= matrix[of, values[start:stop]]
         counts = np.bitwise_count(candidates).sum(axis=1)  # values per row
         for first, last in blocks_of(counts, BLOCK_ROWS):
-            at, value = k.pairs(candidates[first:last], n)
+            at, value = k.nonzero_bits(candidates[first:last])
             yield Rows(variables, np.column_stack([rows.tuples[start + first + at], value]))
 
 
 def join_tuples(rows: Rows, factor: Factor, lookups: Lookups) -> Iterator[Rows]:
-    """Each row, with each tuple of a wide ``factor`` that agrees with it: in blocks of at
-    most :data:`BLOCK_ROWS` rows (but for a single row with more tuples)."""
+    """Each row, with each tuple of a wide ``factor`` of its graph that agrees with it: in
+    blocks of at most :data:`BLOCK_ROWS` rows (but for a single row with more tuples)."""
     tuples = factor.value.array
     shared = [v for v in factor.variables if v in rows.variables]
-    added = [factor.variables.index(v) for v in factor.variables if v not in rows.variables]
-    count = len(rows.tuples)
-    # The tuples agreeing with row i: order[low[i] : low[i] + matches[i]].
-    if not shared:
-        order = np.arange(len(tuples))
-        low = np.zeros(count, np.intp)
-        matches = np.full(count, len(tuples), np.intp)
-    else:
-        found = lookup(lookups, factor, [factor.variables.index(v) for v in shared])
-        order = found.order
-        low, matches = found.matching(rows.tuples[:, [rows.variables.index(v) for v in shared]])
-    variables = (*rows.variables, *(factor.variables[i] for i in added))
+    added = [1 + factor.variables.index(v) for v in factor.variables if v not in rows.variables]
+    # The tuples agreeing with row i (on its graph, and the variables both have):
+    # order[low[i] : low[i] + matches[i]].
+    found = lookup(lookups, factor, [0, *(1 + factor.variables.index(v) for v in shared)])
+    order = found.order
+    low, matches = found.matching(rows.columns(shared))
+    variables = (*rows.variables, *(factor.variables[c - 1] for c in added))
     for first, last in blocks_of(matches, BLOCK_ROWS):
         some = matches[first:last]
         at = np.repeat(np.arange(first, last), some)
@@ -494,20 +541,21 @@ def keep(rows: Rows, pending: list[Factor], lookups: Lookups) -> tuple[Rows, lis
     return Rows(rows.variables, rows.tuples[keeping]), left
 
 
-def allows(rows: Rows, factor: Factor, lookups: Lookups) -> NDArray[np.bool_]:
+def allows(rows: Rows, factor: Factor, lookups: Lookups) -> Truths:
     """Which rows a factor over bound variables allows."""
+    of = rows.graphs
     columns = [rows.column(v) for v in factor.variables]
     match factor.value.arity:
         case 1:
             (c,) = columns
-            found = (factor.value.vector[c >> 6] >> (c & 63).astype(np.uint64)) & k.ONE
+            found = (factor.value.vector[of, c >> 6] >> (c & 63).astype(np.uint64)) & k.ONE
         case 2:
             r, c = columns
-            found = (factor.value.matrix[r, c >> 6] >> (c & 63).astype(np.uint64)) & k.ONE
+            found = (factor.value.matrix[of, r, c >> 6] >> (c & 63).astype(np.uint64)) & k.ONE
         case _:
-            every = lookup(lookups, factor, list(range(len(factor.variables))))
-            found = every.matching(np.column_stack(columns))[1] > 0
-    allowed: NDArray[np.bool_] = found.astype(bool) != factor.negated
+            every = lookup(lookups, factor, list(range(1 + len(factor.variables))))
+            found = every.matching(rows.columns(factor.variables))[1] > 0
+    allowed: Truths = found.astype(bool) != factor.negated
     return allowed
 
 
@@ -518,7 +566,7 @@ class Lookup:
 
     order: Indices
     """The tuples, by index, sorted by the columns."""
-    keys: NDArray[Any]
+    keys: np.ndarray[Any, Any]
     """Those columns of the tuples, in that order: one key per tuple."""
 
     @classmethod
@@ -536,8 +584,8 @@ class Lookup:
 
 
 type Lookups = dict[tuple[int, tuple[int, ...]], Lookup]
-"""A join's lookups, by the ``id`` of the factor and the columns: each is made once,
-and every block of rows uses it."""
+"""A join's lookups, by the ``id`` of the factor and the columns (the graph's is ``0``):
+each is made once, and every block of rows uses it."""
 
 
 def lookup(lookups: Lookups, factor: Factor, columns: list[int]) -> Lookup:
@@ -545,12 +593,3 @@ def lookup(lookups: Lookups, factor: Factor, columns: list[int]) -> Lookup:
     if key not in lookups:
         lookups[key] = Lookup.of(factor.value.array, columns)
     return lookups[key]
-
-
-def row_keys(columns: Tuples) -> NDArray[Any]:
-    """A key per row, equal where the rows are: the value for one column, else the row's
-    bytes (whose order isn't numeric, but is the same for every array of rows)."""
-    if columns.shape[1] == 1:
-        return np.ascontiguousarray(columns[:, 0], np.intp)
-    rows = np.ascontiguousarray(columns, np.intp)
-    return rows.view(np.dtype((np.void, rows.itemsize * rows.shape[1]))).ravel()

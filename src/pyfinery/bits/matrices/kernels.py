@@ -2,13 +2,24 @@
 #
 # SPDX-License-Identifier: EPL-2.0
 
-"""Sets and binary relations over ``n`` nodes, as NumPy arrays of packed bits.
+"""Sets and binary relations over the nodes of a batch of graphs, as NumPy arrays of
+packed bits.
 
-A *vector* is a set of nodes: ``uint64`` words of shape ``(words(n),)``, bit
-``i % 64`` of word ``i // 64`` for node ``i``. A *matrix* is a binary relation:
-shape ``(n, words(n))``, row ``i`` the set of ``j`` with ``(i, j)``. Bits past
-``n`` are always zero, so that comparing, counting and complementing work on
-whole words.
+Every graph of a batch has the same ``n`` node slots (a smaller graph leaves some
+empty). A *vector* is a set of nodes of each graph: ``uint64`` words of shape
+``(graphs, words(n))``, bit ``i % 64`` of word ``i // 64`` for node ``i``. A
+*matrix* is a binary relation of each graph: shape ``(graphs, n, words(n))``, row
+``i`` of graph ``g`` the set of ``j`` with ``(i, j)`` in ``g``. Bits past ``n``
+are always zero, so that comparing, counting and complementing work on whole
+words. Graphs never share a tuple: each kernel works on each graph at once, as
+the same array operation over the leading axis.
+
+These are the only functions that do arithmetic on bits, and each is one or a
+few whole-array operations whatever the number of graphs; another array library
+(e.g. on a GPU) would reimplement them, and nothing else. The exception is
+:func:`closure` of graphs of more than :data:`SQUARING_NODES` nodes, which visits
+strongly connected components in Python; that of smaller ones
+(:func:`closure_by_squaring`) is array operations.
 """
 
 from __future__ import annotations
@@ -17,54 +28,78 @@ import numpy as np
 from numpy.typing import NDArray
 
 type NodeIndex = int
-"""A node, by its place in the model: ``0`` to ``n - 1``."""
+"""A node, by its slot in each graph: ``0`` to ``n - 1``."""
 
 type Vector = NDArray[np.uint64]
-"""A set of nodes: ``words(n)`` words, bit ``i % 64`` of word ``i // 64`` for node ``i``."""
+"""A set of nodes of each graph: shape ``(graphs, words(n))``, bit ``i % 64`` of word
+``i // 64`` for node ``i``."""
 
 type Matrix = NDArray[np.uint64]
-"""A binary relation: ``n`` rows of ``words(n)`` words, row ``i`` the set of ``j``
-with ``(i, j)``."""
+"""A binary relation of each graph: shape ``(graphs, n, words(n))``, row ``i`` of graph
+``g`` the set of ``j`` with ``(i, j)``."""
+
+type Truths = NDArray[np.bool_]
+"""Whether something holds in each graph: shape ``(graphs,)``."""
 
 type Indices = NDArray[np.intp]
-"""Nodes, by index: an array of :data:`NodeIndex`."""
+"""Nodes or graphs, by index."""
 
 ONE = np.uint64(1)
+
+CHUNK_WORDS = 1 << 22
+"""How many words :func:`product` gathers, or unpacks as floats, at a time: 32 MiB."""
 
 
 def words(n: int) -> int:
     return (n + 63) // 64
 
 
-def empty_vector(n: int) -> Vector:
-    return np.zeros(words(n), np.uint64)
-
-
-def full_vector(n: int) -> Vector:
+def full_words(n: int) -> NDArray[np.uint64]:
+    """The words of the set of every slot: shape ``(words(n),)``, broadcast over graphs."""
     vector = np.full(words(n), np.uint64(0xFFFF_FFFF_FFFF_FFFF), np.uint64)
     if n % 64:
         vector[-1] = (ONE << np.uint64(n % 64)) - ONE
     return vector
 
 
-def empty_matrix(n: int) -> Matrix:
-    return np.zeros((n, words(n)), np.uint64)
+def empty_vector(graphs: int, n: int) -> Vector:
+    return np.zeros((graphs, words(n)), np.uint64)
 
 
-def vector_of(n: int, nodes: NDArray[np.integer] | list[NodeIndex]) -> Vector:
-    """The set of ``nodes``."""
+def full_vector(graphs: int, n: int) -> Vector:
+    return np.tile(full_words(n), (graphs, 1))
+
+
+def empty_matrix(graphs: int, n: int) -> Matrix:
+    return np.zeros((graphs, n, words(n)), np.uint64)
+
+
+def full_matrix(graphs: int, n: int) -> Matrix:
+    return np.tile(full_words(n), (graphs, n, 1))
+
+
+def vector_of(graphs: int, n: int, of: NDArray[np.integer], nodes: NDArray[np.integer]) -> Vector:
+    """The set of node ``nodes[k]`` of graph ``of[k]``, for each ``k``."""
     found = np.asarray(nodes, dtype=np.int64)
-    vector = empty_vector(n)
-    np.bitwise_or.at(vector, found >> 6, ONE << (found & 63).astype(np.uint64))
+    vector = empty_vector(graphs, n)
+    np.bitwise_or.at(vector, (np.asarray(of), found >> 6), ONE << (found & 63).astype(np.uint64))
     return vector
 
 
-def matrix_of(n: int, rows: NDArray[np.integer], cols: NDArray[np.integer]) -> Matrix:
-    """The relation of the pairs ``(rows[k], cols[k])``: work in the number of pairs."""
+def matrix_of(
+    graphs: int,
+    n: int,
+    of: NDArray[np.integer],
+    rows: NDArray[np.integer],
+    cols: NDArray[np.integer],
+) -> Matrix:
+    """The relation of the pairs ``(rows[k], cols[k])`` of graph ``of[k]``: work in the
+    number of pairs."""
     rows = np.asarray(rows, dtype=np.int64)
     cols = np.asarray(cols, dtype=np.int64)
-    matrix = empty_matrix(n)
-    np.bitwise_or.at(matrix, (rows, cols >> 6), ONE << (cols & 63).astype(np.uint64))
+    matrix = empty_matrix(graphs, n)
+    at = (np.asarray(of), rows, cols >> 6)
+    np.bitwise_or.at(matrix, at, ONE << (cols & 63).astype(np.uint64))
     return matrix
 
 
@@ -74,26 +109,39 @@ def pack(dense: NDArray[np.bool_]) -> NDArray[np.uint64]:
     return np.ascontiguousarray(packed).view(np.uint64)
 
 
+def pack_padded(dense: NDArray[np.bool_], n: int) -> NDArray[np.uint64]:
+    """Pack the last axis of a boolean array, ``n`` long."""
+    padded = np.zeros((*dense.shape[:-1], words(n) * 64), bool)
+    padded[..., :n] = dense
+    return pack(padded)
+
+
 def unpack(bits: NDArray[np.uint64], n: int) -> NDArray[np.bool_]:
     """The last axis as booleans, ``n`` long."""
     raw = np.ascontiguousarray(bits).view(np.uint8)
     return np.unpackbits(raw, axis=-1, bitorder="little", count=n).astype(bool)
 
 
-def indices(vector: Vector, n: int) -> Indices:
-    """The members of a vector, in order: work in the number of nonzero words."""
-    (word,) = np.nonzero(vector)
-    bits = bits_of(vector[word])
-    at, bit = np.nonzero(bits)
-    return (word[at] * 64 + bit).astype(np.intp)
+def nonzero_bits(bits: NDArray[np.uint64]) -> tuple[Indices, ...]:
+    """Where the bits are set, as :func:`numpy.nonzero` would say of the unpacked array:
+    an index array per leading axis, then the bit's place, in order: work in the number
+    of nonzero words."""
+    *leading, word = np.nonzero(bits)
+    found = bits_of(bits[(*leading, word)])
+    at, bit = np.nonzero(found)
+    return (*(axis[at].astype(np.intp) for axis in leading), (word[at] * 64 + bit).astype(np.intp))
 
 
-def pairs(matrix: Matrix, n: int) -> tuple[Indices, Indices]:
-    """The pairs of a matrix, by row then column: work in the number of nonzero words."""
-    row, word = np.nonzero(matrix)
-    bits = bits_of(matrix[row, word])
-    at, bit = np.nonzero(bits)
-    return row[at].astype(np.intp), (word[at] * 64 + bit).astype(np.intp)
+def indices(vector: Vector) -> tuple[Indices, Indices]:
+    """The members of a vector: their graphs and nodes, in order."""
+    graphs, nodes = nonzero_bits(vector)
+    return graphs, nodes
+
+
+def pairs(matrix: Matrix) -> tuple[Indices, Indices, Indices]:
+    """The pairs of a matrix: their graphs, rows and columns, in order."""
+    graphs, rows, cols = nonzero_bits(matrix)
+    return graphs, rows, cols
 
 
 def bits_of(values: NDArray[np.uint64]) -> NDArray[np.uint8]:
@@ -103,129 +151,181 @@ def bits_of(values: NDArray[np.uint64]) -> NDArray[np.uint8]:
 
 
 def count(bits: Vector | Matrix) -> int:
+    """How many members, in every graph."""
     return int(np.bitwise_count(bits).sum())
 
 
-def complement_vector(vector: Vector, n: int) -> Vector:
-    return ~vector & full_vector(n)
-
-
-def complement_matrix(matrix: Matrix, n: int) -> Matrix:
-    return ~matrix & full_vector(n)
+def complement(bits: Vector | Matrix, n: int) -> Vector | Matrix:
+    return ~bits & full_words(n)
 
 
 def transpose(matrix: Matrix, n: int) -> Matrix:
-    rows, cols = pairs(matrix, n)
-    return matrix_of(n, cols, rows)
+    graphs, rows, cols = pairs(matrix)
+    return matrix_of(len(matrix), n, graphs, cols, rows)
 
 
 def row_any(matrix: Matrix, n: int) -> Vector:
     """The rows with a pair: ``{i | ∃j (i, j)}``."""
-    rows = np.zeros(words(n) * 64, bool)
-    rows[:n] = matrix.any(axis=1)
-    return pack(rows)
+    return pack_padded(matrix.any(axis=-1), n)
 
 
 def column_any(matrix: Matrix) -> Vector:
     """The columns with a pair: ``{j | ∃i (i, j)}``."""
-    if not len(matrix):  # no nodes
-        return np.zeros(matrix.shape[1], np.uint64)
-    columns: Vector = np.bitwise_or.reduce(matrix, axis=0)
+    if not matrix.shape[1]:  # no nodes
+        return np.zeros((len(matrix), matrix.shape[2]), np.uint64)
+    columns: Vector = np.bitwise_or.reduce(matrix, axis=1)
     return columns
 
 
 def mask_rows(matrix: Matrix, vector: Vector, n: int) -> Matrix:
     """The pairs whose row is in ``vector``."""
     keep = unpack(vector, n)
-    return np.where(keep[:, None], matrix, np.uint64(0))
+    return np.where(keep[..., None], matrix, np.uint64(0))
 
 
 def mask_columns(matrix: Matrix, vector: Vector) -> Matrix:
     """The pairs whose column is in ``vector``."""
-    return matrix & vector
+    return matrix & vector[:, None, :]
 
 
 def outer(rows: Vector, columns: Vector, n: int) -> Matrix:
     """The pairs of a row in ``rows`` and a column in ``columns``."""
     keep = unpack(rows, n)
-    return np.where(keep[:, None], columns[None, :], np.uint64(0))
+    return np.where(keep[..., None], columns[:, None, :], np.uint64(0))
 
 
 def diagonal(matrix: Matrix, n: int) -> Vector:
     """``{i | (i, i)}``."""
     nodes = np.arange(n)
-    on = (matrix[nodes, nodes >> 6] >> (nodes & 63).astype(np.uint64)) & ONE
-    return vector_of(n, nodes[on.astype(bool)])
+    on = (matrix[:, nodes, nodes >> 6] >> (nodes & 63).astype(np.uint64)) & ONE
+    return pack_padded(on.astype(bool), n)
 
 
-def identity(n: int) -> Matrix:
+def identity(graphs: int, n: int) -> Matrix:
     nodes = np.arange(n)
-    return matrix_of(n, nodes, nodes)
+    one = matrix_of(1, n, np.zeros(n, np.intp), nodes, nodes)
+    return np.repeat(one, graphs, axis=0)
 
 
 def row(matrix: Matrix, i: NodeIndex) -> Vector:
-    found: Vector = matrix[i].copy()
+    found: Vector = matrix[:, i].copy()
     return found
 
 
 def column(matrix: Matrix, j: NodeIndex, n: int) -> Vector:
     word, bit = divmod(j, 64)
-    selected = (matrix[:, word] >> np.uint64(bit)) & ONE
-    dense = np.zeros(words(n) * 64, bool)
-    dense[:n] = selected.astype(bool)
-    return pack(dense)
+    selected = (matrix[:, :, word] >> np.uint64(bit)) & ONE
+    return pack_padded(selected.astype(bool), n)
 
 
-def contains(vector: Vector, i: NodeIndex) -> bool:
+def contains(vector: Vector, i: NodeIndex) -> Truths:
+    """Whether node ``i`` is in the vector, in each graph."""
     word, bit = divmod(i, 64)
-    return bool((vector[word] >> np.uint64(bit)) & ONE)
+    found: Truths = ((vector[:, word] >> np.uint64(bit)) & ONE).astype(bool)
+    return found
 
 
 def product(left: Matrix, right: Matrix, n: int) -> Matrix:
-    """Boolean matrix product: ``{(i, j) | ∃k (i, k) ∈ left, (k, j) ∈ right}``.
+    """Boolean matrix product, of each graph: ``{(i, j) | ∃k (i, k) ∈ left, (k, j) ∈ right}``.
 
     Gathers the rows of ``right`` that each row of ``left`` names and ORs them
     together, so the work grows with the pairs of ``left``. When ``left`` is
     dense, a float product of the unpacked matrices is cheaper.
     """
+    graphs = len(left)
     pairs_left = count(left)
     if pairs_left == 0:
-        return empty_matrix(n)
-    if pairs_left > n * n // 16 and n > 64:
-        dense = unpack(left, n).astype(np.float32) @ unpack(right, n).astype(np.float32)
-        padded = np.zeros((n, words(n) * 64), bool)
-        padded[:, :n] = dense > 0
-        return pack(padded)
-    rows, cols = pairs(left, n)
-    result = empty_matrix(n)
-    starts = np.flatnonzero(np.r_[True, rows[1:] != rows[:-1]])
-    result[rows[starts]] = np.bitwise_or.reduceat(right[cols], starts, axis=0)
+        return empty_matrix(graphs, n)
+    if pairs_left > graphs * n * n // 16 and n > 64:
+        return dense_product(left, right, n)
+    of, rows, cols = pairs(left)
+    flat_right = right.reshape(graphs * n, -1)
+    targets = of * n + rows  # the row of the result each pair adds to
+    starts = np.flatnonzero(np.r_[True, targets[1:] != targets[:-1]])
+    result = np.zeros_like(flat_right)
+    # A bounded number of gathered rows at a time, whole rows of the result each.
+    step = max(1, CHUNK_WORDS // max(flat_right.shape[1], 1))
+    first = 0
+    while first < len(starts):
+        last = int(np.searchsorted(starts, starts[first] + step, "left"))
+        last = max(last, first + 1)
+        begin = starts[first]
+        end = starts[last] if last < len(starts) else len(targets)
+        gathered = flat_right[(of * n + cols)[begin:end]]
+        result[targets[starts[first:last]]] = np.bitwise_or.reduceat(
+            gathered, starts[first:last] - begin, axis=0
+        )
+        first = last
+    return result.reshape(right.shape)
+
+
+def dense_product(left: Matrix, right: Matrix, n: int) -> Matrix:
+    """:func:`product` as a float product of the unpacked matrices, a few graphs at a time."""
+    graphs = len(left)
+    result = np.empty_like(left)
+    step = max(1, CHUNK_WORDS * 2 // max(n * n, 1))  # float32: half a word an entry
+    for start in range(0, graphs, step):
+        part = slice(start, start + step)
+        dense = unpack(left[part], n).astype(np.float32) @ unpack(right[part], n).astype(np.float32)
+        result[part] = pack_padded(dense > 0, n)
     return result
 
 
-def closure(matrix: Matrix, n: int) -> Matrix:
-    """Transitive closure: the pairs joined by a path of one or more steps.
+SQUARING_NODES = 256
+"""The most nodes graphs may have for :func:`closure` to square matrices rather than
+visit components: up to this, squaring was faster for batches of 1 to 1,000 graphs,
+sparse or dense; from twice it, slower."""
 
-    Strongly connected components are condensed (Tarjan's algorithm), then
-    visited from the sinks back: every node of a component reaches the same
-    nodes, its own successors and what the other components it steps to
-    reach. Each component is visited once, so the cost grows with the edges
-    and the size of the result, whatever order the nodes are in.
+
+def closure(matrix: Matrix, n: int) -> Matrix:
+    """Transitive closure, of each graph: the pairs joined by a path of one or more steps.
+
+    Small graphs square the relation (:func:`closure_by_squaring`), in array
+    operations; larger ones visit their strongly connected components
+    (:func:`closure_by_components`), whose cost grows with the edges and the result.
     """
-    rows, cols = pairs(matrix, n)
-    starts = np.searchsorted(rows, np.arange(n + 1))
-    successors = [cols[starts[i] : starts[i + 1]].tolist() for i in range(n)]
-    result = empty_matrix(n)
+    if n <= SQUARING_NODES:
+        return closure_by_squaring(matrix, n)
+    return closure_by_components(matrix, n)
+
+
+def closure_by_squaring(matrix: Matrix, n: int) -> Matrix:
+    """``R+`` as ``R ∪ R·R ∪ ...``: each step doubles the length of the paths, until a
+    step adds nothing (at most ``log2(n)`` steps)."""
+    reached = matrix
+    while True:
+        longer = reached | product(reached, reached, n)
+        if np.array_equal(longer, reached):
+            return reached
+        reached = longer
+
+
+def closure_by_components(matrix: Matrix, n: int) -> Matrix:
+    """``R+`` by strongly connected components (Tarjan's algorithm).
+
+    Components are condensed, then visited from the sinks back: every node of a
+    component reaches the same nodes, its own successors and what the other
+    components it steps to reach. Each component is visited once, so the cost
+    grows with the edges and the size of the result, whatever order the nodes
+    are in. The graphs of the batch are visited as one graph, their nodes apart.
+    """
+    graphs = len(matrix)
+    flat = matrix.reshape(graphs * n, -1)
+    of, rows, cols = pairs(matrix)
+    sources, targets = of * n + rows, of * n + cols
+    starts = np.searchsorted(sources, np.arange(graphs * n + 1))
+    successors = [targets[starts[i] : starts[i + 1]].tolist() for i in range(graphs * n)]
+    result = np.zeros_like(flat)
     for component in strongly_connected_components(successors):
         members = np.asarray(component)
         # In a cycle, the successors of the members include all of them.
-        reached = np.bitwise_or.reduce(matrix[members], axis=0)
+        reached = np.bitwise_or.reduce(flat[members], axis=0)
         inside = set(component)
         outside = sorted({w for v in component for w in successors[v]} - inside)
         if outside:
             reached = reached | np.bitwise_or.reduce(result[outside], axis=0)
         result[members] = reached
-    return result
+    return result.reshape(matrix.shape)
 
 
 def strongly_connected_components(

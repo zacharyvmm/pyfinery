@@ -12,7 +12,7 @@ contradictory (an object in two containers, a containment cycle).
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from itertools import chain
 from typing import TYPE_CHECKING, NamedTuple
@@ -22,10 +22,10 @@ import numpy as np
 from ..._instances import Graph
 from ..._schema import Feature, Schema, UnionClass
 from ..errors import UnsupportedRuleError
-from ..evaluation.pipeline import PredicateValues
 from ..matrices import kernels as k
 from ..matrices.kernels import NodeIndex
-from ..matrices.model import PartialModel
+from ..matrices.model import LogicValue, PartialModel
+from ..matrices.values import Tuples
 from ..rules.syntax import Atom, Call, Source
 from ..rules.syntax import Predicate as RulePredicate
 
@@ -220,7 +220,8 @@ def refined_by_cycles(
         return
     rows = np.concatenate([r.may[:, 0] for r in edges] + [r.must[:, 0] for r in edges])
     cols = np.concatenate([r.may[:, 1] for r in edges] + [r.must[:, 1] for r in edges])
-    cyclic = k.indices(k.diagonal(k.closure(k.matrix_of(n, rows, cols), n), n), n)
+    edges_of = k.matrix_of(1, n, np.zeros(len(rows), np.intp), rows, cols)
+    _, cyclic = k.indices(k.diagonal(k.closure(edges_of, n), n))
     if len(cyclic):
         uncertain = any(only_may_exist(graph, int(i)) for i in cyclic)
         names = ", ".join(model.nodes[int(i)].name for i in cyclic)
@@ -246,24 +247,23 @@ def refuse_error_refinement(
     graph: Graph,
     model: PartialModel,
     rule_predicates: dict[str, RulePredicate],
-    values: dict[str, PredicateValues],
+    tuples: Mapping[str, Mapping[LogicValue, Tuples]],
     used: set[str],
 ) -> None:
     """Refuse where Refinery would refine facts from an error predicate in a way that
     could change the query: to make it false where it may hold, it refines the facts
     it depends on (those the query depends on too matter), or rules out objects that
     only may exist."""
-    for name, result in values.items():
+    for name, by_value in tuples.items():
         if rule_predicates[name].kind != "error":
             continue
         shared = dependencies(rule_predicates, [name], model) & used
-        for key, value in result.items():
-            if value not in ("unknown", "error"):
-                continue
+        found = [(key, value) for value in ("unknown", "error") for key in by_value[value].tolist()]
+        for key, value in sorted(found):
             if any(only_may_exist(graph, i) for i in key) or (value == "unknown" and shared):
                 names = ", ".join(model.nodes[i].name for i in key)
                 raise UnsupportedRuleError(
-                    f"error predicate {result.name}({names}) is {value} where facts are "
+                    f"error predicate {name}({names}) is {value} where facts are "
                     "uncertain: Refinery would refine them to rule it out"
                 )
 

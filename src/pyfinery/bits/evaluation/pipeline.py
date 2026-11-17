@@ -25,8 +25,10 @@ not, and may hold where ``R`` must not (``DnfLifter`` in Refinery's
 The result of a predicate is its ``must`` and ``may`` tuples: ``true`` where
 both hold, ``unknown`` where only ``may`` does, ``error`` where only ``must``.
 
-:func:`evaluate` plans the relations to compute (:mod:`.plan`), then computes
-each in order, from the model's matrices and those computed before it.
+:func:`evaluate_batch` plans the relations to compute (:mod:`.plan`), then
+computes each in order, from the batch's matrices and those computed before
+it, for every graph of the batch at once; :func:`evaluate` evaluates a batch of
+one graph.
 """
 
 from __future__ import annotations
@@ -39,20 +41,26 @@ import numpy as np
 
 from ..errors import RuleError
 from ..matrices import kernels as k
+from ..matrices.batch import PackedBatch
 from ..matrices.kernels import Matrix, Vector
 from ..matrices.model import LogicValue, PartialModel
 from ..matrices.packed import PackedModel
 from ..matrices.values import (
+    BatchBits,
     Bits,
     NodeTuple,
+    Size,
     Tuples,
     Value,
     difference,
     empty,
     from_tuples,
+    graph_bits,
     intersection,
+    of_graph,
     to_tuples,
     union,
+    with_graph,
 )
 from ..rules.compiled import Rules
 from ..rules.syntax import Modality, Position, Predicate, PredicateKind
@@ -75,32 +83,45 @@ def evaluate(
     and build them yourself to evaluate them again. The predicates named in
     ``select`` are evaluated, or else every one with a body.
     """
+    batch = PackedBatch.build([model])
+    return {name: values[0] for name, values in evaluate_batch(rules, batch, select).items()}
+
+
+def evaluate_batch(
+    rules: str | Sequence[str] | Rules,
+    models: PackedBatch | Sequence[PartialModel | PackedModel],
+    select: Sequence[str] | None = None,
+) -> dict[str, BatchValues]:
+    """Evaluate the predicates ``rules`` define over every graph of a batch at once.
+
+    ``models`` is a :class:`~.matrices.batch.PackedBatch`, or the models to build
+    one of. Each graph gets what :func:`evaluate` would give it alone: ``values[g]``
+    is graph ``g``'s :class:`PredicateValues`.
+    """
     compiled = rules if isinstance(rules, Rules) else Rules.compile(rules)
-    packed = model if isinstance(model, PackedModel) else PackedModel.build(model)
+    batch = models if isinstance(models, PackedBatch) else PackedBatch.build(models)
     predicates = compiled.select(select)
-    targets = selected_targets(predicates, packed, compiled)
-    steps = plan(targets, packed, compiled.defined, compiled.declared)
-    relations = base_relations(packed)
+    targets = selected_targets(predicates, batch, compiled)
+    steps = plan(targets, batch, compiled.defined, compiled.declared)
+    relations = base_relations(batch)
     for step in steps:
         match step:
             case Undetermined():
-                relations[step.target] = undetermined(step, relations, packed.size)
+                relations[step.target] = undetermined(step, relations, batch)
             case Closure():
-                relations[step.target] = closure(step, relations, packed.size)
+                relations[step.target] = closure(step, relations, batch.size)
             case Derivation():
-                relations[step.target] = derive(step, relations, packed)
+                relations[step.target] = derive(step, relations, batch)
     results = {}
     for predicate, target in zip(predicates, targets, strict=True):
         must, may = relations[target]
         arity = len(predicate.parameters)
-        values = PredicateValues(
-            predicate.name, predicate.kind, arity, must.data, may.data, packed.size
-        )
+        values = BatchValues(predicate.name, predicate.kind, arity, must.data, may.data, batch)
         results[predicate.name] = values
     return results
 
 
-def selected_targets(predicates: list[Predicate], model: PackedModel, rules: Rules) -> list[Target]:
+def selected_targets(predicates: list[Predicate], model: PackedBatch, rules: Rules) -> list[Target]:
     """What each selected predicate is: its own, or (without a body) the relation of the
     model it names, which must relate as many nodes as the predicate has parameters."""
     targets = []
@@ -133,12 +154,8 @@ class PredicateValues:
     def tuples(self) -> dict[LogicValue, Tuples]:
         """The tuples that are ``true``, ``unknown`` and ``error``, as arrays of shape
         ``(m, arity)``, in no particular order."""
-        must, may = Value(self.arity, self.n, self.must), Value(self.arity, self.n, self.may)
-        return {
-            "true": to_tuples(intersection(must, may)),
-            "unknown": to_tuples(difference(may, must)),
-            "error": to_tuples(difference(must, may)),
-        }
+        must, may = of_graph(self.arity, self.n, self.must), of_graph(self.arity, self.n, self.may)
+        return {value: to_tuples(found)[:, 1:] for value, found in logic_values(must, may).items()}
 
     def items(self) -> Iterator[tuple[NodeTuple, LogicValue]]:
         """The tuples that aren't false, and their values, ordered by tuple."""
@@ -148,23 +165,89 @@ class PredicateValues:
         return iter(sorted(found))
 
     def value(self, key: NodeTuple) -> LogicValue:
-        must = is_member(Value(self.arity, self.n, self.must), key)
-        may = is_member(Value(self.arity, self.n, self.may), key)
+        must = is_member(of_graph(self.arity, self.n, self.must), key)
+        may = is_member(of_graph(self.arity, self.n, self.may), key)
         if must:
             return "true" if may else "error"
         return "unknown" if may else "false"
 
 
+@dataclass(frozen=True)
+class BatchValues:
+    """What a predicate evaluates to over each graph of a batch: the tuples that must hold
+    and those that may, as batched packed bits over the batch's node slots.
+
+    ``values[g]`` is graph ``g``'s :class:`PredicateValues`, in its own node indices.
+    """
+
+    name: str
+    kind: PredicateKind
+    arity: int
+    must: BatchBits
+    may: BatchBits
+    batch: PackedBatch
+
+    def __len__(self) -> int:
+        return len(self.batch)
+
+    def __getitem__(self, graph: int) -> PredicateValues:
+        if not -len(self) <= graph < len(self):
+            raise IndexError(graph)
+        graph %= len(self)
+        n = self.batch.sizes[graph]
+
+        def own(bits: BatchBits) -> Bits:
+            value = self.value(bits)
+            if self.batch.keeps_indices:
+                return graph_bits(value, graph)
+            slots = self.batch.size.nodes
+            tuples = to_tuples(of_graph(self.arity, slots, graph_bits(value, graph)))[:, 1:]
+            nodes = self.batch.owners[graph][tuples]  # the slots, as the graph's own nodes
+            return graph_bits(from_tuples(self.arity, Size(1, n), with_graph(nodes)))
+
+        must = own(self.must)
+        may = must if self.may is self.must else own(self.may)
+        return PredicateValues(self.name, self.kind, self.arity, must, may, n)
+
+    def tuples(self) -> dict[LogicValue, Tuples]:
+        """The tuples that are ``true``, ``unknown`` and ``error``, as arrays of shape
+        ``(m, 1 + arity)``: each row its graph, then its nodes by their indices in the
+        graph; ordered by graph, otherwise in no particular order."""
+        found = logic_values(self.value(self.must), self.value(self.may))
+        return {value: self.own_tuples(tuples) for value, tuples in found.items()}
+
+    def value(self, bits: BatchBits) -> Value:
+        return Value(self.arity, self.batch.size, bits)
+
+    def own_tuples(self, value: Value) -> Tuples:
+        """The tuples of ``value``, with each node's slot replaced by its index in its graph."""
+        tuples = to_tuples(value)
+        if self.batch.keeps_indices or not len(tuples):
+            return tuples
+        tuples = tuples.copy()
+        tuples[:, 1:] = self.batch.owners[tuples[:, :1], tuples[:, 1:]]
+        return tuples
+
+
+def logic_values(must: Value, may: Value) -> dict[LogicValue, Value]:
+    """The tuples that are ``true``, ``unknown`` and ``error``."""
+    return {
+        "true": intersection(must, may),
+        "unknown": difference(may, must),
+        "error": difference(must, may),
+    }
+
+
 def is_member(value: Value, key: NodeTuple) -> bool:
     match value.arity:
         case 0:
-            return value.truth
+            return bool(value.truth[0])
         case 1:
-            return k.contains(value.vector, key[0])
+            return bool(k.contains(value.vector, key[0])[0])
         case 2:
-            return k.contains(value.matrix[key[0]], key[1])
+            return bool(k.contains(value.matrix[:, key[0]], key[1])[0])
         case _:
-            return bool(np.any(np.all(value.array == np.asarray(key), axis=1)))
+            return bool(np.any(np.all(value.array[:, 1:] == np.asarray(key), axis=1)))
 
 
 class Modal(NamedTuple):
@@ -182,25 +265,27 @@ type Relations = dict[Target, Modal]
 """The values of the relations computed so far, by what reads them."""
 
 
-def base_relations(model: PackedModel) -> Relations:
-    """The model's matrices, as evaluation reads them: where it starts."""
-    n = model.size
+def base_relations(batch: PackedBatch) -> Relations:
+    """The batch's matrices, as evaluation reads them: where it starts."""
     return {
-        Target("base", r.name): Modal(Value(r.arity, n, r.must), Value(r.arity, n, r.may))
-        for r in model.relations.values()
+        Target("base", r.name): Modal(batch.value(r, "must"), batch.value(r, "may"))
+        for r in batch.relations.values()
     }
 
 
 # -- steps --------------------------------------------------------------------
 
 
-def undetermined(step: Undetermined, relations: Relations, n: int) -> Modal:
+def undetermined(step: Undetermined, relations: Relations, batch: PackedBatch) -> Modal:
+    """Unknown for the nodes of its parameter types: an untyped parameter, any node of its
+    graph."""
     predicate = step.predicate
+    size = batch.size
     arity = len(predicate.parameters)
-    domains: list[Vector] = []  # the nodes each parameter may be
+    domains: list[Vector] = []  # the nodes each parameter may be, in each graph
     for parameter, domain in zip(predicate.parameters, step.domains, strict=True):
         if domain is None:
-            domains.append(k.full_vector(n))
+            domains.append(batch.nodes)
             continue
         kind = relations[domain].may
         if kind.arity != 1:
@@ -208,26 +293,29 @@ def undetermined(step: Undetermined, relations: Relations, n: int) -> Modal:
         domains.append(kind.vector)
     match arity:
         case 0:
-            may = Value(0, n, True)
+            may = Value(0, size, np.ones(size.graphs, bool))
         case 1:
-            may = Value(1, n, domains[0])
+            may = Value(1, size, domains[0])
         case 2:
-            may = Value(2, n, k.outer(domains[0], domains[1], n))
+            may = Value(2, size, k.outer(domains[0], domains[1], size.nodes))
         case _:
-            axes = [k.indices(d, n) for d in domains]
-            grid = np.array(np.meshgrid(*axes, indexing="ij")).reshape(arity, -1).T
-            may = from_tuples(arity, n, grid)
-    return Modal(empty(arity, n), may)
+            grids = []
+            for graph in range(size.graphs):
+                axes = [k.indices(d[graph : graph + 1])[1] for d in domains]
+                grid = np.array(np.meshgrid(*axes, indexing="ij")).reshape(arity, -1).T
+                grids.append(with_graph(grid, graph))
+            may = from_tuples(arity, size, np.concatenate(grids))
+    return Modal(empty(arity, size), may)
 
 
-def closure(step: Closure, relations: Relations, n: int) -> Modal:
+def closure(step: Closure, relations: Relations, size: Size) -> Modal:
     """``R+`` in each modality, from ``R`` and the nodes that exist."""
     steps, exists = relations[step.target.steps], relations[EXISTS_TARGET]
     if steps.must.arity != 2:
         raise RuleError(f"{step.written}+ needs a relation of two nodes", step.position)
-    must = transitive_closure(steps.must.matrix, exists.must.vector, n)
-    may = transitive_closure(steps.may.matrix, exists.may.vector, n)
-    return Modal(Value(2, n, must), Value(2, n, may))
+    must = transitive_closure(steps.must.matrix, exists.must.vector, size.nodes)
+    may = transitive_closure(steps.may.matrix, exists.may.vector, size.nodes)
+    return Modal(Value(2, size, must), Value(2, size, may))
 
 
 def transitive_closure(steps: Matrix, exists: Vector, n: int) -> Matrix:
@@ -236,19 +324,19 @@ def transitive_closure(steps: Matrix, exists: Vector, n: int) -> Matrix:
     return steps | k.product(k.closure(through, n), steps, n)
 
 
-def derive(step: Derivation, relations: Relations, model: PackedModel) -> Modal:
+def derive(step: Derivation, relations: Relations, batch: PackedBatch) -> Modal:
     """The union of the predicate's clauses in each modality; an error predicate
     never may hold."""
     arity = len(step.predicate.parameters)
 
     def union_of_clauses(modality: Modality) -> Value:
-        result = empty(arity, model.size)
+        result = empty(arity, batch.size)
         for clause in step.clauses:
-            result = union(result, evaluate_clause(clause, modality, relations, model))
+            result = union(result, evaluate_clause(clause, modality, relations, batch))
         return result
 
     must = union_of_clauses("must")
-    may = empty(arity, model.size) if step.predicate.kind == "error" else union_of_clauses("may")
+    may = empty(arity, batch.size) if step.predicate.kind == "error" else union_of_clauses("may")
     return Modal(must, may)
 
 
@@ -256,10 +344,10 @@ def derive(step: Derivation, relations: Relations, model: PackedModel) -> Modal:
 
 
 def evaluate_clause(
-    clause: Clause, modality: Modality, relations: Relations, model: PackedModel
+    clause: Clause, modality: Modality, relations: Relations, batch: PackedBatch
 ) -> Value:
     """The tuples of the parameters for which every literal of ``clause`` holds."""
-    n = model.size
+    size = batch.size
     exists = relations[EXISTS_TARGET].read(modality)
     factors: list[Factor] = []
     for call in clause.calls:
@@ -275,10 +363,10 @@ def evaluate_clause(
     for call in clause.calls:
         if call.atom.negated:
             negation = call.atom.modality or flip(modality)
-            factors.append(negative(call, clause.bound, negation, relations, n))
+            factors.append(negative(call, clause.bound, negation, relations, size))
     for compared in clause.comparisons:
-        factors.append(comparison(compared, modality, model))
-    return solve(factors, tuple(range(clause.parameters)), n)
+        factors.append(comparison(compared, modality, batch))
+    return solve(factors, tuple(range(clause.parameters)), size)
 
 
 def flip(modality: Modality) -> Modality:
@@ -297,7 +385,7 @@ def read(call: CallLiteral, modality: Modality, relations: Relations) -> Value:
 
 
 def negative(
-    call: CallLiteral, bound: frozenset[VarId], modality: Modality, relations: Relations, n: int
+    call: CallLiteral, bound: frozenset[VarId], modality: Modality, relations: Relations, size: Size
 ) -> Factor:
     """``!call``, read in ``modality`` (the clause's flipped, or the atom's own)."""
     value = read(call, modality, relations)
@@ -309,17 +397,17 @@ def negative(
     exists = relations[EXISTS_TARGET].read(modality)
     outer = tuple(dict.fromkeys(v for v in variables if v in bound))
     inner = [bind(value, args), *(Factor((v,), exists) for v in local)]
-    return make_factor(outer, solve(inner, outer, n), negated=True)
+    return make_factor(outer, solve(inner, outer, size), negated=True)
 
 
-def comparison(compared: CompareLiteral, modality: Modality, model: PackedModel) -> Factor:
+def comparison(compared: CompareLiteral, modality: Modality, batch: PackedBatch) -> Factor:
     position = compared.comparison.position
-    left, right = side(compared.left, position, model), side(compared.right, position, model)
-    return compare(left, right, compared.comparison, modality, model.size)
+    left, right = side(compared.left, position, batch), side(compared.right, position, batch)
+    return compare(left, right, compared.comparison, modality, batch.size, batch.strings)
 
 
-def side(operand: Operand, position: Position, model: PackedModel) -> Side:
+def side(operand: Operand, position: Position, batch: PackedBatch) -> Side:
     if operand.attribute is None:
         return Side(None, None, operand.constant, None)
-    attribute = named_attribute(model, operand.attribute, position)
+    attribute = named_attribute(batch, operand.attribute, position)
     return Side(operand.variable, operand.node, None, attribute)
