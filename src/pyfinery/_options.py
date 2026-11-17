@@ -104,7 +104,6 @@ def _field(marker: str, options: RefOptions, field: dict[str, Any]) -> FieldInfo
     ``Field`` keeps the arguments it doesn't take as JSON schema extras, where they change
     nothing: those are refused. Its deprecated arguments, such as ``min_items``, still work.
     """
-    given = field.get("json_schema_extra")
     beyond = [name for name in field if name not in _FIELD_PARAMETERS]
     # Without json_schema_extra, Field puts what it doesn't take there, and only that.
     probe = {name: value for name, value in field.items() if name != "json_schema_extra"}
@@ -112,7 +111,7 @@ def _field(marker: str, options: RefOptions, field: dict[str, Any]) -> FieldInfo
     if beyond and isinstance(info.json_schema_extra, dict) and info.json_schema_extra:
         unknown = ", ".join(sorted(info.json_schema_extra))
         raise TypeError(f"{marker}() got unexpected keyword arguments: {unknown}")
-    if given is not None:
+    if "json_schema_extra" in field:  # even None: it replaces what an Annotated Field gave
         info = Field(**field)
     info.metadata.append(options)
     return info

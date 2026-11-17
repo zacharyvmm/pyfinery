@@ -228,6 +228,26 @@ def test_unknown_arguments_are_refused(marker):
         marker(knd="contains", json_schema_extra={"shown": True})
 
 
+class Extra(RefineryNode):
+    pass
+
+
+ReadOnly = Annotated[list[Extra], Field(json_schema_extra={"readOnly": True})]
+
+
+@pytest.mark.parametrize("marker", [Ref, Contains])
+def test_given_json_schema_extra_is_kept(marker):
+    class Shown(RefineryNode):
+        cleared: ReadOnly = marker(json_schema_extra=None)
+        kept: ReadOnly = marker()
+        own: list[Extra] = marker(json_schema_extra={"title": "Own"})
+
+    properties = Shown.model_json_schema()["properties"]
+    assert "readOnly" not in properties["cleared"]
+    assert properties["kept"]["readOnly"] is True
+    assert properties["own"]["title"] == "Own"
+
+
 def test_deprecated_field_arguments_still_work():
     # Field still honours these (with a deprecation warning): they aren't refused.
     with pytest.warns(DeprecationWarning):
