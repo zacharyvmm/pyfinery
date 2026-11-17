@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: EPL-2.0
 
 """The packed-bit kernels of the bits engine, on batches of graphs, against dense NumPy
-references computed graph by graph."""
+references computed graph by graph: on the CPU, and (PYFINERY_GPU_TESTS=1) a GPU."""
 
 from __future__ import annotations
 
@@ -24,9 +24,21 @@ def _random(n: int, density: float, seed: int, graphs: int = GRAPHS) -> np.ndarr
     return dense
 
 
+@pytest.fixture(autouse=True)
+def on_device(device):
+    """Every kernel of a test runs on ``device``, and makes its arrays."""
+    with k.on(device):
+        yield
+
+
 def _packed(dense: np.ndarray) -> k.Matrix:
     graphs, n, _ = dense.shape
     return k.matrix_of(graphs, n, *np.nonzero(dense))
+
+
+def _dense(bits, n: int) -> np.ndarray:
+    """Packed bits, on whatever device, as NumPy booleans."""
+    return k.to_host(k.unpack(bits, n))
 
 
 def _closure(dense: np.ndarray) -> np.ndarray:
@@ -43,15 +55,17 @@ def _closure(dense: np.ndarray) -> np.ndarray:
 def test_product(n, density):
     left, right = _random(n, density, 1), _random(n, density, 2)
     expected = (left.astype(np.int64) @ right.astype(np.int64)) > 0
-    assert (k.unpack(k.product(_packed(left), _packed(right), n), n) == expected).all()
+    assert (_dense(k.product(_packed(left), _packed(right), n), n) == expected).all()
 
 
-def test_product_in_chunks(monkeypatch):
+@pytest.mark.parametrize("dense_nodes", [k.GPU_DENSE_NODES, 0])  # on a GPU: unpacked, scattered
+def test_product_in_chunks(monkeypatch, dense_nodes):
     monkeypatch.setattr(k, "CHUNK_WORDS", 5)  # a few rows, or a graph, at a time
+    monkeypatch.setattr(k, "GPU_DENSE_NODES", dense_nodes)
     for n, density in [(70, 0.02), (130, 0.5)]:
         left, right = _random(n, density, 3), _random(n, density, 4)
         expected = (left.astype(np.int64) @ right.astype(np.int64)) > 0
-        assert (k.unpack(k.product(_packed(left), _packed(right), n), n) == expected).all()
+        assert (_dense(k.product(_packed(left), _packed(right), n), n) == expected).all()
 
 
 @pytest.mark.parametrize("n", SIZES)
@@ -61,7 +75,7 @@ def test_product_in_chunks(monkeypatch):
 def test_closure(n, density, seed, closure):
     dense = _random(n, density, seed)
     expected = np.stack([_closure(graph) for graph in dense])
-    assert (k.unpack(closure(_packed(dense), n), n) == expected).all()
+    assert (_dense(closure(_packed(dense), n), n) == expected).all()
 
 
 @pytest.mark.parametrize("closure", [k.closure_by_components, k.closure_by_squaring])
@@ -73,21 +87,21 @@ def test_closure_of_long_paths_and_cycles(closure):
         dense[graph, order[:-1], order[1:]] = True  # one long path, in a random order
         dense[graph, order[150], order[100 + graph]] = True  # and a cycle in it
     expected = np.stack([_closure(graph) for graph in dense])
-    assert (k.unpack(closure(_packed(dense), n), n) == expected).all()
+    assert (_dense(closure(_packed(dense), n), n) == expected).all()
 
 
 @pytest.mark.parametrize("n", SIZES)
 def test_transpose_and_projections(n):
     dense = _random(n, 0.2, 3)
     matrix = _packed(dense)
-    assert (k.unpack(k.transpose(matrix, n), n) == dense.transpose(0, 2, 1)).all()
-    assert (k.unpack(k.row_any(matrix, n), n) == dense.any(axis=2)).all()
-    assert (k.unpack(k.column_any(matrix), n) == dense.any(axis=1)).all()
-    assert (k.unpack(k.diagonal(matrix, n), n) == np.diagonal(dense, axis1=1, axis2=2)).all()
+    assert (_dense(k.transpose(matrix, n), n) == dense.transpose(0, 2, 1)).all()
+    assert (_dense(k.row_any(matrix, n), n) == dense.any(axis=2)).all()
+    assert (_dense(k.column_any(matrix), n) == dense.any(axis=1)).all()
+    assert (_dense(k.diagonal(matrix, n), n) == np.diagonal(dense, axis1=1, axis2=2)).all()
     for j in {0, n - 1, n // 2}:
-        assert (k.unpack(k.column(matrix, j, n), n) == dense[:, :, j]).all()
-        assert (k.unpack(k.row(matrix, j), n) == dense[:, j]).all()
-        assert (k.contains(k.row(matrix, j), 0) == dense[:, j, 0]).all()
+        assert (_dense(k.column(matrix, j, n), n) == dense[:, :, j]).all()
+        assert (_dense(k.row(matrix, j), n) == dense[:, j]).all()
+        assert (k.to_host(k.contains(k.row(matrix, j), 0)) == dense[:, j, 0]).all()
 
 
 @pytest.mark.parametrize("n", SIZES)
@@ -98,14 +112,14 @@ def test_complements_keep_padding_clear(n):
     assert k.count(k.complement(k.empty_matrix(GRAPHS, n), n)) == GRAPHS * n * n
     assert k.count(k.full_vector(GRAPHS, n)) == GRAPHS * n
     assert k.count(k.full_matrix(GRAPHS, n)) == GRAPHS * n * n
-    assert (k.unpack(k.identity(GRAPHS, n), n) == np.eye(n, dtype=bool)).all()
+    assert (_dense(k.identity(GRAPHS, n), n) == np.eye(n, dtype=bool)).all()
 
 
 def test_masks_and_outer():
     n = 70
     rows = k.vector_of(2, n, [0, 0, 1], [1, 69, 3])
     cols = k.vector_of(2, n, [0, 0, 1], [0, 68, 5])
-    outer = k.unpack(k.outer(rows, cols, n), n)
+    outer = _dense(k.outer(rows, cols, n), n)
     expected = {(0, 1, 0), (0, 1, 68), (0, 69, 0), (0, 69, 68), (1, 3, 5)}
     assert set(zip(*np.nonzero(outer), strict=True)) == expected
     full = k.full_matrix(2, n)
@@ -116,5 +130,5 @@ def test_masks_and_outer():
 def test_bits_are_found_in_order_whatever_the_leading_axes():
     dense = _random(70, 0.1, 5)
     expected = np.nonzero(dense)
-    for found in (k.nonzero_bits(k.pack_padded(dense, 70)), k.pairs(_packed(dense))):
-        assert all((a == b).all() for a, b in zip(found, expected, strict=True))
+    for found in (k.nonzero_bits(k.pack_padded(k.asarray(dense), 70)), k.pairs(_packed(dense))):
+        assert all((k.to_host(a) == b).all() for a, b in zip(found, expected, strict=True))

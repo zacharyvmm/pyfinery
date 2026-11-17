@@ -86,20 +86,20 @@ def empty(arity: int, size: Size) -> Value:
     graphs, n = size
     match arity:
         case 0:
-            return Value(0, size, np.zeros(graphs, bool))
+            return Value(0, size, k.xp().zeros(graphs, bool))
         case 1:
             return Value(1, size, k.empty_vector(graphs, n))
         case 2:
             return Value(2, size, k.empty_matrix(graphs, n))
         case _:
-            return Value(arity, size, np.empty((0, 1 + arity), np.intp))
+            return Value(arity, size, k.xp().empty((0, 1 + arity), np.intp))
 
 
 def full(arity: int, size: Size) -> Value:
     graphs, n = size
     match arity:
         case 0:
-            return Value(0, size, np.ones(graphs, bool))
+            return Value(0, size, k.xp().ones(graphs, bool))
         case 1:
             return Value(1, size, k.full_vector(graphs, n))
         case 2:
@@ -111,10 +111,10 @@ def full(arity: int, size: Size) -> Value:
 def from_tuples(arity: int, size: Size, tuples: Tuples) -> Value:
     """The tuples of ``tuples``, each row its graph and then its nodes."""
     graphs, n = size
-    tuples = np.asarray(tuples, np.intp).reshape(-1, 1 + arity)
+    tuples = k.asarray(tuples).astype(np.intp).reshape(-1, 1 + arity)
     match arity:
         case 0:
-            truth = np.zeros(graphs, bool)
+            truth = k.xp().zeros(graphs, bool)
             truth[tuples[:, 0]] = True
             return Value(0, size, truth)
         case 1:
@@ -131,11 +131,11 @@ def unique_rows(tuples: Tuples, size: Size) -> Tuples:
     if len(tuples) < 2:
         return tuples
     width = tuples.shape[1]
-    base = max(size.graphs, size.nodes, 1)
-    if base**width >= 2**63:
-        return np.unique(tuples, axis=0)
-    bases = base ** np.arange(width - 1, -1, -1, dtype=np.int64)
-    keys = np.unique(tuples.astype(np.int64) @ bases)
+    base = key_base(size)
+    if not fits(base, width):
+        return k.asarray(np.unique(k.to_host(tuples), axis=0))  # type: ignore[no-any-return]
+    bases = place_values(base, width)
+    keys = k.xp().unique((tuples.astype(np.int64) * bases).sum(axis=1))
     rows: Tuples = ((keys[:, None] // bases) % base).astype(np.intp)
     return rows
 
@@ -144,11 +144,16 @@ def to_tuples(value: Value) -> Tuples:
     """The tuples, each row its graph and then its nodes, ordered by graph."""
     match value.arity:
         case 0:
-            return np.flatnonzero(value.truth).astype(np.intp)[:, None]
+            found: Tuples = k.xp().flatnonzero(value.truth).astype(np.intp)[:, None]
+            return found
         case 1:
-            return np.stack(k.indices(value.vector), axis=1)
+            graphs, nodes = k.indices(value.vector)
+            stacked: Tuples = k.xp().stack([graphs, nodes], axis=1)
+            return stacked
         case 2:
-            return np.stack(k.pairs(value.matrix), axis=1)
+            graphs, rows, cols = k.pairs(value.matrix)
+            paired: Tuples = k.xp().stack([graphs, rows, cols], axis=1)
+            return paired
         case _:
             return value.array
 
@@ -159,7 +164,7 @@ def is_empty(value: Value) -> bool:
         case 0:
             return not value.truth.any()
         case 1 | 2:
-            return not np.any(value.data)
+            return not bool(value.data.any())
         case _:
             return len(value.array) == 0
 
@@ -170,9 +175,11 @@ def only_in(value: Value, graphs: Truths) -> Value:
         case 0:
             return Value(0, value.size, value.truth & graphs)
         case 1:
-            return Value(1, value.size, np.where(graphs[:, None], value.vector, np.uint64(0)))
+            kept = k.xp().where(graphs[:, None], value.vector, np.uint64(0))
+            return Value(1, value.size, kept)
         case 2:
-            return Value(2, value.size, np.where(graphs[:, None, None], value.matrix, np.uint64(0)))
+            kept = k.xp().where(graphs[:, None, None], value.matrix, np.uint64(0))
+            return Value(2, value.size, kept)
         case _:
             return Value(value.arity, value.size, value.array[graphs[value.array[:, 0]]])
 
@@ -184,7 +191,8 @@ def union(left: Value, right: Value) -> Value:
         case 1 | 2:
             return Value(left.arity, left.size, left.data | right.data)
         case _:
-            return from_tuples(left.arity, left.size, np.concatenate([left.array, right.array]))
+            both = k.xp().concatenate([left.array, right.array])
+            return from_tuples(left.arity, left.size, both)
 
 
 def intersection(left: Value, right: Value) -> Value:
@@ -194,7 +202,7 @@ def intersection(left: Value, right: Value) -> Value:
         case 1 | 2:
             return Value(left.arity, left.size, left.data & right.data)
         case _:
-            kept = left.array[members(left.array, right.array)]
+            kept = left.array[members(left.array, right.array, key_base(left.size))]
             return Value(left.arity, left.size, kept)
 
 
@@ -216,7 +224,7 @@ def difference(left: Value, right: Value) -> Value:
         case 1 | 2:
             return Value(left.arity, left.size, left.data & ~right.data)
         case _:
-            kept = left.array[~members(left.array, right.array)]
+            kept = left.array[~members(left.array, right.array, key_base(left.size))]
             return Value(left.arity, left.size, kept)
 
 
@@ -235,23 +243,42 @@ def relabel(value: Value, size: Size, placement: Indices) -> Value:
 # -- tuples as keys -------------------------------------------------------------------
 
 
-def members(tuples: Tuples, of: Tuples) -> NDArray[np.bool_]:
-    """Which rows of ``tuples`` are rows of ``of``."""
+def members(tuples: Tuples, of: Tuples, base: int) -> NDArray[np.bool_]:
+    """Which rows of ``tuples`` are rows of ``of`` (each value below ``base``)."""
     if not len(tuples) or not len(of):
-        return np.zeros(len(tuples), bool)
-    keys = np.sort(row_keys(of))
-    found = row_keys(tuples)
-    at = np.minimum(np.searchsorted(keys, found), len(keys) - 1)
-    found_at: NDArray[np.bool_] = keys[at] == found
-    return found_at
+        return k.xp().zeros(len(tuples), bool)  # type: ignore[no-any-return]
+    keys = row_keys(of, base)
+    keys.sort()
+    found = row_keys(tuples, base)
+    at = keys.searchsorted(found).clip(0, len(keys) - 1)
+    return k.asarray(keys[at] == found)  # type: ignore[no-any-return]
 
 
-def row_keys(columns: Tuples) -> NDArray[Any]:
-    """A key per row, equal where the rows are: the value for one column, else the row's
-    bytes (whose order isn't numeric, but is the same for every array of rows)."""
-    if columns.shape[1] == 1:
-        return np.ascontiguousarray(columns[:, 0], np.intp)
-    rows = np.ascontiguousarray(columns, np.intp)
+def key_base(size: Size) -> int:
+    """More than any value in a batch's tuples: their graphs, and their nodes."""
+    return max(size.graphs, size.nodes, 1)
+
+
+def fits(base: int, width: int) -> bool:
+    """Whether rows of ``width`` values below ``base`` fit in one signed 64-bit number."""
+    return bool(base**width < 2**63)
+
+
+def place_values(base: int, width: int) -> Any:
+    """What each column of a row is worth, as a digit of a number in ``base``."""
+    return k.asarray(base ** np.arange(width - 1, -1, -1, dtype=np.int64))
+
+
+def row_keys(columns: Tuples, base: int) -> Any:
+    """A key per row, equal where the rows are (each value below ``base``): one number,
+    when the rows fit in one; else the row's bytes, on the CPU (whose order isn't
+    numeric, but is the same for every array of rows)."""
+    width = columns.shape[1]
+    if width == 1:
+        return columns[:, 0].astype(np.int64)
+    if fits(base, width):
+        return (columns.astype(np.int64) * place_values(base, width)).sum(axis=1)
+    rows = np.ascontiguousarray(k.to_host(columns), np.intp)
     return rows.view(np.dtype((np.void, rows.itemsize * rows.shape[1]))).ravel()
 
 

@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import cached_property
 from typing import TYPE_CHECKING
 
@@ -37,7 +37,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from . import kernels as k
-from .kernels import Indices, NodeIndex, Vector
+from .kernels import Device, Indices, NodeIndex, Vector
 from .model import BUILTINS, Attribute, DataType, Node, PartialModel, lookup
 from .packed import PackedModel
 from .values import BatchBits, Size, Tuples, Value, from_tuples, of_graph, to_tuples, with_graph
@@ -98,16 +98,40 @@ class PackedBatch:
     """By name."""
     strings: Mapping[str, int] = field(default_factory=dict)
     """The code of each string an attribute has."""
+    device: Device = "cpu"
+    """Where the relations' arrays (and :attr:`nodes`) are, and rules are evaluated:
+    ``"cpu"`` (NumPy arrays) or ``"cuda"`` (CuPy arrays). Attributes stay on the CPU."""
 
     @classmethod
-    def build(cls, models: Sequence[PartialModel | PackedModel]) -> PackedBatch:
-        """Pack ``models`` into one batch: graph ``g`` is ``models[g]``."""
+    def build(
+        cls, models: Sequence[PartialModel | PackedModel], device: Device = "cpu"
+    ) -> PackedBatch:
+        """Pack ``models`` into one batch, on ``device``: graph ``g`` is ``models[g]``."""
         if not models:
             raise ValueError("a batch needs at least one graph")
         if len(models) == 1:
             only = models[0]
-            return of_model(only if isinstance(only, PackedModel) else PackedModel.build(only))
-        return of_models(models)
+            batch = of_model(only if isinstance(only, PackedModel) else PackedModel.build(only))
+        else:
+            batch = of_models(models)
+        return batch.to(device)
+
+    def to(self, device: Device) -> PackedBatch:
+        """This batch, with its relations on ``device`` (copied there, unless already)."""
+        k.module_of(device)  # raises if the device's library is missing
+        if device == self.device:
+            return self
+
+        def moved(bits: BatchBits) -> BatchBits:
+            return k.to_device(bits, device)  # type: ignore[no-any-return]
+
+        relations = {}
+        for name, r in self.relations.items():
+            must = moved(r.must)
+            may = must if r.may is r.must else moved(r.may)  # one array for both, if one
+            relations[name] = replace(r, must=must, may=may)
+        nodes: Vector = k.to_device(self.nodes, device)
+        return replace(self, relations=relations, nodes=nodes, device=device)
 
     def __len__(self) -> int:
         return self.size.graphs

@@ -14,7 +14,8 @@ already be in the model.
 :func:`evaluate_batch` evaluates rules on many graphs at once, each as if alone:
 their relations are stacked into arrays with a leading axis of graphs
 (:class:`PackedBatch`), and every step of the evaluation is the same array
-operation over all of them.
+operation over all of them. ``device="cuda"`` runs those operations on an
+NVIDIA GPU, with CuPy.
 
 Rules may use atoms of classes, references, predicates and attributes,
 transitive closure (``+``), negation, ``must`` and ``may``, ``==`` and
@@ -34,7 +35,7 @@ from __future__ import annotations
 #
 #   matrices/    the data: PartialModels (tuples) built into a PackedBatch (numpy bits)
 #     kernels      packed bits of a batch of graphs: product, transitive closure, ...
-#                  (the only arithmetic on bits: what a GPU port would reimplement)
+#                  (the only arithmetic on bits), on the CPU (NumPy) or a GPU (CuPy)
 #     values       sets of tuples of any arity, of each graph, and their set operations
 #     model        PartialModel: nodes, and the must/may tuples of base relations
 #     packed       PackedModel: one graph's must/may arrays; combine, connect

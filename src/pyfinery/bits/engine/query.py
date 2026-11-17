@@ -28,6 +28,7 @@ from ..._results import QueryResult, reference_errors
 from ..._schema import Schema
 from ..evaluation.pipeline import BatchValues, evaluate_batch
 from ..matrices.batch import PackedBatch, group_by_size
+from ..matrices.kernels import Device, module_of
 from ..matrices.model import PartialModel
 from ..names import refinery_name
 from ..rules.compiled import Rules
@@ -69,8 +70,14 @@ class BitsEngine(BatchQueryEngine):
       of the :class:`~pyfinery.Predicate` objects; ``result.model`` is ``None``.
 
     :meth:`~pyfinery.Metamodel.query_batch` evaluates the rules on many graphs at
-    once (:meth:`query_graphs`).
+    once (:meth:`query_graphs`). With ``device="cuda"``, the rules are evaluated on
+    an NVIDIA GPU, with CuPy; building each graph, and reading its matches back,
+    stay on the CPU.
     """
+
+    def __init__(self, device: Device = "cpu") -> None:
+        module_of(device)  # raises now if the device's library is missing
+        self.device: Device = device
 
     def query_graph(
         self,
@@ -125,7 +132,7 @@ class BitsEngine(BatchQueryEngine):
             for bucket in group_by_size([p.model.size for p in prepared]):
                 ready = [prepared[j] for j in bucket]
                 try:
-                    batch = PackedBatch.build([p.model for p in ready])
+                    batch = PackedBatch.build([p.model for p in ready], self.device)
                     values = evaluate_batch(query.rules, batch, query.evaluated)
                     tuples = tuples_by_graph(values, len(batch))
                 except Exception as e:

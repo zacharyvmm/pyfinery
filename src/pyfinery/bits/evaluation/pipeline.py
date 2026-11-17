@@ -42,7 +42,7 @@ import numpy as np
 from ..errors import RuleError
 from ..matrices import kernels as k
 from ..matrices.batch import PackedBatch
-from ..matrices.kernels import Matrix, Vector
+from ..matrices.kernels import Device, Matrix, Vector
 from ..matrices.model import LogicValue, PartialModel
 from ..matrices.packed import PackedModel
 from ..matrices.values import (
@@ -74,6 +74,7 @@ def evaluate(
     rules: str | Sequence[str] | Rules,
     model: PartialModel | PackedModel,
     select: Sequence[str] | None = None,
+    device: Device = "cpu",
 ) -> dict[str, PredicateValues]:
     """Evaluate the predicates ``rules`` define over ``model``.
 
@@ -81,9 +82,10 @@ def evaluate(
     are skipped), or :class:`~.rules.compiled.Rules` compiled from it; ``model``
     is a :class:`PartialModel`, or a :class:`PackedModel` built from one. Compile
     and build them yourself to evaluate them again. The predicates named in
-    ``select`` are evaluated, or else every one with a body.
+    ``select`` are evaluated, or else every one with a body. ``device`` is where
+    they are evaluated (:func:`evaluate_batch`); the values are NumPy arrays.
     """
-    batch = PackedBatch.build([model])
+    batch = PackedBatch.build([model], device)
     return {name: values[0] for name, values in evaluate_batch(rules, batch, select).items()}
 
 
@@ -91,27 +93,37 @@ def evaluate_batch(
     rules: str | Sequence[str] | Rules,
     models: PackedBatch | Sequence[PartialModel | PackedModel],
     select: Sequence[str] | None = None,
+    device: Device | None = None,
 ) -> dict[str, BatchValues]:
     """Evaluate the predicates ``rules`` define over every graph of a batch at once.
 
     ``models`` is a :class:`~.matrices.batch.PackedBatch`, or the models to build
     one of. Each graph gets what :func:`evaluate` would give it alone: ``values[g]``
     is graph ``g``'s :class:`PredicateValues`.
+
+    The rules are evaluated on ``device``: ``"cpu"`` with NumPy, or ``"cuda"`` with
+    CuPy on an NVIDIA GPU (by default, the batch's device, or the CPU). On a GPU,
+    the values' ``must`` and ``may`` are CuPy arrays; ``values[g]`` and
+    ``values.tuples()`` are NumPy arrays.
     """
     compiled = rules if isinstance(rules, Rules) else Rules.compile(rules)
-    batch = models if isinstance(models, PackedBatch) else PackedBatch.build(models)
+    if isinstance(models, PackedBatch):
+        batch = models.to(device or models.device)
+    else:
+        batch = PackedBatch.build(models, device or "cpu")
     predicates = compiled.select(select)
     targets = selected_targets(predicates, batch, compiled)
     steps = plan(targets, batch, compiled.defined, compiled.declared)
-    relations = base_relations(batch)
-    for step in steps:
-        match step:
-            case Undetermined():
-                relations[step.target] = undetermined(step, relations, batch)
-            case Closure():
-                relations[step.target] = closure(step, relations, batch.size)
-            case Derivation():
-                relations[step.target] = derive(step, relations, batch)
+    with k.on(batch.device):
+        relations = base_relations(batch)
+        for step in steps:
+            match step:
+                case Undetermined():
+                    relations[step.target] = undetermined(step, relations, batch)
+                case Closure():
+                    relations[step.target] = closure(step, relations, batch.size)
+                case Derivation():
+                    relations[step.target] = derive(step, relations, batch)
     results = {}
     for predicate, target in zip(predicates, targets, strict=True):
         must, may = relations[target]
@@ -197,7 +209,7 @@ class BatchValues:
         n = self.batch.sizes[graph]
 
         def own(bits: BatchBits) -> Bits:
-            value = self.value(bits)
+            value = self.host_value(bits)
             if self.batch.keeps_indices:
                 return graph_bits(value, graph)
             slots = self.batch.size.nodes
@@ -205,23 +217,29 @@ class BatchValues:
             nodes = self.batch.owners[graph][tuples]  # the slots, as the graph's own nodes
             return graph_bits(from_tuples(self.arity, Size(1, n), with_graph(nodes)))
 
-        must = own(self.must)
-        may = must if self.may is self.must else own(self.may)
+        with k.on("cpu"):
+            must = own(self.must)
+            may = must if self.may is self.must else own(self.may)
         return PredicateValues(self.name, self.kind, self.arity, must, may, n)
 
     def tuples(self) -> dict[LogicValue, Tuples]:
         """The tuples that are ``true``, ``unknown`` and ``error``, as arrays of shape
         ``(m, 1 + arity)``: each row its graph, then its nodes by their indices in the
         graph; ordered by graph, otherwise in no particular order."""
-        found = logic_values(self.value(self.must), self.value(self.may))
-        return {value: self.own_tuples(tuples) for value, tuples in found.items()}
+        with k.on(self.batch.device):
+            found = logic_values(self.value(self.must), self.value(self.may))
+            tuples = {value: k.to_host(to_tuples(t)) for value, t in found.items()}
+        return {value: self.own_tuples(t) for value, t in tuples.items()}
 
     def value(self, bits: BatchBits) -> Value:
         return Value(self.arity, self.batch.size, bits)
 
-    def own_tuples(self, value: Value) -> Tuples:
-        """The tuples of ``value``, with each node's slot replaced by its index in its graph."""
-        tuples = to_tuples(value)
+    def host_value(self, bits: BatchBits) -> Value:
+        """``bits`` as a :class:`Value` of NumPy arrays."""
+        return Value(self.arity, self.batch.size, k.to_host(bits))
+
+    def own_tuples(self, tuples: Tuples) -> Tuples:
+        """``tuples`` (NumPy), with each node's slot replaced by its index in its graph."""
         if self.batch.keeps_indices or not len(tuples):
             return tuples
         tuples = tuples.copy()
@@ -293,7 +311,7 @@ def undetermined(step: Undetermined, relations: Relations, batch: PackedBatch) -
         domains.append(kind.vector)
     match arity:
         case 0:
-            may = Value(0, size, np.ones(size.graphs, bool))
+            may = Value(0, size, k.xp().ones(size.graphs, bool))
         case 1:
             may = Value(1, size, domains[0])
         case 2:
@@ -301,7 +319,7 @@ def undetermined(step: Undetermined, relations: Relations, batch: PackedBatch) -
         case _:
             grids = []
             for graph in range(size.graphs):
-                axes = [k.indices(d[graph : graph + 1])[1] for d in domains]
+                axes = [k.to_host(k.indices(d[graph : graph + 1])[1]) for d in domains]
                 grid = np.array(np.meshgrid(*axes, indexing="ij")).reshape(arity, -1).T
                 grids.append(with_graph(grid, graph))
             may = from_tuples(arity, size, np.concatenate(grids))

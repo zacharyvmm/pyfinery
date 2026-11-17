@@ -17,6 +17,7 @@ from pyfinery.bits import Node as ModelNode
 from pyfinery.bits import PartialModel, Relation, evaluate
 from pyfinery.bits.evaluation import solve as solve_module
 from pyfinery.bits.evaluation.solve import Factor, Node, Var, bind, make_factor, solve
+from pyfinery.bits.matrices import kernels as k
 from pyfinery.bits.matrices.values import Size, from_tuples, to_tuples, with_graph
 
 
@@ -70,15 +71,17 @@ def _draw(rng: random.Random, n: int, graphs: int):
 
 
 @pytest.mark.parametrize("seed", range(300))
-def test_solve_matches_enumeration(seed):
-    _check_against_enumeration(seed)
+def test_solve_matches_enumeration(seed, device):
+    with k.on(device):
+        _check_against_enumeration(seed)
 
 
 @pytest.mark.parametrize("seed", range(50))
-def test_bulk_joins_in_chunks_match_enumeration(seed, monkeypatch):
+def test_bulk_joins_in_chunks_match_enumeration(seed, monkeypatch, device):
     monkeypatch.setattr(solve_module, "CHUNK_WORDS", 3)  # a few rows at a time
     monkeypatch.setattr(solve_module, "BLOCK_ROWS", 3)
-    _check_against_enumeration(seed)
+    with k.on(device):
+        _check_against_enumeration(seed)
 
 
 def _array(tuples, arity):
@@ -98,7 +101,7 @@ def _check_against_enumeration(seed):
 
     factors = [make_factor(s.variables, batched(s), s.negated) for s in specs]
     result = solve(factors, head, size)
-    found = to_tuples(result)
+    found = k.to_host(to_tuples(result))
     for graph in range(graphs):
         mine = {tuple(int(i) for i in t[1:]) for t in found if t[0] == graph}
         assert mine == _brute_force([s.of(graph) for s in specs], head, variables, n), graph
@@ -228,7 +231,8 @@ def test_wide_factors_are_sorted_once_for_every_block(rule, monkeypatch):
     "layout",
     ["contiguous", "strided", "reversed", "fortran", "one column", "empty"],
 )
-def test_row_keys_are_equal_exactly_where_rows_are(layout):
+@pytest.mark.parametrize("key_base", [4, 2**40])  # rows as numbers, or too wide: as bytes
+def test_row_keys_are_equal_exactly_where_rows_are(layout, key_base):
     rng = np.random.default_rng(3)
     base = rng.integers(0, 4, (200, 6)).astype(np.intp)
     rows = {
@@ -240,10 +244,11 @@ def test_row_keys_are_equal_exactly_where_rows_are(layout):
         "empty": base[:0, :3],
     }[layout]
     other = np.ascontiguousarray(rows[::-1])  # the same rows, laid out differently
-    keys, other_keys = solve_module.row_keys(rows), solve_module.row_keys(other)
+    keys = solve_module.row_keys(rows, key_base)
+    other_keys = solve_module.row_keys(other, key_base)
     for i in range(len(rows)):
         for j in range(len(rows)):
             assert (keys[i] == other_keys[j]) == bool(np.array_equal(rows[i], other[j]))
-    found = solve_module.Lookup.of(other, list(range(rows.shape[1])))
+    found = solve_module.Lookup.of(other, list(range(rows.shape[1])), key_base)
     low, matches = found.matching(rows)
     assert all(matches > 0) and len(low) == len(rows)
