@@ -318,3 +318,19 @@ def test_devices_are_checked_when_asked_for(monkeypatch):
         PackedBatch.build([graph(1, 3)], device="cuda")
     with pytest.raises(ImportError, match="needs CuPy"):
         evaluate(RULES, graph(1, 3), device="cuda")
+
+
+def test_a_graph_without_nodes_evaluates_on_any_device(device):
+    empty = PartialModel([], [Relation.of("edge", 2, [])], [Attribute.of("age", "int", 0, [])])
+    rules = """
+    pred older(x, y) <-> exists(x), exists(y), age(x) < age(y).
+    pred reach(x, y) <-> edge+(x, y).
+    pred back(x, y) <-> edge(y, x), !edge(x, y).
+    pred lonely(x) <-> exists(x), !edge(x, _).
+    """
+    values = evaluate(rules, empty, device=device)
+    assert all(list(v.items()) == [] for v in values.values())
+    with k.on(device):  # the kernels on empty arrays
+        nothing = k.xp().zeros((2, 0, 0), bool)
+        assert k.unpack(k.pack(nothing), 0).shape == (2, 0, 0)
+        assert k.transpose(k.empty_matrix(2, 0), 0).shape == k.empty_matrix(2, 0).shape

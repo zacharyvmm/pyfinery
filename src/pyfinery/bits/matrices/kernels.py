@@ -189,7 +189,7 @@ BIT_PLACES = np.arange(64, dtype=np.uint64)
 def pack(dense: NDArray[np.bool_]) -> NDArray[np.uint64]:
     """Pack the last axis of a boolean array, whose length is a multiple of 64."""
     if on_gpu():  # CuPy packs only flat arrays: add up each word's bits instead
-        bits = dense.reshape(*dense.shape[:-1], -1, 64).astype(np.uint64)
+        bits = dense.reshape(*dense.shape[:-1], dense.shape[-1] // 64, 64).astype(np.uint64)
         placed: NDArray[np.uint64] = (bits << asarray(BIT_PLACES)).sum(axis=-1, dtype=np.uint64)
         return placed
     packed = np.packbits(dense, axis=-1, bitorder="little")
@@ -207,7 +207,8 @@ def unpack(bits: NDArray[np.uint64], n: int) -> NDArray[np.bool_]:
     """The last axis as booleans, ``n`` long."""
     if on_gpu():
         each = (bits[..., None] >> asarray(BIT_PLACES)) & ONE
-        found: NDArray[np.bool_] = each.reshape(*bits.shape[:-1], -1)[..., :n].astype(bool)
+        flat = each.reshape(*bits.shape[:-1], bits.shape[-1] * 64)  # no -1: it may be empty
+        found: NDArray[np.bool_] = flat[..., :n].astype(bool)
         return found
     raw = np.ascontiguousarray(bits).view(np.uint8)
     return np.unpackbits(raw, axis=-1, bitorder="little", count=n).astype(bool)
@@ -366,7 +367,7 @@ def product(left: Matrix, right: Matrix, n: int) -> Matrix:
     if pairs_left > graphs * n * n // 16 and n > 64:
         return dense_product(left, right, n)
     of, rows, cols = pairs(left)
-    flat_right = right.reshape(graphs * n, -1)
+    flat_right = right.reshape(graphs * n, right.shape[-1])
     targets = of * n + rows  # the row of the result each pair adds to
     starts = np.flatnonzero(np.r_[True, targets[1:] != targets[:-1]])
     result = np.zeros_like(flat_right)
@@ -391,7 +392,7 @@ def scattered_product(left: Matrix, right: Matrix, n: int) -> Matrix:
     ``right`` ORed into the rows of the result, a bounded number at a time."""
     graphs = len(left)
     of, rows, cols = pairs(left)
-    flat_right = right.reshape(graphs * n, -1)
+    flat_right = right.reshape(graphs * n, right.shape[-1])
     result = xp().zeros_like(flat_right)
     step = max(1, CHUNK_WORDS // max(flat_right.shape[1], 1))
     for start in range(0, len(of), step):
@@ -460,7 +461,7 @@ def closure_by_components(matrix: Matrix, n: int) -> Matrix:
             found = closure_by_components(to_host(matrix), n)
         return asarray(found)  # type: ignore[no-any-return]
     graphs = len(matrix)
-    flat = matrix.reshape(graphs * n, -1)
+    flat = matrix.reshape(graphs * n, matrix.shape[-1])
     of, rows, cols = pairs(matrix)
     sources, targets = of * n + rows, of * n + cols
     starts = np.searchsorted(sources, np.arange(graphs * n + 1))
