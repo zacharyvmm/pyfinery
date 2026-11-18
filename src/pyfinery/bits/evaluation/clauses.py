@@ -44,8 +44,7 @@ from ..rules.syntax import (
 from .solve import Argument, Node, Var, VarId
 
 if TYPE_CHECKING:
-    from ..matrices.model import Attribute
-    from ..matrices.packed import PackedModel, PackedRelation
+    from ..matrices.batch import BatchAttribute, BatchRelation, PackedBatch
 
 
 class Target(NamedTuple):
@@ -70,7 +69,7 @@ class Target(NamedTuple):
 def resolve(
     name: str,
     position: Position | None,
-    model: PackedModel,
+    model: PackedBatch,
     defined: Collection[str],
     declared: Collection[str],
 ) -> Target:
@@ -83,7 +82,7 @@ def resolve(
     return Target("base", named_relation(model, name, position).name)
 
 
-def named_relation(model: PackedModel, name: str, position: Position | None) -> PackedRelation:
+def named_relation(model: PackedBatch, name: str, position: Position | None) -> BatchRelation:
     """The relation rules name ``name``, or a :class:`RuleError` at ``position``."""
     try:
         found = model.relation_named(name)
@@ -94,7 +93,7 @@ def named_relation(model: PackedModel, name: str, position: Position | None) -> 
     return found
 
 
-def named_attribute(model: PackedModel, name: str, position: Position | None) -> Attribute:
+def named_attribute(model: PackedBatch, name: str, position: Position | None) -> BatchAttribute:
     """The attribute rules name ``name``, or a :class:`RuleError` at ``position``."""
     try:
         found = model.attribute_named(name)
@@ -156,7 +155,7 @@ class Clause:
 def normalize(
     predicate: Predicate,
     literals: Sequence[Literal_],
-    model: PackedModel,
+    model: PackedBatch,
     defined: Collection[str],
     declared: Collection[str],
 ) -> Clause | None:
@@ -255,7 +254,7 @@ def operand_of(term: Term, scope: Scope, comparison: Comparison) -> Operand:
     raise RuleError("only attribute values and constants can be compared", comparison.position)
 
 
-def is_boolean_attribute(name: str, model: PackedModel, defined: Collection[str]) -> bool:
+def is_boolean_attribute(name: str, model: PackedBatch, defined: Collection[str]) -> bool:
     """Whether ``name`` is that of a boolean attribute (and no predicate's with a body)."""
     if name in defined:
         return False
@@ -298,7 +297,7 @@ def contradicts(calls: list[CallLiteral], bound: set[VarId]) -> bool:
 class Scope:
     """The variables of a clause: parameters first, then the rest as they come."""
 
-    def __init__(self, predicate: Predicate, model: PackedModel) -> None:
+    def __init__(self, predicate: Predicate, model: PackedBatch) -> None:
         self.model = model
         self.ids: dict[str, VarId] = {}
         self.names: dict[VarId, str] = {}

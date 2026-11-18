@@ -16,10 +16,10 @@ import numpy as np
 from ..._instances import Graph
 from ..._options import LogicValue
 from ..._results import Match, Violation, ViolationKind
-from ..evaluation.pipeline import PredicateValues
 from ..matrices.kernels import NodeIndex
 from ..matrices.values import Tuples
 from ..rules.syntax import Predicate as RulePredicate
+from ..rules.syntax import PredicateKind
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -37,19 +37,19 @@ class Labels:
     objects: list[BaseModel | None]
 
     def of(self, key: Sequence[NodeIndex]) -> tuple[tuple[str, ...], tuple[BaseModel | None, ...]]:
-        return tuple(self.names[i] for i in key), tuple(self.objects[i] for i in key)
+        return tuple(map(self.names.__getitem__, key)), tuple(map(self.objects.__getitem__, key))
 
 
 def error_violations(
-    values: dict[str, PredicateValues],
+    kinds: dict[str, PredicateKind],
     tuples: dict[str, TuplesByValue],
     labels: Labels,
 ) -> list[Violation]:
-    """The tuples of each predicate that are ``error``: of an ``error`` predicate, rule
-    violations; of another, contradictions."""
+    """The tuples of each predicate (of the kind ``kinds`` gives) that are ``error``: of
+    an ``error`` predicate, rule violations; of another, contradictions."""
     violations = []
-    for name, result in values.items():
-        kind: ViolationKind = "rule" if result.kind == "error" else "contradiction"
+    for name, predicate_kind in kinds.items():
+        kind: ViolationKind = "rule" if predicate_kind == "error" else "contradiction"
         for key in sorted_tuples(tuples[name]["error"]).tolist():
             violations.append(Violation(kind, name, *labels.of(key)))
     return violations

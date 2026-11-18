@@ -17,7 +17,7 @@ from pyfinery.bits import Node as ModelNode
 from pyfinery.bits import PartialModel, Relation, evaluate
 from pyfinery.bits.evaluation import solve as solve_module
 from pyfinery.bits.evaluation.solve import Factor, Node, Var, bind, make_factor, solve
-from pyfinery.bits.matrices.values import from_tuples, to_tuples
+from pyfinery.bits.matrices.values import Size, from_tuples, to_tuples, with_graph
 
 
 def _brute_force(factors, head, variables, n):
@@ -36,25 +36,35 @@ def _holds(factor, assignment):
 
 
 class _Spec:
+    """A factor: the tuples of each graph of the batch."""
+
     def __init__(self, variables, tuples, negated):
         self.variables, self.tuples, self.negated = variables, tuples, negated
 
+    def of(self, graph):
+        return _Spec(self.variables, self.tuples[graph], self.negated)
 
-def _draw(rng: random.Random, n: int):
+
+def _draw(rng: random.Random, n: int, graphs: int):
+    """Factors with the same variables in every graph, and tuples of each graph's own."""
     count = rng.randint(2, 5)
     variables = list(range(count))
+
+    def tuples(arity, density):
+        every = list(itertools.product(range(n), repeat=arity))
+        return [{t for t in every if rng.random() < density()} for _ in range(graphs)]
+
     specs = []
     for _ in range(rng.randint(1, 6)):
         arity = rng.choice([0, 1, 1, 2, 2, 2, 3])
         chosen = tuple(rng.sample(variables, min(arity, count)))
-        all_tuples = list(itertools.product(range(n), repeat=len(chosen)))
-        tuples = {t for t in all_tuples if rng.random() < rng.choice([0.2, 0.5, 0.8])}
+        found = tuples(len(chosen), lambda: rng.choice([0.2, 0.5, 0.8]))
         negated = len(chosen) >= 3 and rng.random() < 0.4
-        specs.append(_Spec(chosen, tuples, negated))
+        specs.append(_Spec(chosen, found, negated))
     # Every variable in a positive factor, as in a clause.
     for v in variables:
         if not any(v in s.variables and not s.negated for s in specs):
-            specs.append(_Spec((v,), {(i,) for i in range(n) if rng.random() < 0.7}, False))
+            specs.append(_Spec((v,), tuples(1, lambda: 0.7), False))
     head = tuple(rng.sample(variables, rng.randint(0, min(4, count))))
     return variables, specs, head
 
@@ -71,34 +81,41 @@ def test_bulk_joins_in_chunks_match_enumeration(seed, monkeypatch):
     _check_against_enumeration(seed)
 
 
+def _array(tuples, arity):
+    return np.array(sorted(tuples), np.intp).reshape(len(tuples), arity)
+
+
 def _check_against_enumeration(seed):
     rng = random.Random(seed)
     n = rng.randint(1, 5)
-    variables, specs, head = _draw(rng, n)
-    factors = [
-        make_factor(
-            s.variables,
-            from_tuples(len(s.variables), n, np.array(sorted(s.tuples), np.intp)),
-            s.negated,
-        )
-        for s in specs
-    ]
-    result = solve(factors, head, n)
-    found = {tuple(int(i) for i in t) for t in to_tuples(result)}
-    assert found == _brute_force(specs, head, variables, n)
+    graphs = rng.choice([1, 1, 2, 4])
+    size = Size(graphs, n)
+    variables, specs, head = _draw(rng, n, graphs)
+
+    def batched(spec):
+        rows = [with_graph(_array(spec.tuples[g], len(spec.variables)), g) for g in range(graphs)]
+        return from_tuples(len(spec.variables), size, np.concatenate(rows))
+
+    factors = [make_factor(s.variables, batched(s), s.negated) for s in specs]
+    result = solve(factors, head, size)
+    found = to_tuples(result)
+    for graph in range(graphs):
+        mine = {tuple(int(i) for i in t[1:]) for t in found if t[0] == graph}
+        assert mine == _brute_force([s.of(graph) for s in specs], head, variables, n), graph
 
 
 def test_bind_selects_nodes_and_repeated_variables():
-    n = 4
+    size = Size(2, 4)
     tuples = np.array([[0, 1, 1], [1, 1, 2], [2, 3, 3], [0, 2, 1]], np.intp)
-    value = from_tuples(3, n, tuples)
+    value = from_tuples(3, size, np.concatenate([with_graph(tuples, 0), with_graph(tuples[:1], 1)]))
     factor = bind(value, [Node(0), Var(5), Var(5)])
     assert factor.variables == (5,)
-    assert {tuple(t) for t in to_tuples(factor.value).tolist()} == {(1,)}
+    assert {tuple(t) for t in to_tuples(factor.value).tolist()} == {(0, 1), (1, 1)}
     factor = bind(value, [Var(1), Var(2), Var(2)])
-    assert {tuple(t) for t in to_tuples(factor.value).tolist()} == {(0, 1), (2, 3)}
-    negated = bind(from_tuples(1, n, np.array([[2]])), [Node(2)], negated=True)
-    assert negated == Factor((), negated.value) and negated.value.data is False
+    assert {tuple(t) for t in to_tuples(factor.value).tolist()} == {(0, 0, 1), (0, 2, 3), (1, 0, 1)}
+    one = from_tuples(1, size, np.array([[0, 2]]))
+    negated = bind(one, [Node(2)], negated=True)
+    assert negated == Factor((), negated.value) and negated.value.data.tolist() == [False, True]
 
 
 @pytest.mark.parametrize(

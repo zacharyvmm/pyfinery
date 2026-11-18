@@ -9,6 +9,9 @@ to report. :class:`~pyfinery.Metamodel` combines its rules with those of the cal
 and builds the graph; what an engine does with them is its own business:
 
 - a :class:`QueryEngine` queries, e.g. :class:`~pyfinery.bits.BitsEngine`;
+- a :class:`BatchQueryEngine` also queries many graphs at once, e.g.
+  :class:`~pyfinery.bits.BitsEngine` (:meth:`~pyfinery.Metamodel.query_batch`
+  queries graphs one at a time with other engines);
 - an :class:`Engine` also validates;
 - :class:`AsyncQueryEngine` and :class:`AsyncEngine` are their asynchronous variants.
 
@@ -40,6 +43,7 @@ __all__ = [
     "AsyncClientEngine",
     "AsyncEngine",
     "AsyncQueryEngine",
+    "BatchQueryEngine",
     "ClientEngine",
     "Engine",
     "Problems",
@@ -69,6 +73,23 @@ class QueryEngine(Protocol):
         """The matches of the predicates named in ``select``, and the errors, over
         ``graph`` (built with ``existence=True``) in a closed world that keeps what
         is unknown. ``rules`` are the metamodel's, then those of the call."""
+        ...
+
+
+@runtime_checkable
+class BatchQueryEngine(QueryEngine, Protocol):
+    """Evaluates :meth:`~pyfinery.Metamodel.query_batch` on many graphs at once."""
+
+    def query_graphs(
+        self,
+        schema: Schema,
+        graphs: Sequence[Graph],
+        rules: Sequence[str],
+        predicates: Sequence[Sequence[Predicate]],
+        select: Sequence[str],
+    ) -> list[QueryResult | Exception]:
+        """What :meth:`query_graph` gives each of ``graphs``, with its own
+        ``predicates``, or the exception it raises."""
         ...
 
 
@@ -289,9 +310,8 @@ def query_engine(refinery: object, problems: Problems, method: str = "query") ->
         or _is_async(refinery, "query_graph")
         or _is_client(refinery, asynchronous=True)
     ):
-        raise TypeError(
-            f"{method}() needs a synchronous engine, not {_name(refinery)}; use a{method}()"
-        )
+        hint = f"; use a{method}()" if method == "query" else ""
+        raise TypeError(f"{method}() needs a synchronous engine, not {_name(refinery)}{hint}")
     if not isinstance(refinery, QueryEngine):
         raise TypeError(
             f"{method}() needs a Refinery client or an engine with query_graph(), "
