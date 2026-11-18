@@ -346,3 +346,24 @@ def test_a_selected_predicate_without_a_body_has_the_models_arity():
     ):
         evaluate("pred Person().", model(), select=["Person"])
     assert len(list(evaluate("pred Person(x).", model(), select=["Person"])["Person"].items())) == 3
+
+
+def test_an_attribute_value_given_twice_is_the_last():
+    # The array is exact (object) only if a value kept needs it: 10**30 is replaced.
+    replaced = Attribute.of("A::n", "int", 3, [(1, 10**30), (1, "error"), (2, 4)])
+    assert replaced.lower.dtype == float and replaced.lower[1] > replaced.upper[1]
+    kept = Attribute.of("A::n", "int", 3, [(1, 4), (1, 10**30)])
+    assert kept.lower.dtype == object and kept.lower[1] == 10**30
+    assert Attribute.of("A::s", "string", 2, [(0, "a"), (0, "b")]).strings == ("b", None)
+
+
+def test_an_integer_too_large_for_a_float_is_kept_exactly():
+    for values in ([(1, 10**400), (0, 2**53 + 1)], [(0, 10**400)], [(0, "3..1" + "0" * 400)]):
+        attribute = Attribute.of("A::n", "int", 2, values)
+        assert attribute.lower.dtype == object
+    huge = Attribute.of("A::n", "int", 2, [(0, 10**400), (1, 5)])
+    model = PartialModel([Node("a", "a"), Node("b", "b")], [], [huge])
+    values = evaluate("pred big(x) <-> exists(x), A::n(x) > 10.", model)["big"]
+    assert dict(values.items()) == {(0,): "true"}
+    below = evaluate(f"pred small(x) <-> exists(x), A::n(x) < {10**400}.", model)["small"]
+    assert dict(below.items()) == {(1,): "true"}

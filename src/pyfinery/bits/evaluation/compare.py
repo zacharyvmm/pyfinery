@@ -24,7 +24,7 @@ from ..errors import RuleError, UnsupportedRuleError
 from ..matrices import kernels as k
 from ..matrices.batch import ERROR_STRING, BatchAttribute
 from ..matrices.kernels import NodeIndex
-from ..matrices.model import Numbers, real_interval
+from ..matrices.model import Numbers, is_float, real_interval
 from ..matrices.values import Size, Value
 from ..rules.syntax import Comparison, Modality
 from .solve import Factor, VarId
@@ -148,7 +148,7 @@ def interval(side: Side, variables: tuple[VarId, ...], size: Size) -> Interval:
         else:
             raise RuleError(f"not a number: {value!r}")
         # Floats, unless they can't hold the numbers exactly.
-        if float(low) == low and float(high) == high:
+        if is_float(low) and is_float(high):
             return Interval(np.asarray(float(low)), np.asarray(float(high)))
         return Interval(np.asarray(low, dtype=object), np.asarray(high, dtype=object))
     lower, upper = side.attribute.lower, side.attribute.upper
