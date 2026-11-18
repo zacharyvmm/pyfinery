@@ -8,6 +8,7 @@ rules on it alone gives it, which is the reference."""
 from __future__ import annotations
 
 import random
+import sys
 
 import numpy as np
 import pytest
@@ -83,7 +84,7 @@ def answers(values) -> dict[str, list]:
 
 
 @pytest.mark.parametrize("seed", range(40))
-def test_each_graph_gets_what_it_gets_alone(seed):
+def test_each_graph_gets_what_it_gets_alone(seed, device):
     rng = random.Random(seed)
     models = [
         named(graph(100 * seed + i, rng.randint(1, 25)), 100 * seed + i)
@@ -91,7 +92,7 @@ def test_each_graph_gets_what_it_gets_alone(seed):
     ]
     given = [PackedModel.build(m) if rng.random() < 0.3 else m for m in models]
     rules = RULES + MORE_RULES
-    batch = evaluate_batch(rules, given)
+    batch = evaluate_batch(rules, given, device=device)
     for g, model in enumerate(models):
         alone = answers(evaluate(rules, model))
         assert answers({name: values[g] for name, values in batch.items()}) == alone, g
@@ -183,13 +184,13 @@ def _errors(result):
 
 
 @pytest.mark.parametrize("family", sorted(FAMILIES))
-def test_query_batch_answers_each_graph_as_query_does(family):
+def test_query_batch_answers_each_graph_as_query_does(family, device):
     drawn = [FAMILIES[family](random.Random(seed)) for seed in range(25)]
     metamodel, _, rules, _ = drawn[0]
     graphs = [objects for _, objects, _, _ in drawn]
     own = [predicates for _, _, _, predicates in drawn]
     results = metamodel.query_batch(
-        graphs, BitsEngine(), rules, graph_predicates=own, return_exceptions=True
+        graphs, BitsEngine(device), rules, graph_predicates=own, return_exceptions=True
     )
     answered = 0
     for objects, predicates, result in zip(graphs, own, results, strict=True):
@@ -284,3 +285,52 @@ def test_query_batch_needs_one_list_of_predicates_per_graph():
     with pytest.raises(ValueError, match="one per graph"):
         metamodel.query_batch([objects, objects], BitsEngine(), rules, graph_predicates=[[]])
     assert metamodel.query_batch([], BitsEngine(), rules) == []
+
+
+# -- devices --------------------------------------------------------------------------
+
+
+def test_a_batch_on_a_device_holds_its_arrays_there(device):
+    models = [graph(1, 5), graph(2, 9)]
+    batch = PackedBatch.build(models, device=device)
+    assert batch.device == device
+    on_cpu = device == "cpu"
+    assert isinstance(batch["Person::friend"].must, np.ndarray) == on_cpu
+    assert isinstance(batch.nodes, np.ndarray) == on_cpu
+    assert batch.to(device) is batch
+    back = batch.to("cpu")
+    assert isinstance(back["Person::friend"].must, np.ndarray)
+    values = evaluate_batch(RULES, batch)["reach"]
+    assert isinstance(values.must, np.ndarray) == on_cpu
+    assert isinstance(values[1].must, np.ndarray)  # read back on the CPU
+    assert answers({"reach": values[1]}) == answers(evaluate(RULES, models[1], select=["reach"]))
+    moved = evaluate_batch(RULES, back, device=device)["reach"]
+    assert list(moved[0].items()) == list(values[0].items())
+
+
+def test_devices_are_checked_when_asked_for(monkeypatch):
+    with pytest.raises(ValueError, match="device must be one of cpu, cuda, not 'tpu'"):
+        BitsEngine("tpu")  # type: ignore[arg-type]
+    monkeypatch.setitem(sys.modules, "cupy", None)  # as if CuPy weren't installed
+    with pytest.raises(ImportError, match="needs CuPy"):
+        BitsEngine("cuda")
+    with pytest.raises(ImportError, match="needs CuPy"):
+        PackedBatch.build([graph(1, 3)], device="cuda")
+    with pytest.raises(ImportError, match="needs CuPy"):
+        evaluate(RULES, graph(1, 3), device="cuda")
+
+
+def test_a_graph_without_nodes_evaluates_on_any_device(device):
+    empty = PartialModel([], [Relation.of("edge", 2, [])], [Attribute.of("age", "int", 0, [])])
+    rules = """
+    pred older(x, y) <-> exists(x), exists(y), age(x) < age(y).
+    pred reach(x, y) <-> edge+(x, y).
+    pred back(x, y) <-> edge(y, x), !edge(x, y).
+    pred lonely(x) <-> exists(x), !edge(x, _).
+    """
+    values = evaluate(rules, empty, device=device)
+    assert all(list(v.items()) == [] for v in values.values())
+    with k.on(device):  # the kernels on empty arrays
+        nothing = k.xp().zeros((2, 0, 0), bool)
+        assert k.unpack(k.pack(nothing), 0).shape == (2, 0, 0)
+        assert k.transpose(k.empty_matrix(2, 0), 0).shape == k.empty_matrix(2, 0).shape

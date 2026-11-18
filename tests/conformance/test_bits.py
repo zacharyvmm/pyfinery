@@ -118,7 +118,7 @@ def _refinery_values(model: JsonOutput, name: str) -> dict[tuple[int, ...], str]
 
 
 @pytest.mark.parametrize(("path", "case"), CASES, ids=[f"{_id(p)}::{c.label}" for p, c in CASES])
-def test_engine_computes_what_refinery_did(path, case):
+def test_engine_computes_what_refinery_did(path, case, device):
     outcome = _outcome(path, case)
     assert outcome.partial is not None
     defined = _defined(case)
@@ -129,9 +129,9 @@ def test_engine_computes_what_refinery_did(path, case):
     reason = UNSUPPORTED.get(_id(path))
     if reason is not None:
         with pytest.raises(UnsupportedRuleError, match=reason):
-            evaluate(case.source, model)
+            evaluate(case.source, model, device=device)
         return
-    values = evaluate(case.source, model)
+    values = evaluate(case.source, model, device=device)
     names = [n.name for n in refinery.nodes]
     atoms = {n.simple_name for n in refinery.nodes if n.kind == "atom"}
     atoms |= {n.name for n in refinery.nodes if n.kind == "atom"}

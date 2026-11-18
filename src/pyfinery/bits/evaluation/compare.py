@@ -224,7 +224,8 @@ def broadcast_shape(side: Side, variables: tuple[VarId, ...], size: Size) -> tup
 def as_value(truths: Truths, arity: int, size: Size) -> Value:
     """The tuples of nodes where ``truths`` holds, broadcast to every graph and every tuple
     of ``arity``."""
-    truths = np.broadcast_to(truths, (size.graphs,) + (size.nodes,) * arity)
+    shape = (size.graphs,) + (size.nodes,) * arity
+    truths = k.asarray(np.ascontiguousarray(np.broadcast_to(truths, shape)))  # to the device
     if arity == 0:
-        return Value(0, size, truths.copy())
+        return Value(0, size, truths)
     return Value(arity, size, k.pack_padded(truths, size.nodes))

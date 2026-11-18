@@ -67,6 +67,7 @@ testpaths = ["tests"]
 markers = [
     "docker: tests that start a real Refinery server in Docker (opt in with PYFINERY_DOCKER_TESTS=1)",
     "jvm: tests that start Refinery's JVM in a subprocess (opt in with PYFINERY_JVM_TESTS=1)",
+    "gpu: tests that evaluate on an NVIDIA GPU with CuPy (opt in with PYFINERY_GPU_TESTS=1)",
 ]
 
 [tool.ruff]

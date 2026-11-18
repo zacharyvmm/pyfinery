@@ -46,6 +46,7 @@ from ..matrices.values import (
     full,
     intersection,
     is_empty,
+    key_base,
     only_in,
     row_keys,
     to_tuples,
@@ -110,7 +111,7 @@ def bind(value: Value, arguments: Sequence[Argument], negated: bool = False) -> 
         node = arguments[0].index
         return make_factor((), Value(0, value.size, k.contains(value.vector, node)), negated)
     tuples = to_tuples(value)  # each row: its graph, then its nodes
-    keep = np.ones(len(tuples), bool)
+    keep = k.xp().ones(len(tuples), bool)
     first: dict[VarId, int] = {}  # the column where each variable is first
     for place, argument in enumerate(arguments):
         column = 1 + place
@@ -140,7 +141,7 @@ def bind_pair(value: Value, arguments: Sequence[Argument]) -> Value:
 def solve(factors: Sequence[Factor], head: tuple[VarId, ...], size: Size) -> Value:
     """The tuples of ``head`` (distinct variables), in each graph, that some values of the
     other variables extend to a tuple of every factor."""
-    graphs = np.ones(size.graphs, bool)  # where every factor of no variables holds
+    graphs = k.xp().ones(size.graphs, bool)  # where every factor of no variables holds
     kept: list[Factor] = []
     for factor in factors:
         if factor.value.arity == 0:
@@ -225,7 +226,7 @@ def pairs_between(factors: list[Factor], row: VarId, column: VarId, size: Size) 
 def combine(factors: list[Factor], head: tuple[VarId, ...], size: Size) -> Value:
     """The intersection of factors over head variables only."""
     result = full(len(head), size)
-    graphs = np.ones(size.graphs, bool)
+    graphs = k.xp().ones(size.graphs, bool)
     n = size.nodes
     for factor in factors:
         match len(factor.variables):
@@ -318,11 +319,11 @@ def join(factors: list[Factor], head: tuple[VarId, ...], size: Size) -> Value:
     if not set(variables) <= set(head):
         holds = Factor((), Value(0, size, graphs))
         return split_on([*remaining, holds], head, split_variable(remaining, head, size), size)
-    start = Rows((), np.flatnonzero(graphs).astype(np.intp)[:, None])  # a row per graph
+    start = Rows((), k.xp().flatnonzero(graphs).astype(np.intp)[:, None])  # a row per graph
     found = [
         block.columns(head) for block in complete(start, remaining, variables, size, {})
     ]  # distinct rows: each binds every variable
-    tuples = np.concatenate(found) if found else np.empty((0, 1 + len(head)), np.intp)
+    tuples = k.xp().concatenate(found) if found else k.xp().empty((0, 1 + len(head)), np.intp)
     return from_tuples(len(head), size, tuples)
 
 
@@ -350,21 +351,23 @@ def split_on(factors: list[Factor], head: tuple[VarId, ...], variable: VarId, si
     union_of_rest = empty(len(rest), size)
     found: list[Tuples] = []
     domain = domain_of(factors, variable, size)
-    values = np.flatnonzero(k.unpack(np.bitwise_or.reduce(domain, axis=0), size.nodes))
+    values = k.xp().flatnonzero(k.unpack(k.or_reduce(domain, axis=0), size.nodes))
     for node in values.tolist():
         allowed = Factor((), Value(0, size, k.contains(domain, node)))
         value = solve([allowed, *(select(f, variable, node) for f in factors)], rest, size)
         if variable in head:
             if not is_empty(value):
                 tuples = to_tuples(value)
-                found.append(np.insert(tuples, 1 + head.index(variable), node, axis=1))
+                at = 1 + head.index(variable)
+                placed = k.xp().full((len(tuples), 1), node, np.intp)
+                found.append(k.xp().concatenate([tuples[:, :at], placed, tuples[:, at:]], axis=1))
             continue
         union_of_rest = union(union_of_rest, value)
         if not head and union_of_rest.truth.all():
             break  # holds everywhere: no need for more values
     if variable not in head:
         return union_of_rest
-    tuples = np.concatenate(found) if found else np.empty((0, 1 + len(head)), np.intp)
+    tuples = k.xp().concatenate(found) if found else k.xp().empty((0, 1 + len(head)), np.intp)
     return from_tuples(len(head), size, tuples)
 
 
@@ -384,7 +387,7 @@ def select(factor: Factor, variable: VarId, node: NodeIndex) -> Factor:
             return Factor(variables, Value(1, size, vector))
         case _:
             tuples = value.array[value.array[:, 1 + place] == node]
-            rest = np.delete(tuples, 1 + place, axis=1)
+            rest = k.xp().delete(tuples, 1 + place, axis=1)
             return make_factor(variables, from_tuples(len(variables), size, rest), factor.negated)
 
 
@@ -408,11 +411,11 @@ def complete(
 def blocks_of(counts: Indices, limit: int) -> Iterator[tuple[int, int]]:
     """Consecutive ranges of rows whose ``counts`` add up to at most ``limit``, but for a
     single row over it; ranges that add up to nothing are skipped."""
-    total = np.cumsum(counts)
+    total = k.xp().cumsum(counts)
     first = 0
     while first < len(counts):
         before = int(total[first - 1]) if first else 0
-        last = max(int(np.searchsorted(total, before + limit, "right")), first + 1)
+        last = max(int(k.xp().searchsorted(total, before + limit, "right")), first + 1)
         if int(total[last - 1]) > before:
             yield first, last
         first = last
@@ -432,7 +435,7 @@ def eliminate_existentials(
             break
         variable = min(candidates, key=lambda v: (len(neighbours_of(factors, v)), v))
         factors = eliminate_one(factors, variable, neighbours_of(factors, variable), size)
-    graphs = np.ones(size.graphs, bool)
+    graphs = k.xp().ones(size.graphs, bool)
     for factor in factors:
         if not factor.variables:
             graphs &= factor.value.truth
@@ -502,10 +505,10 @@ def extend(
         candidates = domain[of]  # a copy: the domain of each row's graph
         for values, matrix in links:
             candidates &= matrix[of, values[start:stop]]
-        counts = np.bitwise_count(candidates).sum(axis=1)  # values per row
+        counts = k.xp().bitwise_count(candidates).sum(axis=1)  # values per row
         for first, last in blocks_of(counts, BLOCK_ROWS):
             at, value = k.nonzero_bits(candidates[first:last])
-            yield Rows(variables, np.column_stack([rows.tuples[start + first + at], value]))
+            yield Rows(variables, k.xp().column_stack([rows.tuples[start + first + at], value]))
 
 
 def join_tuples(rows: Rows, factor: Factor, lookups: Lookups) -> Iterator[Rows]:
@@ -522,16 +525,16 @@ def join_tuples(rows: Rows, factor: Factor, lookups: Lookups) -> Iterator[Rows]:
     variables = (*rows.variables, *(factor.variables[c - 1] for c in added))
     for first, last in blocks_of(matches, BLOCK_ROWS):
         some = matches[first:last]
-        at = np.repeat(np.arange(first, last), some)
-        within = np.arange(some.sum()) - np.repeat(np.cumsum(some) - some, some)
-        theirs = order[np.repeat(low[first:last], some) + within]
-        yield Rows(variables, np.column_stack([rows.tuples[at], tuples[theirs][:, added]]))
+        at = k.xp().repeat(k.xp().arange(first, last), some)
+        within = k.xp().arange(int(some.sum())) - k.xp().repeat(k.xp().cumsum(some) - some, some)
+        theirs = order[k.xp().repeat(low[first:last], some) + within]
+        yield Rows(variables, k.xp().column_stack([rows.tuples[at], tuples[theirs][:, added]]))
 
 
 def keep(rows: Rows, pending: list[Factor], lookups: Lookups) -> tuple[Rows, list[Factor]]:
     """The rows every factor over bound variables allows, and the factors left."""
     bound = set(rows.variables)
-    keeping = np.ones(len(rows.tuples), bool)
+    keeping = k.xp().ones(len(rows.tuples), bool)
     left = []
     for factor in pending:
         if set(factor.variables) <= bound:
@@ -566,21 +569,24 @@ class Lookup:
 
     order: Indices
     """The tuples, by index, sorted by the columns."""
-    keys: np.ndarray[Any, Any]
-    """Those columns of the tuples, in that order: one key per tuple."""
+    keys: Any
+    """Those columns of the tuples, in that order: one key per tuple (see ``row_keys``)."""
+    base: int
+    """More than any value in the columns."""
 
     @classmethod
-    def of(cls, tuples: Tuples, columns: list[int]) -> Lookup:
-        keys = row_keys(tuples[:, columns])
-        order = np.argsort(keys, kind="stable")
-        return cls(order, keys[order])
+    def of(cls, tuples: Tuples, columns: list[int], base: int) -> Lookup:
+        keys = row_keys(tuples[:, columns], base)
+        order = keys.argsort(kind="stable")
+        return cls(k.asarray(order), keys[order], base)
 
     def matching(self, values: Tuples) -> tuple[Indices, Indices]:
         """For each row of ``values`` (of the columns): where its tuples start in
         :attr:`order`, and how many there are."""
-        keys = row_keys(values)
-        low = np.searchsorted(self.keys, keys, "left")
-        return low, np.searchsorted(self.keys, keys, "right") - low
+        keys = row_keys(values, self.base)  # on the CPU if too wide for numbers
+        low = self.keys.searchsorted(keys, "left")
+        high = self.keys.searchsorted(keys, "right")
+        return k.asarray(low), k.asarray(high - low)
 
 
 type Lookups = dict[tuple[int, tuple[int, ...]], Lookup]
@@ -591,5 +597,5 @@ each is made once, and every block of rows uses it."""
 def lookup(lookups: Lookups, factor: Factor, columns: list[int]) -> Lookup:
     key = (id(factor), tuple(columns))
     if key not in lookups:
-        lookups[key] = Lookup.of(factor.value.array, columns)
+        lookups[key] = Lookup.of(factor.value.array, columns, key_base(factor.value.size))
     return lookups[key]

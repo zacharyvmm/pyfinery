@@ -251,6 +251,12 @@ On 1,000 graphs of about 8 objects each, `query_batch()` takes 1.1 ms a graph an
 
 Without a metamodel, `evaluate_batch(rules, models)` (or `PackedBatch.build(models).evaluate(rules)`) evaluates rules on `PartialModel`s or `PackedModel`s, and `values[g]` is graph `g`'s answer. In a batch, `batch["edge"].must` has shape `(graphs, n, words)`: each graph's nodes take the first slots, padded to the largest graph, and the atoms of every graph one slot each after them.
 
+### Evaluating on a GPU
+
+With [CuPy](https://cupy.dev) installed for your CUDA version (e.g. `pip install cupy-cuda13x`), pass `device="cuda"` to evaluate on an NVIDIA GPU: `BitsEngine("cuda")`, `evaluate_batch(rules, models, device="cuda")`, `evaluate(rules, model, device="cuda")` or `PackedBatch.build(models, device="cuda")`. The answers are the same. A batch's relations are then CuPy arrays (`batch.to("cpu")` copies them back); `values[g]` and `values.tuples()` are NumPy arrays. Building batches, comparing attribute values (exact numbers) and reading matches back stay on the CPU.
+
+On a laptop RTX 3050, `evaluate_batch` of seven rules (closures, joins, a comparison) took 76 ms on 1,000 graphs of 50 nodes against 463 ms on the CPU, 101 ms against 300 ms on 100 graphs of 200 nodes, and 129 ms against 202 ms on one graph of 2,000 nodes. Through `query_batch`, a GPU saves little yet: building and reading back each graph in Python takes most of the time.
+
 ## Mapping Pydantic classes to Refinery
 
 `Metamodel(*classes, ...)` collects the given classes, their superclasses, the classes their fields refer to, and the already-imported subclasses of those. It doesn't collect every subclass of a shared base class.
