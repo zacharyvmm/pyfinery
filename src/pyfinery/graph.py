@@ -400,31 +400,32 @@ class Metamodel:
         selected = list(select) if select is not None else declared_predicates(rules)
         rules = [*self.rules, *rules]
         results: list[QueryResult | Exception | None] = [None] * len(objects)
+        if not isinstance(found, BatchQueryEngine):
+            # One graph at a time, in order: the first to raise stops the others.
+            for i, roots in enumerate(objects):
+                try:
+                    graph = build_graph(self.schema, roots, existence=True)
+                    results[i] = found.query_graph(self.schema, graph, rules, given[i], selected)
+                except Exception as e:
+                    if not return_exceptions:
+                        raise
+                    results[i] = e
+            return results  # type: ignore[return-value]
         built: list[tuple[int, Graph]] = []
         for i, roots in enumerate(objects):
             try:
                 built.append((i, build_graph(self.schema, roots, existence=True)))
             except Exception as e:
-                if not return_exceptions:
-                    raise
                 results[i] = e
-        if isinstance(found, BatchQueryEngine):
-            answers = found.query_graphs(
-                self.schema, [g for _, g in built], rules, [given[i] for i, _ in built], selected
-            )
-        else:
-            answers = []
-            for i, graph in built:
-                try:
-                    answers.append(found.query_graph(self.schema, graph, rules, given[i], selected))
-                except Exception as e:
-                    if not return_exceptions:
-                        raise
-                    answers.append(e)
+        answers = found.query_graphs(
+            self.schema, [g for _, g in built], rules, [given[i] for i, _ in built], selected
+        )
         for (i, _), answer in zip(built, answers, strict=True):
-            if isinstance(answer, Exception) and not return_exceptions:
-                raise answer
             results[i] = answer
+        if not return_exceptions:  # the first graph in order that query() would raise for
+            for result in results:
+                if isinstance(result, Exception):
+                    raise result
         assert all(r is not None for r in results)
         return results  # type: ignore[return-value]
 

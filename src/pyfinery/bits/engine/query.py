@@ -103,7 +103,12 @@ class BitsEngine(BatchQueryEngine):
         results: list[QueryResult | Exception | None] = [None] * len(graphs)
         groups: dict[str, list[int]] = {}
         for i, given in enumerate(predicates):
-            groups.setdefault(query_source(schema, rules, given), []).append(i)
+            try:
+                source = query_source(schema, rules, given)
+            except Exception as e:  # a graph's own predicates, declared wrong
+                results[i] = e
+                continue
+            groups.setdefault(source, []).append(i)
         for source, members in groups.items():
             try:
                 query = Query.of(source, tuple(select))

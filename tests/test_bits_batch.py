@@ -11,8 +11,9 @@ import random
 
 import numpy as np
 import pytest
+from pydantic import BaseModel
 
-from pyfinery import ClassOptions, Metamodel
+from pyfinery import ClassOptions, Metamodel, Predicate
 from pyfinery.bits import (
     Attribute,
     BitsEngine,
@@ -218,17 +219,62 @@ def test_query_batch_raises_for_a_refused_graph_unless_told_to_return_it():
     assert last.matches == []
 
 
+class Item(BaseModel):
+    name: str
+
+
+class Other(BaseModel):
+    pass
+
+
+def test_query_batch_raises_the_first_graph_in_order_that_query_raises_for():
+    # Graph 0 is refused when queried; graph 1 isn't built (two nodes named "same").
+    metamodel = Metamodel(
+        Item, options={Item: ClassOptions(abstract=True, node_name=lambda item: item.name)}
+    )
+    rules = ["pred p(Item x) <-> Item(x)."]
+    graphs = [[Item(name="a")], [Item(name="same"), Item(name="same")]]
+    with pytest.raises(ValueError):
+        metamodel.query(graphs[1], BitsEngine(), rules)
+    for engine in (BitsEngine(), OneAtATime()):
+        with pytest.raises(UnsupportedRuleError, match="abstract class Item"):
+            metamodel.query_batch(graphs, engine, rules)
+        refused, unbuilt = metamodel.query_batch(graphs, engine, rules, return_exceptions=True)
+        assert isinstance(refused, UnsupportedRuleError)
+        assert isinstance(unbuilt, ValueError)
+
+
+def test_query_batch_returns_a_graphs_wrongly_declared_predicates_in_its_place():
+    metamodel = Metamodel(Item)
+    rules = ["pred p(Item x) <-> Item(x)."]
+    graphs = [[Item(name="a")], [Item(name="b")]]
+    wrong = Predicate("q", (Other,), lambda x: True)
+    for engine in (BitsEngine(), OneAtATime()):
+        answered, refused = metamodel.query_batch(
+            graphs, engine, rules, graph_predicates=[[], [wrong]], return_exceptions=True
+        )
+        assert [m.node_names for m in answered.matches] == [("item_1",)]
+        assert isinstance(refused, ValueError) and "Other" in str(refused)
+        with pytest.raises(ValueError, match="Other"):
+            metamodel.query_batch(graphs, engine, rules, graph_predicates=[[], [wrong]])
+
+
+class OneAtATime:
+    """An engine that answers one graph at a time (no ``query_graphs``)."""
+
+    def __init__(self) -> None:
+        self.asked: list = []
+
+    def query_graph(self, schema, graph, rules, predicates, select):
+        self.asked.append(graph)
+        return BitsEngine().query_graph(schema, graph, rules, predicates, select)
+
+
 def test_query_batch_queries_one_graph_at_a_time_with_other_engines():
     metamodel, objects, rules, predicates = FAMILIES["deployment"](random.Random(1))
-    asked = []
-
-    class OneAtATime:
-        def query_graph(self, schema, graph, rules, predicates, select):
-            asked.append(graph)
-            return BitsEngine().query_graph(schema, graph, rules, predicates, select)
-
-    results = metamodel.query_batch([objects, objects], OneAtATime(), rules)
-    assert len(asked) == 2
+    engine = OneAtATime()
+    results = metamodel.query_batch([objects, objects], engine, rules)
+    assert len(engine.asked) == 2
     expected = metamodel.query(objects, BitsEngine(), rules)
     assert [_matches(r) for r in results] == [_matches(expected)] * 2
 
