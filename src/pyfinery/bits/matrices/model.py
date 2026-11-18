@@ -157,7 +157,7 @@ class Attribute:
             given[node] = as_interval(value, data_type)
         # Floats, unless a bound given can't be one exactly (nodes not given: infinities).
         bounds = [b for pair in given.values() for b in pair if not isinstance(b, float)]
-        dtype = np.float64 if all(float(b) == b for b in bounds) else object
+        dtype = np.float64 if all(map(is_float, bounds)) else object
         lower = np.full(n, math.inf, dtype=dtype)
         upper = np.full(n, -math.inf, dtype=dtype)
         if given:
@@ -172,6 +172,14 @@ class Attribute:
             tuple(strings),
             simple_name or simple_name_of(name),
         )
+
+
+def is_float(number: Number) -> bool:
+    """Whether a ``float`` holds ``number`` exactly (an ``int`` too large for one doesn't)."""
+    try:
+        return float(number) == number
+    except OverflowError:
+        return False
 
 
 FLOOR = Context(prec=16, rounding=ROUND_FLOOR)

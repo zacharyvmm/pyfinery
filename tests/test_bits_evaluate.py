@@ -355,3 +355,15 @@ def test_an_attribute_value_given_twice_is_the_last():
     kept = Attribute.of("A::n", "int", 3, [(1, 4), (1, 10**30)])
     assert kept.lower.dtype == object and kept.lower[1] == 10**30
     assert Attribute.of("A::s", "string", 2, [(0, "a"), (0, "b")]).strings == ("b", None)
+
+
+def test_an_integer_too_large_for_a_float_is_kept_exactly():
+    for values in ([(1, 10**400), (0, 2**53 + 1)], [(0, 10**400)], [(0, "3..1" + "0" * 400)]):
+        attribute = Attribute.of("A::n", "int", 2, values)
+        assert attribute.lower.dtype == object
+    huge = Attribute.of("A::n", "int", 2, [(0, 10**400), (1, 5)])
+    model = PartialModel([Node("a", "a"), Node("b", "b")], [], [huge])
+    values = evaluate("pred big(x) <-> exists(x), A::n(x) > 10.", model)["big"]
+    assert dict(values.items()) == {(0,): "true"}
+    below = evaluate(f"pred small(x) <-> exists(x), A::n(x) < {10**400}.", model)["small"]
+    assert dict(below.items()) == {(1,): "true"}
