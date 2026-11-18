@@ -139,12 +139,11 @@ def _reach(
 
 
 def _field_values(schema: Schema, obj: BaseModel) -> Iterator[tuple[Feature, list[Any]]]:
-    for cls in type(obj).__mro__:
-        for feature in schema.features.get(cls, []):  # type: ignore[call-overload]
-            value = getattr(obj, feature.name)
-            if value is None:
-                continue
-            yield feature, list(value) if feature.many else [value]
+    for feature in schema.all_features(type(obj)):
+        value = getattr(obj, feature.name)
+        if value is None:
+            continue
+        yield feature, list(value) if feature.many else [value]
 
 
 def _name(schema: Schema, nodes: Sequence[Node]) -> None:

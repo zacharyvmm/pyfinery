@@ -276,8 +276,24 @@ def complement(bits: Vector | Matrix, n: int) -> Vector | Matrix:
 
 
 def transpose(matrix: Matrix, n: int) -> Matrix:
-    graphs, rows, cols = pairs(matrix)
-    return matrix_of(len(matrix), n, graphs, cols, rows)
+    """The pairs the other way round: listed as pairs if they're few (under one in 256 of
+    the matrix), else unpacked and swapped, which costs the same whatever the pairs."""
+    graphs = len(matrix)
+    if on_gpu() or count(matrix) * 256 > graphs * n * n:
+        return transpose_unpacked(matrix, n)
+    of, rows, cols = pairs(matrix)
+    return matrix_of(graphs, n, of, cols, rows)
+
+
+def transpose_unpacked(matrix: Matrix, n: int) -> Matrix:
+    """:func:`transpose` of the unpacked matrices, a few graphs at a time."""
+    result = xp().empty_like(matrix)
+    step = max(1, CHUNK_WORDS * 8 // max(n * n, 1))  # booleans: a byte an entry
+    for start in range(0, len(matrix), step):
+        part = slice(start, start + step)
+        result[part] = pack_padded(unpack(matrix[part], n).swapaxes(-1, -2), n)
+    found: Matrix = result
+    return found
 
 
 def row_any(matrix: Matrix, n: int) -> Vector:
