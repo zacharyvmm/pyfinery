@@ -31,6 +31,7 @@ from pyfinery.bits import (
 from pyfinery.bits.matrices import kernels as k
 from pyfinery.bits.matrices.batch import group_by_size
 
+from .conftest import GPU_TESTS
 from .test_bits_metamodel import FAMILIES, Shape, Shapes, Square
 from .test_bits_packed import RULES, graph
 
@@ -204,6 +205,77 @@ def test_query_batch_answers_each_graph_as_query_does(family, device):
         assert result.source == alone.source
         answered += 1
     assert answered >= 15
+
+
+def _batch(metamodel, graphs, engine, rules, own):
+    """Each graph's matches, or the exception it raised, as a string."""
+    results = metamodel.query_batch(
+        graphs, engine, rules, graph_predicates=own, return_exceptions=True
+    )
+    return [str(r) if isinstance(r, Exception) else _matches(r) for r in results]
+
+
+class _Full(Exception):
+    """A device's out-of-memory error, for a device that has none (the CPU)."""
+
+
+def test_a_batch_too_large_for_the_device_is_evaluated_in_halves(monkeypatch):
+    from pyfinery.bits.engine import query
+
+    drawn = [FAMILIES["filesystem"](random.Random(seed)) for seed in range(25)]
+    metamodel, _, rules, _ = drawn[0]
+    graphs = [objects for _, objects, _, _ in drawn]
+    own = [predicates for _, _, _, predicates in drawn]
+    whole = _batch(metamodel, graphs, BitsEngine(), rules, own)
+    tried, evaluated, released = [], [], []
+
+    def evaluate(rules, batch, select):  # the device holds two graphs at once
+        tried.append(len(batch))
+        if len(batch) > 2:
+            raise _Full
+        evaluated.append(len(batch))
+        return evaluate_batch(rules, batch, select)
+
+    monkeypatch.setattr(query, "evaluate_batch", evaluate)
+    monkeypatch.setattr(query, "out_of_memory", lambda device: (_Full,))
+    monkeypatch.setattr(query, "release", released.append)
+    halved = _batch(metamodel, graphs, BitsEngine(), rules, own)
+    assert halved == whole and sum(not isinstance(a, str) for a in whole) >= 15
+    assert max(tried) > 2 and released and evaluated and max(evaluated) <= 2
+
+
+def test_a_graph_too_large_for_the_device_alone_raises(monkeypatch):
+    from pyfinery.bits.engine import query
+
+    metamodel, objects, rules, predicates = FAMILIES["filesystem"](random.Random(0))
+
+    def full(rules, batch, evaluated):
+        raise _Full
+
+    monkeypatch.setattr(query, "evaluate_batch", full)
+    monkeypatch.setattr(query, "out_of_memory", lambda device: (_Full,))
+    with pytest.raises(_Full):
+        metamodel.query(objects, BitsEngine(), rules, predicates=predicates)
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not GPU_TESTS, reason="set PYFINERY_GPU_TESTS=1")
+def test_a_gpu_short_of_memory_evaluates_a_batch_in_parts():
+    import cupy
+
+    drawn = [FAMILIES["filesystem"](random.Random(seed)) for seed in range(64)]
+    metamodel, _, rules, _ = drawn[0]
+    graphs = [objects for _, objects, _, _ in drawn]
+    own = [predicates for _, _, _, predicates in drawn]
+    on_cpu = _batch(metamodel, graphs, BitsEngine(), rules, own)
+    pool = cupy.get_default_memory_pool()
+    pool.free_all_blocks()
+    pool.set_limit(size=64 * 1024)  # a batch of all 64 does not fit, one graph does
+    try:
+        on_gpu = _batch(metamodel, graphs, BitsEngine("cuda"), rules, own)
+    finally:
+        pool.set_limit(size=0)
+    assert on_gpu == on_cpu
 
 
 def test_query_batch_raises_for_a_refused_graph_unless_told_to_return_it():

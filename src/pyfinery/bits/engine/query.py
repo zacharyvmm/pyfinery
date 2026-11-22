@@ -28,7 +28,7 @@ from ..._results import QueryResult, reference_errors
 from ..._schema import Schema
 from ..evaluation.pipeline import BatchValues, evaluate_batch
 from ..matrices.batch import PackedBatch, group_by_size
-from ..matrices.kernels import Device, module_of
+from ..matrices.kernels import Device, module_of, out_of_memory, release
 from ..matrices.model import PartialModel
 from ..names import refinery_name
 from ..rules.compiled import Rules
@@ -105,7 +105,8 @@ class BitsEngine(BatchQueryEngine):
 
         Graphs whose predicates are declared alike (the same names and parameter
         types) share one reading of the rules; of those, graphs of about the same
-        size are evaluated as one batch.
+        size are evaluated as one batch, or, where the device runs out of memory
+        for them, in halves until it holds them.
         """
         results: list[QueryResult | Exception | None] = [None] * len(graphs)
         groups: dict[str, list[int]] = {}
@@ -129,15 +130,21 @@ class BitsEngine(BatchQueryEngine):
                     prepared.append(query.prepare(i, schema, graphs[i], predicates[i]))
                 except Exception as e:
                     results[i] = e
-            for bucket in group_by_size([p.model.size for p in prepared]):
-                ready = [prepared[j] for j in bucket]
+            buckets = [
+                [prepared[j] for j in bucket]
+                for bucket in group_by_size([p.model.size for p in prepared])
+            ]
+            while buckets:
+                ready = buckets.pop()
                 try:
-                    batch = PackedBatch.build([p.model for p in ready], self.device)
-                    values = evaluate_batch(query.rules, batch, query.evaluated)
-                    tuples = tuples_by_graph(values, len(batch))
+                    tuples = self._evaluate(query, ready)
                 except Exception as e:
                     for p in ready:
                         results[p.index] = e
+                    continue
+                if tuples is None:  # too many graphs for the device at once: half of them at a time
+                    half = len(ready) // 2
+                    buckets += [ready[half:], ready[:half]]
                     continue
                 for graph, p in enumerate(ready):
                     try:
@@ -146,6 +153,24 @@ class BitsEngine(BatchQueryEngine):
                         results[p.index] = e
         assert all(r is not None for r in results)
         return results  # type: ignore[return-value]
+
+    def _evaluate(
+        self, query: Query, ready: Sequence[Prepared]
+    ) -> list[dict[str, TuplesByValue]] | None:
+        """The tuples of each of ``ready``'s graphs, evaluated as one batch; ``None`` if the
+        device runs out of memory for them and there are several, after releasing what the
+        batch held. A graph's tuples are the same in any batch, so that splitting it changes
+        nothing but how much is held at once."""
+        try:
+            batch = PackedBatch.build([p.model for p in ready], self.device)
+            values = evaluate_batch(query.rules, batch, query.evaluated)
+            return tuples_by_graph(values, len(batch))
+        except out_of_memory(self.device):
+            if len(ready) == 1:
+                raise
+        # Outside the handler, so that its traceback, and the batch's arrays, are gone.
+        release(self.device)
+        return None
 
 
 @dataclass(frozen=True)
