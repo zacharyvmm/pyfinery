@@ -85,6 +85,22 @@ def module_of(device: Device) -> ModuleType:
     return found
 
 
+def out_of_memory(device: Device) -> tuple[type[BaseException], ...]:
+    """What ``device``'s library raises when an array does not fit: none on the CPU (NumPy's
+    ``MemoryError`` is the process's, not a batch's), CuPy's ``OutOfMemoryError`` on a GPU."""
+    if device == "cpu":
+        return ()
+    found: type[BaseException] = module_of(device).cuda.memory.OutOfMemoryError
+    return (found,)
+
+
+def release(device: Device) -> None:
+    """Return the memory ``device``'s library holds for arrays no longer used (CuPy's pool keeps
+    it), so that what is evaluated next may have it."""
+    if device != "cpu":
+        module_of(device).get_default_memory_pool().free_all_blocks()
+
+
 @contextmanager
 def on(device: Device) -> Iterator[None]:
     """Run the kernels in this block on ``device``: they make its arrays, and take them."""
@@ -183,14 +199,14 @@ def matrix_of(
     return matrix
 
 
-BIT_PLACES = np.arange(64, dtype=np.uint64)
-
-
 def pack(dense: NDArray[np.bool_]) -> NDArray[np.uint64]:
     """Pack the last axis of a boolean array, whose length is a multiple of 64."""
-    if on_gpu():  # CuPy packs only flat arrays: add up each word's bits instead
-        bits = dense.reshape(*dense.shape[:-1], dense.shape[-1] // 64, 64).astype(np.uint64)
-        placed: NDArray[np.uint64] = (bits << asarray(BIT_PLACES)).sum(axis=-1, dtype=np.uint64)
+    if on_gpu():  # CuPy packs flat arrays only: rows are whole words, so packing them flat
+        # gives each row's words, without a word per bit
+        flat = xp().packbits(xp().ascontiguousarray(dense).ravel(), bitorder="little")
+        placed: NDArray[np.uint64] = flat.view(np.uint64).reshape(
+            *dense.shape[:-1], dense.shape[-1] // 64
+        )
         return placed
     packed = np.packbits(dense, axis=-1, bitorder="little")
     return np.ascontiguousarray(packed).view(np.uint64)
@@ -205,10 +221,12 @@ def pack_padded(dense: NDArray[np.bool_], n: int) -> NDArray[np.uint64]:
 
 def unpack(bits: NDArray[np.uint64], n: int) -> NDArray[np.bool_]:
     """The last axis as booleans, ``n`` long."""
-    if on_gpu():
-        each = (bits[..., None] >> asarray(BIT_PLACES)) & ONE
+    if on_gpu():  # CuPy unpacks flat arrays only: rows are whole words, so unpacking them
+        # flat gives each row's bits
+        raw = xp().ascontiguousarray(bits).view(np.uint8).ravel()
+        each = xp().unpackbits(raw, bitorder="little").view(bool)
         flat = each.reshape(*bits.shape[:-1], bits.shape[-1] * 64)  # no -1: it may be empty
-        found: NDArray[np.bool_] = flat[..., :n].astype(bool)
+        found: NDArray[np.bool_] = flat[..., :n]
         return found
     raw = np.ascontiguousarray(bits).view(np.uint8)
     return np.unpackbits(raw, axis=-1, bitorder="little", count=n).astype(bool)
@@ -239,7 +257,8 @@ def pairs(matrix: Matrix) -> tuple[Indices, Indices, Indices]:
 def bits_of(values: NDArray[np.uint64]) -> NDArray[np.uint8]:
     """The 64 bits of each word, least significant first: shape ``(len(values), 64)``."""
     if on_gpu():
-        each: NDArray[np.uint8] = ((values[:, None] >> asarray(BIT_PLACES)) & ONE).astype(np.uint8)
+        raw = xp().ascontiguousarray(values).view(np.uint8).ravel()
+        each: NDArray[np.uint8] = xp().unpackbits(raw, bitorder="little").reshape(len(values), 64)
         return each
     raw = np.ascontiguousarray(values).view(np.uint8).reshape(-1, 8)
     return np.unpackbits(raw, axis=1, bitorder="little")
