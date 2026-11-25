@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Hashable, Iterable, Sequence
+from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 from ._instances import Graph
 from ._options import LogicValue
-from ._syntax import quote_id
+from ._syntax import is_single_id, quote_id, unquote_id
 from .errors import RefineryError
 from .http.models import JsonOutput
 
@@ -150,20 +150,57 @@ class QueryResult:
         ]
 
 
+class _DeclaredName(str):
+    """A predicate name already decoded from a ``pred`` declaration, never unquoted again."""
+
+
 _PRED_DECLARATION = re.compile(r"\bpred\s+([A-Za-z_][A-Za-z0-9_]*|'(?:[^'\\]|\\.)*')")
 
 
 def declared_predicates(rules: Iterable[str]) -> list[str]:
     """Names of the predicates declared in ``rules`` (``error`` predicates included)."""
-    names = []
+    names: list[str] = []
     for rule in rules:
         for match in _PRED_DECLARATION.finditer(rule):
-            name = match.group(1)
-            if name.startswith("'"):
-                name = name[1:-1].replace("\\'", "'").replace("\\\\", "\\")
+            name = _DeclaredName(unquote_id(match.group(1)))
             if name not in names:
                 names.append(name)
     return names
+
+
+class PredicateIndex[T]:
+    """O(1) predicate lookup built once per query, keeping qualified and single-segment names
+    separate.
+
+    Single-segment relations (plain identifiers and single quoted tokens such as
+    ``'builtin::exists'`` or ``'he said \\"yes\\"'``) are indexed by their decoded name
+    (``unquote_id``). Qualified names (``builtin::exists``, ``'My Class'::'my field'``) stay
+    only in ``exact`` so they never collide with single-segment quoted predicates.
+    """
+
+    __slots__ = ("exact", "single")
+
+    def __init__(self, relations: Mapping[str, T]) -> None:
+        self.exact = relations
+        self.single: dict[str, T] = {}
+        for key, value in relations.items():
+            if is_single_id(key):
+                self.single[unquote_id(key)] = value
+
+    def resolve(self, name: str) -> T | None:
+        """Resolve ``name``: decoded ``_DeclaredName``s match only ``single``; explicit selectors
+        match verbatim first, then decoded single-segment names, then decoded Xtext escapes."""
+        if isinstance(name, _DeclaredName):
+            return self.single.get(name)
+        found = self.exact.get(name)
+        if found is not None:
+            return found
+        found = self.single.get(name)
+        if found is not None:
+            return found
+        if is_single_id(name) and name.startswith("'"):
+            return self.single.get(unquote_id(name))
+        return None
 
 
 def reference_errors(graph: Graph) -> list[Violation]:

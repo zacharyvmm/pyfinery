@@ -16,6 +16,8 @@ from typing import Any, ClassVar, Literal, get_args
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.fields import FieldInfo
 
+from ._annotations import empty_factory
+
 ReferenceKind = Literal["refers", "contains", "container"]
 # The values of Refinery's four-valued logic. Facts are asserted, and matches
 # reported, as ``"true"`` or ``"unknown"``; a contradiction is ``"error"``.
@@ -225,8 +227,6 @@ class RefineryNode(BaseModel):
         ]
         if not marked:
             return
-        from ._schema import empty_factory  # _schema imports this module
-
         changed = False
         for info in marked:
             factory = empty_factory(info)

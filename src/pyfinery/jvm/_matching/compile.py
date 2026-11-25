@@ -54,7 +54,7 @@ from ..._mapping import AttributeType, Catalogue, attribute_type
 from ..._options import Predicate
 from ..._render import _declare_predicate, render_metamodel
 from ..._results import ViolationKind
-from ..._schema import Schema, class_name
+from ..._schema import AttributeFeature, Schema, class_name
 from ..._syntax import quote_id
 from ...errors import InvalidProblemError
 from .classes import java
@@ -131,7 +131,7 @@ class CompiledProblem:
         self._attribute_names = {  # as Refinery names them -> as pyfinery renders them
             str(trace.getPartialFunction(name).name()): name
             for name, feature in self.catalogue.features.items()
-            if feature.is_attribute
+            if isinstance(feature, AttributeFeature)
         }
         self._views: dict[Any, Any] = {}  # PartialRelation -> KeyOnlyView of its symbol
         self._compiled: dict[Any, Any] = {}  # PartialRelation -> RelationalQuery (partial)

@@ -10,6 +10,7 @@ from ..._instances import Graph, Node
 from ..._mapping import NodeIds, facts
 from ..._options import Predicate
 from ..._results import Match, Violation, ViolationKind
+from ..._schema import AttributeFeature, ReferenceFeature
 from ..._syntax import quote_id
 from .classes import java
 from .compile import CONTAINED, CONTAINER, NODE, CompiledProblem
@@ -88,7 +89,7 @@ class PlainModel:
         valued = set()
         for fact in facts(catalogue, graph, ids):
             feature = catalogue.features.get(fact.relation)
-            if feature is None or not feature.is_attribute or fact.relation in read:
+            if not isinstance(feature, AttributeFeature) or fact.relation in read:
                 yield fact.relation, fact.nodes, fact.value  # not an attribute no rule reads
                 valued.add((fact.relation, fact.nodes))
         for name in read:  # unknown for the objects of the attribute's class without a value
@@ -200,10 +201,13 @@ def _class_memberships(problem: CompiledProblem) -> dict[type, tuple[str, ...]]:
     outgoing, or incoming, containment reference."""
     schema, catalogue = problem.schema, problem.catalogue
     containment = [
-        f for cls in schema.classes for f in schema.features[cls] if f.kind == "contains"
+        f
+        for cls in schema.classes
+        for f in schema.features[cls]
+        if isinstance(f, ReferenceFeature) and f.kind == "contains"
     ]
     owners = {catalogue.name(f.owner) for f in containment}
-    targets = {catalogue.name(f.target) for f in containment}  # type: ignore[arg-type]
+    targets = {catalogue.name(f.target) for f in containment}
     memberships = {}
     for cls in schema.classes:
         supertypes = set(catalogue.supertypes(cls))

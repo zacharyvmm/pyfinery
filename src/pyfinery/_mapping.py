@@ -24,7 +24,19 @@ from pydantic import BaseModel
 
 from ._instances import Graph, Node
 from ._render import _enum_literal, feature_symbol
-from ._schema import ClassLike, EnumLike, Feature, LiteralEnum, Schema, UnionClass, class_name
+from ._schema import (
+    AttributeFeature,
+    AttributeType,
+    ClassLike,
+    EnumFeature,
+    EnumLike,
+    Feature,
+    LiteralEnum,
+    ReferenceFeature,
+    Schema,
+    UnionClass,
+    class_name,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,16 +52,12 @@ class Fact:
     value: object
 
 
-type AttributeType = Literal["boolean", "int", "real", "string"]
-"""The Refinery data type of an attribute."""
-
-
 def attribute_type(feature: Feature) -> AttributeType:
     """The data type of the values of ``feature``, an attribute: what an engine converts the
     Python value of its :class:`Fact` by."""
-    if not feature.is_attribute:
+    if not isinstance(feature, AttributeFeature):
         raise ValueError(f"{feature_symbol(feature)} is not an attribute")
-    return feature.target  # type: ignore[return-value]
+    return feature.data_type
 
 
 # -- names ---------------------------------------------------------------------
@@ -90,10 +98,13 @@ class Catalogue:
             unions = [u for u in schema.unions if any(c in u.members for c in supers)]
             self._supertypes[cls] = tuple(self._names[t] for t in [*supers, *unions])
             for feature in schema.features[cls]:
-                if feature.opposite is not None:
-                    other = schema.find_feature(feature.target, feature.opposite)  # type: ignore[arg-type]
-                    assert other is not None  # checked by _schema.check
-                    self._opposites[feature] = other
+                if not isinstance(feature, ReferenceFeature) or feature.opposite is None:
+                    continue
+                # check() rejects opposites of unions and opposites that aren't fields.
+                assert not isinstance(feature.target, UnionClass)
+                other = schema.find_feature(feature.target, feature.opposite)
+                assert other is not None
+                self._opposites[feature] = other
 
     def _add(self, table: dict[str, Any], item: Any, name: str) -> None:
         table[name] = item
@@ -144,7 +155,7 @@ class Catalogue:
         """The feature on the other side of ``feature``, if it has an opposite: as declared on
         ``feature``'s target class, or on ``target``, the class of the object referred to, which
         may be a subclass (as ``render_facts`` looks it up)."""
-        if feature.opposite is None:
+        if not isinstance(feature, ReferenceFeature) or feature.opposite is None:
             return None
         if target is not None:
             return self.schema.find_feature(target, feature.opposite)
@@ -318,10 +329,10 @@ def facts(
                 continue
             feature = value.feature
             relation = catalogue.name(feature)
-            if feature.is_attribute:
+            if isinstance(feature, AttributeFeature):
                 write(relation, (node_id,), value.value)
-            elif feature.is_enum:
-                literal = catalogue.literal(feature.target, value.value)  # type: ignore[arg-type]
+            elif isinstance(feature, EnumFeature):
+                literal = catalogue.literal(feature.target, value.value)
                 write(relation, (node_id, ids.constant_id(literal)), holds)
             else:
                 target = value.target

@@ -13,6 +13,7 @@ import pytest
 import pyfinery as pf
 from pyfinery import Container, Contains, Metamodel, Ref, RefineryNode
 from pyfinery._instances import build_graph
+from pyfinery._syntax import unquote_id
 from pyfinery.graph import quote_id
 
 from .conftest import Recorder, sse, sse_response
@@ -79,6 +80,81 @@ def test_quote_id():
     assert quote_id("class") == "'class'"
     assert quote_id("it's") == "'it\\'s'"
     assert quote_id("1st") == "'1st'"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "plain_1",
+        "class",
+        "it's",
+        'he said "yes"',
+        "back\\slash",
+        "end\\",
+        "'",
+        "a b",
+        "ready\n",
+        "line\nbreak",
+        "\t\r\b\f",
+    ],
+)
+def test_unquote_id_reverses_quote_id(name):
+    assert unquote_id(quote_id(name)) == name
+
+
+def test_unquote_id_reads_each_escape_once():
+    # An escaped backslash followed by an escaped quote: \\ then \'.
+    assert unquote_id("'a\\\\\\'b'") == "a\\'b"
+    assert unquote_id("plain") == "plain"
+
+
+def test_unquote_id_decodes_xtext_escapes():
+    assert quote_id("\n") == r"'\n'"
+    assert quote_id("ready\n") == r"'ready\n'"
+    assert quote_id('he said "yes"') == "'he said \\\"yes\\\"'"
+    assert unquote_id(r"'\u0061'") == "a"
+    assert unquote_id(r"'\u000a'") == "\n"
+    assert unquote_id(r"'\\u0061'") == r"\u0061"
+    assert unquote_id(r"'\t\n\r\b\f\"\'\\'") == "\t\n\r\b\f\"'\\"
+    assert unquote_id(r"'\uD83D\uDE00'") == "\U0001f600"
+
+
+def test_feature_union_supports_runtime_isinstance_and_compat_accessors():
+    from enum import Enum
+
+    from pydantic import BaseModel
+
+    from pyfinery.graph import AttributeFeature, EnumFeature, Feature, ReferenceFeature
+
+    class Color(Enum):
+        RED = "red"
+
+    class Leaf(BaseModel):
+        value: int
+
+    class Root(BaseModel):
+        count: int
+        color: Color
+        leaf: Leaf
+
+    mm = Metamodel(Root)
+    by_name = {f.name: f for f in mm.features[Root]}
+    assert all(isinstance(f, Feature) for f in by_name.values())
+
+    count = by_name["count"]
+    assert isinstance(count, AttributeFeature)
+    assert count.target == "int" and count.is_attribute and not count.is_enum
+    assert count.kind == "refers" and count.opposite is None and not count.by_key
+
+    color = by_name["color"]
+    assert isinstance(color, EnumFeature)
+    assert color.target is Color and not color.is_attribute and color.is_enum
+    assert color.kind == "refers" and color.opposite is None and not color.by_key
+
+    leaf = by_name["leaf"]
+    assert isinstance(leaf, ReferenceFeature)
+    assert leaf.target is Leaf and not leaf.is_attribute and not leaf.is_enum
+    assert leaf.kind == "contains" and leaf.opposite is None and not leaf.by_key
 
 
 def test_generated_names_avoid_explicit_ids():

@@ -22,6 +22,7 @@ from .._options import LogicValue, Predicate
 from .._render import render_metamodel, render_query_problem, render_validation_problem
 from .._results import (
     Match,
+    PredicateIndex,
     QueryResult,
     ValidationReport,
     Violation,
@@ -185,12 +186,12 @@ def read_matches(
     by_name = graph.objects_by_name()
     node_names = _node_names(model, by_name)
     exists = {node.name: node.exists for node in graph.nodes}
-    relations = {r.name: r for r in model.relations}
+    index = PredicateIndex({r.name: r for r in model.relations})
     matches = []
     for predicate in predicates:
-        relation = relations.get(predicate)
+        relation = index.resolve(predicate)
         if relation is None:
-            raise ValueError(f"Refinery returned no relation named {predicate!r}")
+            raise ValueError(f"Refinery returned no relation named {str(predicate)!r}")
         for raw in model.partial_interpretation.get(relation.name, []):
             value: LogicValue = raw[-1]  # type: ignore[assignment]
             if value not in ("true", "unknown"):
@@ -204,7 +205,7 @@ def read_matches(
                 value = "unknown"
             nodes = tuple(by_name.get(name) for name in names)
             parameters = tuple(relation.parameter_names or ())
-            matches.append(Match(predicate, names, nodes, value, parameters))
+            matches.append(Match(str(predicate), names, nodes, value, parameters))
     errors = [
         error
         for error in reference_errors(graph) + _errors(model, by_name)

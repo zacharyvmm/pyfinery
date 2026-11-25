@@ -17,10 +17,12 @@ from pydantic import BaseModel
 from ._instances import Graph, Node
 from ._options import Predicate
 from ._schema import (
-    ClassLike,
+    AttributeFeature,
+    EnumFeature,
     EnumLike,
     Feature,
     LiteralEnum,
+    ReferenceFeature,
     Schema,
     UnionClass,
     class_name,
@@ -115,29 +117,30 @@ def render_facts(schema: Schema, graph: Graph, *, canonical_opposites: bool = Fa
             feature = value.feature
             symbol = feature_symbol(feature)
             prefix = "" if value.certain else "?"
-            if feature.by_key:
-                if value.target is not None:  # others are reported by reference_errors
-                    lines.append(f"{prefix}{symbol}({name}, {value.target.name}).")
-            elif canonical_opposites and not _canonical(schema, feature):
-                assert value.target is not None
-                other = schema.find_feature(type(value.target.obj), feature.opposite)  # type: ignore[arg-type]
-                assert other is not None
-                reverse = feature_symbol(other)
-                lines.append(f"{prefix}{reverse}({value.target.name}, {name}).")
-            elif feature.is_attribute:
-                if value.certain:  # an uncertain attribute value is simply unknown
-                    literal = attribute_literal(value.value, feature.target)  # type: ignore[arg-type]
-                    lines.append(f"{symbol}({name}): {literal}.")
-            elif feature.is_enum:
-                literal = _enum_literal(feature.target, value.value)  # type: ignore[arg-type]
-                lines.append(f"{prefix}{symbol}({name}, {literal}).")
-            else:
-                assert value.target is not None
-                lines.append(f"{prefix}{symbol}({name}, {value.target.name}).")
+            target = value.target
+            match feature:
+                case AttributeFeature():
+                    if value.certain:  # an uncertain attribute value is simply unknown
+                        literal = attribute_literal(value.value, feature.data_type)
+                        lines.append(f"{symbol}({name}): {literal}.")
+                case EnumFeature():
+                    literal = _enum_literal(feature.target, value.value)
+                    lines.append(f"{prefix}{symbol}({name}, {literal}).")
+                case ReferenceFeature():
+                    if target is None:
+                        continue  # a key matching no object: reported by reference_errors
+                    opposite = feature.opposite
+                    if (
+                        canonical_opposites
+                        and opposite is not None
+                        and not _canonical(schema, feature)
+                    ):
+                        other = schema.find_feature(type(target.obj), opposite)
+                        assert other is not None
+                        lines.append(f"{prefix}{feature_symbol(other)}({target.name}, {name}).")
+                    else:
+                        lines.append(f"{prefix}{symbol}({name}, {target.name}).")
     return "\n".join(lines) + "\n"
-
-
-# -- the metamodel ------------------------------------------------------------
 
 
 def feature_symbol(feature: Feature) -> str:
@@ -147,14 +150,17 @@ def feature_symbol(feature: Feature) -> str:
 
 def _declare_feature(feature: Feature) -> str:
     name = quote_id(feature.name)
-    if feature.is_attribute:
-        return f"{feature.target} {name}"
-    target = class_name(feature.target)  # type: ignore[arg-type]
+    bounds = multiplicity(feature.lower, feature.upper)
+    if isinstance(feature, AttributeFeature):
+        return f"{feature.data_type} {name}"
+    target = class_name(feature.target)
+    if isinstance(feature, EnumFeature):
+        return f"{target}{bounds} {name}"
     opposite = f" opposite {quote_id(feature.opposite)}" if feature.opposite else ""
     if feature.kind == "container":
         return f"container {target} {name}{opposite}"
     prefix = "contains " if feature.kind == "contains" else ""
-    return f"{prefix}{target}{multiplicity(feature.lower, feature.upper)} {name}{opposite}"
+    return f"{prefix}{target}{bounds} {name}{opposite}"
 
 
 def _enum_literal(enum_type: EnumLike, value: Any) -> str:
@@ -163,16 +169,15 @@ def _enum_literal(enum_type: EnumLike, value: Any) -> str:
     return f"{class_name(enum_type)}::{quote_id(member)}"
 
 
-# -- the closed world ---------------------------------------------------------
-
-
-def _canonical(schema: Schema, feature: Feature) -> bool:
+def _canonical(schema: Schema, feature: ReferenceFeature) -> bool:
     """Of an opposite pair, the side facts and closed-world defaults are written on."""
     if feature.opposite is None:
         return True
     if feature.kind != "refers":
         return feature.kind == "contains"
-    other = schema.find_feature(feature.target, feature.opposite)  # type: ignore[arg-type]
+    # check() rejects opposites of unions, so the target is one class.
+    assert not isinstance(feature.target, UnionClass)
+    other = schema.find_feature(feature.target, feature.opposite)
     assert other is not None
     return (feature.owner.__name__, feature.name) <= (other.owner.__name__, other.name)
 
@@ -184,21 +189,30 @@ def _closed_world(schema: Schema, graph: Graph, predicates: Sequence[Predicate])
     orphans = [node.obj for node in _orphans(graph)]
     for cls in schema.classes:
         for feature in schema.features[cls]:
-            if feature.is_attribute or not _canonical(schema, feature):
-                continue
-            if feature.kind == "contains":
-                target: ClassLike = feature.target  # type: ignore[assignment]
-                members = target.members if isinstance(target, UnionClass) else (target,)
-                if not any(isinstance(node, members) for node in orphans):
-                    # Refinery already rules out every other container of
-                    # a node that certainly has one. A default would only
-                    # cost time: Refinery refines it for every node pair.
-                    continue
-            lines.append(f"default !{feature_symbol(feature)}(*, *).")
+            if _needs_default(schema, feature, orphans):
+                lines.append(f"default !{feature_symbol(feature)}(*, *).")
     for predicate in predicates:
         wildcards = ", ".join("*" for _ in predicate.parameters)
         lines.append(f"default !{quote_id(predicate.name)}({wildcards}).")
     return lines
+
+
+def _needs_default(schema: Schema, feature: Feature, orphans: Sequence[BaseModel]) -> bool:
+    """Whether ``feature`` needs a closed-world default: references and enums do, on the
+    canonical side of an opposite pair; attributes have one value each and need none."""
+    if isinstance(feature, AttributeFeature):
+        return False
+    if isinstance(feature, EnumFeature):
+        return True
+    if not _canonical(schema, feature):
+        return False
+    if feature.kind != "contains":
+        return True
+    # Refinery already rules out every other container of a node that certainly has
+    # one. A default would only cost time: Refinery refines it for every node pair.
+    target = feature.target
+    members = target.members if isinstance(target, UnionClass) else (target,)
+    return any(isinstance(node, members) for node in orphans)
 
 
 def _orphans(graph: Graph) -> list[Node]:
@@ -206,7 +220,10 @@ def _orphans(graph: Graph) -> list[Node]:
     owned: set[Node] = set()
     for node in graph.nodes:
         for value in node.values:
-            kind = value.feature.kind
+            feature = value.feature
+            if not isinstance(feature, ReferenceFeature):
+                continue
+            kind = feature.kind
             if kind not in ("contains", "container"):
                 continue
             assert value.target is not None
@@ -214,9 +231,6 @@ def _orphans(graph: Graph) -> list[Node]:
             if value.certain and owner.exists == "true":
                 owned.add(child)
     return [node for node in graph.nodes if node not in owned]
-
-
-# -- Python predicates --------------------------------------------------------
 
 
 def _declare_predicate(schema: Schema, predicate: Predicate) -> str:

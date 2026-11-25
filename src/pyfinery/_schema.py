@@ -3,26 +3,26 @@
 # SPDX-License-Identifier: EPL-2.0
 
 """The Refinery types derived from Pydantic model classes: which classes, unions
-and enums there are, and the :class:`Feature` each field maps to.
+and enums there are, and the feature each field maps to.
 """
 
 from __future__ import annotations
 
 import enum
 import inspect
-import types
-from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Annotated, Any, Literal, Union, get_args, get_origin
+from typing import Any, Literal, get_args, get_origin
 
-import annotated_types
 from pydantic import BaseModel
-from pydantic.fields import FieldInfo
 
+from ._annotations import NO_ITEM_TYPE, Shape, is_union, strip_annotated
 from ._options import ClassOptions, ReferenceKind, RefineryNode, RefOptions
 from ._syntax import parse_multiplicity, quote_id
 
-_DATA_TYPES: dict[type, str] = {bool: "boolean", int: "int", float: "real", str: "string"}
+AttributeType = Literal["boolean", "int", "real", "string"]
+
+_DATA_TYPES: dict[type, AttributeType] = {bool: "boolean", int: "int", float: "real", str: "string"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,29 +45,99 @@ ClassLike = type[BaseModel] | UnionClass
 EnumLike = type[enum.Enum] | LiteralEnum
 
 
-@dataclass(frozen=True, slots=True)
-class Feature:
-    """A field of a Pydantic model class mapped to Refinery."""
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AttributeFeature:
+    """A field holding an ``int``, ``float``, ``str`` or ``bool``."""
 
     owner: type[BaseModel]
     name: str
-    target: ClassLike | EnumLike | str
-    """Model class, union, enum, ``Literal`` enum, or data type name for attributes."""
+    data_type: AttributeType
+    many: bool
+    lower: int
+    upper: int | None
+
+    @property
+    def target(self) -> AttributeType:
+        return self.data_type
+
+    @property
+    def kind(self) -> Literal["refers"]:
+        return "refers"
+
+    @property
+    def opposite(self) -> None:
+        return None
+
+    @property
+    def by_key(self) -> Literal[False]:
+        return False
+
+    @property
+    def is_attribute(self) -> Literal[True]:
+        return True
+
+    @property
+    def is_enum(self) -> Literal[False]:
+        return False
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class EnumFeature:
+    """A field holding members of an ``Enum``, or strings of a ``Literal``."""
+
+    owner: type[BaseModel]
+    name: str
+    target: EnumLike
+    many: bool
+    lower: int
+    upper: int | None
+
+    @property
+    def kind(self) -> Literal["refers"]:
+        return "refers"
+
+    @property
+    def opposite(self) -> None:
+        return None
+
+    @property
+    def by_key(self) -> Literal[False]:
+        return False
+
+    @property
+    def is_attribute(self) -> Literal[False]:
+        return False
+
+    @property
+    def is_enum(self) -> Literal[True]:
+        return True
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ReferenceFeature:
+    """A field holding model objects, or (``by_key``) the keys of model objects."""
+
+    owner: type[BaseModel]
+    name: str
+    target: ClassLike
     many: bool
     lower: int
     upper: int | None
     kind: ReferenceKind
-    opposite: str | None
+    opposite: str | None = None
     by_key: bool = False
-    """Whether the field holds keys of the target objects rather than the objects."""
 
     @property
-    def is_attribute(self) -> bool:
-        return isinstance(self.target, str)
+    def is_attribute(self) -> Literal[False]:
+        return False
 
     @property
-    def is_enum(self) -> bool:
-        return isinstance(self.target, LiteralEnum) or _is_enum_class(self.target)
+    def is_enum(self) -> Literal[False]:
+        return False
+
+
+# Runtime union so callers can check ``isinstance(feature, Feature)``.
+Feature = AttributeFeature | EnumFeature | ReferenceFeature
 
 
 @dataclass(slots=True)
@@ -75,9 +145,7 @@ class Schema:
     """The Refinery types of some model classes, and what decides how they map."""
 
     options: dict[type, ClassOptions]
-    """:class:`ClassOptions` by class, as given to :class:`Metamodel`."""
     named_unions: dict[str, tuple[type[BaseModel], ...]]
-    """Unions by the name given to :class:`Metamodel`."""
     classes: list[type[BaseModel]] = field(default_factory=list)
     """Superclasses before subclasses."""
     unions: list[UnionClass] = field(default_factory=list)
@@ -104,8 +172,7 @@ class Schema:
         return found
 
     def all_features(self, cls: type) -> tuple[Feature, ...]:
-        """The features of ``cls``, its own and inherited, by its MRO: for objects, once
-        the classes are discovered (the answer is remembered)."""
+        """The features of ``cls``, its own and inherited, by its MRO."""
         found = self.features_of.get(cls)
         if found is None:
             declared = (self.features.get(base, ()) for base in cls.__mro__)  # type: ignore[call-overload]
@@ -182,16 +249,17 @@ def discover(
             schema.features[cls] = _features(schema, cls, unsupported)
             pending.extend((b, False) for b in cls.__bases__ if is_model_class(b))
             for feature in schema.features[cls]:
-                target = feature.target
-                if feature.is_enum:
-                    if target not in schema.enums:
-                        schema.enums.append(target)  # type: ignore[arg-type]
-                elif isinstance(target, UnionClass):
-                    if target not in schema.unions:
-                        schema.unions.append(target)
-                    pending.extend((member, True) for member in target.members)
-                elif not feature.is_attribute:
-                    pending.append((target, True))  # type: ignore[arg-type]
+                if isinstance(feature, EnumFeature):
+                    if feature.target not in schema.enums:
+                        schema.enums.append(feature.target)
+                elif isinstance(feature, ReferenceFeature):
+                    target = feature.target
+                    if isinstance(target, UnionClass):
+                        if target not in schema.unions:
+                            schema.unions.append(target)
+                        pending.extend((member, True) for member in target.members)
+                    else:
+                        pending.append((target, True))
         if downwards and cls not in expanded:
             expanded.add(cls)
             pending.extend((sub, True) for sub in cls.__subclasses__())
@@ -214,24 +282,18 @@ def _infer_opposites(schema: Schema) -> None:
     """Pair each ``Container()`` without an opposite with the one containment reference it can
     be the opposite of: declared in (or inherited by) its target class, holding objects that
     have the container reference. That reference gets the container as its opposite too."""
-    claimed: dict[tuple[type, str], Feature] = {}
+    claimed: dict[tuple[type, str], ReferenceFeature] = {}
     for features in list(schema.features.values()):
         for i, feature in enumerate(features):
+            if not isinstance(feature, ReferenceFeature):
+                continue
             if feature.kind != "container" or feature.opposite is not None:
                 continue
             where = f"{feature.owner.__name__}.{feature.name}"
             target = feature.target
             if not isinstance(target, type):
                 raise TypeError(f"{where}: a container reference must refer to one class")
-            candidates = [
-                other
-                for base in target.__mro__
-                for other in schema.features.get(base, [])  # type: ignore[call-overload]
-                if other.kind == "contains"
-                and isinstance(other.target, type)
-                and issubclass(other.target, feature.owner)
-                and (other.opposite in (None, feature.name) or (other.owner, other.name) in claimed)
-            ]
+            candidates = _containment_candidates(schema, feature, target, claimed)
             named = [c for c in candidates if c.opposite == feature.name]
             if len(named) == 1:
                 candidates = named
@@ -261,7 +323,29 @@ def _infer_opposites(schema: Schema) -> None:
                 own[own.index(other)] = replace(other, opposite=feature.name)
 
 
-# -- fields -----------------------------------------------------------------
+def _containment_candidates(
+    schema: Schema,
+    container: ReferenceFeature,
+    target: type[BaseModel],
+    claimed: Mapping[tuple[type, str], ReferenceFeature],
+) -> list[ReferenceFeature]:
+    """The containment references of ``target`` that ``container`` can be the opposite of."""
+    candidates = []
+    for base in target.__mro__:
+        for other in schema.features.get(base, []):  # type: ignore[call-overload]
+            if not isinstance(other, ReferenceFeature) or other.kind != "contains":
+                continue
+            holds_owner = isinstance(other.target, type) and issubclass(
+                other.target, container.owner
+            )
+            if not holds_owner:
+                continue
+            # One already paired with another Container() stays a candidate, so that the
+            # clash is reported rather than the reference silently skipped.
+            free = other.opposite in (None, container.name)
+            if free or (other.owner, other.name) in claimed:
+                candidates.append(other)
+    return candidates
 
 
 def _features(schema: Schema, cls: type[BaseModel], unsupported: str) -> list[Feature]:
@@ -291,13 +375,13 @@ def _feature(schema: Schema, cls: type[BaseModel], name: str) -> Feature | None:
         return _key_reference(schema, cls, name, by_key[name])
     info = cls.model_fields[name]
     where = f"{cls.__name__}.{name}"
-    shape = _Shape.of(info)
+    shape = Shape.of(info)
     annotation = shape.type
     metadata = [*shape.metadata, *shape.inner_metadata]
     if shape.many:
-        if annotation is _NO_ITEM_TYPE:
+        if annotation is NO_ITEM_TYPE:
             raise TypeError(f"{where}: collections must have exactly one item type")
-    elif get_origin(annotation) not in (None, Literal) and not _is_union(annotation):
+    elif get_origin(annotation) not in (None, Literal) and not is_union(annotation):
         raise _Unsupported(f"{where}: unsupported field type {info.annotation!r}")
 
     refs = [m for m in metadata if isinstance(m, RefOptions)]
@@ -310,9 +394,12 @@ def _feature(schema: Schema, cls: type[BaseModel], name: str) -> Feature | None:
             raise _Unsupported(f"{where}: Refinery attributes can't hold collections")
         if refs:
             raise TypeError(f"{where}: attributes can't have Ref markers")
-        return Feature(cls, name, _DATA_TYPES[annotation], False, 0, 1, "refers", None)
+        data_type = _DATA_TYPES[annotation]
+        return AttributeFeature(
+            owner=cls, name=name, data_type=data_type, many=False, lower=0, upper=1
+        )
 
-    target: ClassLike | EnumLike
+    enum_target: EnumLike | None = None
     if get_origin(annotation) is Literal:
         values = get_args(annotation)
         if not all(isinstance(v, str) for v in values):
@@ -320,10 +407,23 @@ def _feature(schema: Schema, cls: type[BaseModel], name: str) -> Feature | None:
         if len(values) == 1:
             # A constant, e.g. a discriminator tag: the class says it all.
             return None
-        target = _literal_enum(schema, f"{cls.__name__}{_camel(name)}", values)
-    elif _is_union(annotation):
+        enum_target = _literal_enum(schema, f"{cls.__name__}{_camel(name)}", values)
+    elif _is_enum_class(annotation):
+        enum_target = annotation
+    if enum_target is not None:
+        if ref.kind != "refers":
+            raise TypeError(f"{where}: enums cannot be containment references")
+        if ref.opposite is not None:
+            raise TypeError(f"{where}: enums can't have opposites")
+        lower, upper = _bounds(shape, metadata, ref)
+        return EnumFeature(
+            owner=cls, name=name, target=enum_target, many=shape.many, lower=lower, upper=upper
+        )
+
+    target: ClassLike
+    if is_union(annotation):
         target = _union(schema, where, annotation)
-    elif is_model_class(annotation) or _is_enum_class(annotation):
+    elif is_model_class(annotation):
         target = annotation
     else:
         raise _Unsupported(
@@ -331,36 +431,50 @@ def _feature(schema: Schema, cls: type[BaseModel], name: str) -> Feature | None:
             "a Pydantic model, a union of them, an Enum, a Literal of strings, int, float, "
             "str, or bool"
         )
-    if isinstance(target, LiteralEnum) or _is_enum_class(target):
-        if ref.kind != "refers":
-            raise TypeError(f"{where}: enums cannot be containment references")
-        kind: ReferenceKind = "refers"
-    else:
-        members = target.members if isinstance(target, UnionClass) else (target,)
-        entities = [schema.is_entity(m) for m in members]  # type: ignore[arg-type]
-        if any(entities) and not all(entities):
-            raise TypeError(
-                f"{where}: mixes owned value classes with entity classes (RefineryNode or "
-                "keyed); Refinery needs them all to be one or the other"
-            )
-        kind = ref.kind
-        if not any(entities):
-            # Plain models without a key are value objects owned by this object.
-            if ref.kind == "container" or ref.opposite is not None:
-                shown = getattr(target, "name", None) or target.__name__  # type: ignore[union-attr]
-                raise TypeError(
-                    f"{where}: {shown} is a plain Pydantic model, which is always "
-                    "contained in its owner and cannot have opposites; make it a RefineryNode "
-                    "(or give it a key) to use opposites or Container()"
-                )
-            kind = "contains"
-
-    lower, upper = shape.bounds(metadata)
-    if ref.multiplicity is not None:
-        lower, upper = parse_multiplicity(ref.multiplicity)
+    kind = _reference_kind(schema, where, target, ref)
+    lower, upper = _bounds(shape, metadata, ref)
     if ref.kind == "container" and shape.many:
         raise TypeError(f"{where}: a container reference must be a single node")
-    return Feature(cls, name, target, shape.many, lower, upper, kind, ref.opposite)
+    return ReferenceFeature(
+        owner=cls,
+        name=name,
+        target=target,
+        many=shape.many,
+        lower=lower,
+        upper=upper,
+        kind=kind,
+        opposite=ref.opposite,
+    )
+
+
+def _bounds(shape: Shape, metadata: list[Any], ref: RefOptions) -> tuple[int, int | None]:
+    if ref.multiplicity is not None:
+        return parse_multiplicity(ref.multiplicity)
+    return shape.bounds(metadata)
+
+
+def _reference_kind(
+    schema: Schema, where: str, target: ClassLike, ref: RefOptions
+) -> ReferenceKind:
+    """The kind ``ref`` asks for, or ``contains`` for owned values: plain models without a key
+    are value objects owned by the object holding them."""
+    members = target.members if isinstance(target, UnionClass) else (target,)
+    entities = [schema.is_entity(m) for m in members]
+    if all(entities):
+        return ref.kind
+    if any(entities):
+        raise TypeError(
+            f"{where}: mixes owned value classes with entity classes (RefineryNode or "
+            "keyed); Refinery needs them all to be one or the other"
+        )
+    if ref.kind == "container" or ref.opposite is not None:
+        shown = target.name if isinstance(target, UnionClass) else target.__name__
+        raise TypeError(
+            f"{where}: {shown} is a plain Pydantic model, which is always "
+            "contained in its owner and cannot have opposites; make it a RefineryNode "
+            "(or give it a key) to use opposites or Container()"
+        )
+    return "contains"
 
 
 def _key_reference(
@@ -368,9 +482,9 @@ def _key_reference(
     cls: type[BaseModel],
     name: str,
     spec: type[BaseModel] | Sequence[type[BaseModel]] | str,
-) -> Feature:
+) -> ReferenceFeature:
     where = f"{cls.__name__}.{name}"
-    shape = _Shape.of(cls.model_fields[name])
+    shape = Shape.of(cls.model_fields[name])
     if shape.type not in (str, int):
         raise TypeError(
             f"{where}: a reference by key must hold str or int keys, or a collection of them"
@@ -387,67 +501,16 @@ def _key_reference(
     else:
         target = _union_of(schema, tuple(spec))
     lower, upper = shape.bounds(shape.metadata)
-    return Feature(cls, name, target, shape.many, lower, upper, "refers", None, by_key=True)
-
-
-_NO_ITEM_TYPE: Any = object()
-
-
-@dataclass(frozen=True, slots=True)
-class _Shape:
-    """A field's annotation with ``Annotated``, ``Optional`` and a collection taken off."""
-
-    type: Any
-    """The type of the value, or of each item; :data:`_NO_ITEM_TYPE` for a
-    collection without exactly one item type (``None`` is a type: ``list[None]``)."""
-    optional: bool
-    many: bool
-    metadata: list[Any]
-    """``Annotated`` metadata of the field, outside ``Optional``."""
-    inner_metadata: list[Any]
-    """``Annotated`` metadata inside ``Optional``, and of the items of a collection."""
-
-    @classmethod
-    def of(cls, info: FieldInfo) -> _Shape:
-        annotation, metadata = _strip_annotated(info.annotation)
-        metadata = [*info.metadata, *metadata]
-        annotation, optional = _strip_optional(annotation)
-        annotation, inner_metadata = _strip_annotated(annotation)
-        many = get_origin(annotation) in _COLLECTIONS or annotation in (list, set, frozenset, tuple)
-        if many:
-            args = [a for a in get_args(annotation) if a is not Ellipsis]
-            annotation = _NO_ITEM_TYPE
-            if len(args) == 1:
-                annotation, more = _strip_annotated(args[0])
-                inner_metadata += more
-        return cls(annotation, optional, many, metadata, inner_metadata)
-
-    def bounds(self, metadata: list[Any]) -> tuple[int, int | None]:
-        """The multiplicity: from ``MinLen``/``MaxLen`` in ``metadata`` for a collection."""
-        if not self.many:
-            return (0 if self.optional else 1), 1
-        lower = next((m.min_length for m in metadata if isinstance(m, annotated_types.MinLen)), 0)
-        upper = next(
-            (m.max_length for m in metadata if isinstance(m, annotated_types.MaxLen)), None
-        )
-        return lower, upper
-
-
-def empty_factory(info: FieldInfo) -> Callable[[], Any] | None:
-    """What a reference field holds when left out: an empty collection of its type, ``None``
-    if it is optional; ``None`` (no factory) for a required single reference."""
-    shape = _Shape.of(info)
-    if shape.many:
-        collection = _strip_optional(_strip_annotated(info.annotation)[0])[0]
-        origin = get_origin(collection) or collection
-        return origin if origin in (list, set, frozenset, tuple) else list
-    if shape.optional:
-        return _none
-    return None
-
-
-def _none() -> None:
-    return None
+    return ReferenceFeature(
+        owner=cls,
+        name=name,
+        target=target,
+        many=shape.many,
+        lower=lower,
+        upper=upper,
+        kind="refers",
+        by_key=True,
+    )
 
 
 def _own_fields(node_class: type[BaseModel]) -> list[str]:
@@ -483,7 +546,7 @@ def _literal_enum(schema: Schema, name: str, values: tuple[str, ...]) -> Literal
 def _union(schema: Schema, where: str, annotation: Any) -> UnionClass:
     members = []
     for arg in get_args(annotation):
-        arg, _ = _strip_annotated(arg)
+        arg, _ = strip_annotated(arg)
         if not is_model_class(arg):
             raise _Unsupported(f"{where}: unions must only contain Pydantic model classes")
         members.append(arg)
@@ -497,9 +560,6 @@ def _union_of(schema: Schema, members: tuple[type[BaseModel], ...]) -> UnionClas
             return existing
     names = {frozenset(m): name for name, m in schema.named_unions.items()}
     return UnionClass(names.get(key) or "Or".join(m.__name__ for m in members), members)
-
-
-# -- checks -----------------------------------------------------------------
 
 
 def _check_names(schema: Schema) -> None:
@@ -517,33 +577,33 @@ def _check_names(schema: Schema) -> None:
 def _check_key_references(schema: Schema) -> None:
     for features in schema.features.values():
         for feature in features:
-            if not feature.by_key:
+            if not isinstance(feature, ReferenceFeature) or not feature.by_key:
                 continue
             target = feature.target
             members = target.members if isinstance(target, UnionClass) else (target,)
             for member in members:
-                if schema.options_for(member).key is None:  # type: ignore[arg-type]
+                if schema.options_for(member).key is None:
                     raise TypeError(
                         f"{feature.owner.__name__}.{feature.name}: references by key need "
-                        f"ClassOptions(key=...) on {member.__name__}"  # type: ignore[union-attr]
+                        f"ClassOptions(key=...) on {member.__name__}"
                     )
 
 
 def _check_opposites(schema: Schema) -> None:
     for features in schema.features.values():
         for feature in features:
-            if feature.opposite is None:
+            if not isinstance(feature, ReferenceFeature) or feature.opposite is None:
                 continue
             where = f"{feature.owner.__name__}.{feature.name}"
-            if isinstance(feature.target, UnionClass):
+            target = feature.target
+            if isinstance(target, UnionClass):
                 raise TypeError(f"{where}: references to unions can't have opposites")
-            other = schema.find_feature(feature.target, feature.opposite)  # type: ignore[arg-type]
+            other = schema.find_feature(target, feature.opposite)
             if other is None:
                 raise TypeError(
-                    f"{where}: opposite {feature.opposite!r} is not a field of "
-                    f"{feature.target.__name__}"  # type: ignore[union-attr]
+                    f"{where}: opposite {feature.opposite!r} is not a field of {target.__name__}"
                 )
-            if other.opposite != feature.name:
+            if not isinstance(other, ReferenceFeature) or other.opposite != feature.name:
                 raise TypeError(
                     f"{where}: {other.owner.__name__}.{other.name} must declare "
                     f"opposite={feature.name!r} too"
@@ -559,28 +619,6 @@ def _check_opposites(schema: Schema) -> None:
                 )
 
 
-# -- annotations --------------------------------------------------------------
-
-
-def _strip_optional(annotation: Any) -> tuple[Any, bool]:
-    if get_origin(annotation) in (Union, types.UnionType):
-        args = [a for a in get_args(annotation) if a is not type(None)]
-        if len(args) == len(get_args(annotation)) - 1:
-            return (args[0] if len(args) == 1 else Union[tuple(args)]), True  # noqa: UP007
-    return annotation, False
-
-
-def _strip_annotated(annotation: Any) -> tuple[Any, list[Any]]:
-    if get_origin(annotation) is Annotated:
-        base, *metadata = get_args(annotation)
-        inner, more = _strip_annotated(base)
-        return inner, [*metadata, *more]
-    return annotation, []
-
-
-_COLLECTIONS = (list, set, frozenset, tuple, Sequence, Iterable)
-
-
 def _is_enum_class(value: Any) -> bool:
     return isinstance(value, type) and issubclass(value, enum.Enum)
 
@@ -592,10 +630,6 @@ def is_model_class(value: Any) -> bool:
         and issubclass(value, BaseModel)
         and value not in (BaseModel, RefineryNode)
     )
-
-
-def _is_union(annotation: Any) -> bool:
-    return get_origin(annotation) in (Union, types.UnionType)
 
 
 def _camel(name: str) -> str:

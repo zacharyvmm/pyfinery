@@ -16,7 +16,7 @@ from typing import Any, Literal
 from pydantic import BaseModel
 
 from ._options import LogicValue
-from ._schema import Feature, Schema, UnionClass
+from ._schema import AttributeFeature, EnumFeature, Feature, ReferenceFeature, Schema, UnionClass
 from ._syntax import RESERVED_NODE_NAMES, encodable, quote_id
 
 
@@ -106,7 +106,7 @@ def link_opposites(schema: Schema, objects: Iterable[BaseModel]) -> int:
     added = 0
     for node in collect(schema, objects):
         for feature, values in _field_values(schema, node):
-            if feature.opposite is None:
+            if not isinstance(feature, ReferenceFeature) or feature.opposite is None:
                 continue
             for target in values:
                 other = schema.find_feature(type(target), feature.opposite)
@@ -133,7 +133,7 @@ def _reach(
         fields = list(_field_values(schema, obj))
         reached.append((Node(obj, identity), fields))
         for feature, values in fields:
-            if not (feature.is_attribute or feature.is_enum or feature.by_key):
+            if isinstance(feature, ReferenceFeature) and not feature.by_key:
                 pending.extend(values)
     return reached
 
@@ -207,17 +207,17 @@ def _value(
     value: Any,
     by_key: Mapping[Hashable, list[Node]],
 ) -> Value:
+    if isinstance(feature, AttributeFeature | EnumFeature):
+        return Value(feature, value, _certain(schema, node.obj, feature, value))
     if feature.by_key:
         target = feature.target
         members = target.members if isinstance(target, UnionClass) else (target,)
-        found = [n for n in by_key.get(value, []) if isinstance(n.obj, members)]  # type: ignore[arg-type]
+        found = [n for n in by_key.get(value, []) if isinstance(n.obj, members)]
         if len(found) != 1:
             problem = "unresolved" if not found else "ambiguous"
             return Value(feature, value, unresolved=problem)
         return Value(feature, value, _certain(schema, node.obj, feature, value), found[0])
     certain = _certain(schema, node.obj, feature, value)
-    if feature.is_attribute or feature.is_enum:
-        return Value(feature, value, certain)
     # Every followed reference was reached, by the same identity.
     return Value(feature, value, certain, graph.by_identity[graph.identity_of(value)])
 
@@ -234,8 +234,7 @@ def _certain(schema: Schema, node: BaseModel, feature: Feature, value: Any) -> b
         return False
     raise ValueError(
         f"ClassOptions.logic_value of {type(node).__name__} must return 'true', 'unknown' or "
-        f"True, "
-        f"not {answer!r} (leave values that don't hold out of the object)"
+        f"True, not {answer!r} (leave values that don't hold out of the object)"
     )
 
 

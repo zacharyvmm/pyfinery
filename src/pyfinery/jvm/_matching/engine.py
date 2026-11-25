@@ -23,9 +23,8 @@ from ..._engines import Engine
 from ..._instances import Graph
 from ..._options import Predicate
 from ..._render import predicate_facts
-from ..._results import QueryResult, ValidationReport, reference_errors
+from ..._results import PredicateIndex, QueryResult, ValidationReport, reference_errors
 from ..._schema import Schema
-from ..._syntax import quote_id
 from ..errors import UnsupportedRuleError
 from .cache import compiled
 from .compile import CompiledProblem
@@ -70,7 +69,8 @@ class JvmEngine(Engine):
     ) -> QueryResult:
         problem = compiled(schema, rules, predicates)
         require_supported(problem)  # before the names: a refused assertion declares a relation
-        selected = {name: problem_name(problem, name) for name in select}
+        index = _predicate_index(problem)
+        selected = {name: problem_name(problem, name, index) for name in select}
         require_supported(problem, [*problem.rule_errors, *selected.values()])
         # Each predicate is evaluated once: what is checked for uncertainty is what is matched.
         facts = list(predicate_facts(schema, graph, predicates))
@@ -78,7 +78,7 @@ class JvmEngine(Engine):
         model = PlainModel(problem)
         try:
             model.sync(graph, facts)
-            matches = [m for name, p in selected.items() for m in model.matches(p, name)]
+            matches = [m for name, p in selected.items() for m in model.matches(p, str(name))]
             errors = reference_errors(graph) + model.violations()
         finally:
             model.close()
@@ -98,15 +98,18 @@ def require_supported(problem: CompiledProblem, predicates: Sequence[str] = ()) 
         raise UnsupportedRuleError("The JVM engine can't match these:\n  " + "\n  ".join(reasons))
 
 
-def problem_name(problem: CompiledProblem, name: str) -> str:
+def _predicate_index(problem: CompiledProblem) -> PredicateIndex[str]:
+    return PredicateIndex({key: key for key in (*problem.queries, *problem.unsupported)})
+
+
+def problem_name(
+    problem: CompiledProblem, name: str, index: PredicateIndex[str] | None = None
+) -> str:
     """The name of the predicate ``name`` (as declared, or as selected) in ``problem``."""
-    for candidate in (name, quote_id(name)):
-        if candidate in problem.queries or candidate in problem.unsupported:
-            return candidate
-    unquoted = name[1:-1] if name.startswith("'") and name.endswith("'") else None
-    if unquoted is not None and (unquoted in problem.queries or unquoted in problem.unsupported):
-        return unquoted
-    raise ValueError(f"No predicate named {name!r} to report")
+    resolved = (index or _predicate_index(problem)).resolve(name)
+    if resolved is not None:
+        return resolved
+    raise ValueError(f"No predicate named {str(name)!r} to report")
 
 
 def refuse_uncertainty(graph: Graph, predicate_facts: Iterable[PredicateFact]) -> None:
