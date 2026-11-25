@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Hashable, Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel
 
@@ -17,7 +17,9 @@ from ._instances import Graph
 from ._options import LogicValue
 from ._syntax import quote_id
 from .errors import RefineryError
-from .models import JsonOutput
+
+if TYPE_CHECKING:
+    from .http.models import JsonOutput
 
 ViolationKind = Literal["rule", "multiplicity", "containment", "contradiction", "reference"]
 
@@ -166,54 +168,6 @@ def declared_predicates(rules: Iterable[str]) -> list[str]:
     return names
 
 
-def read_violations(model: JsonOutput | None, graph: Graph, source: str) -> ValidationReport:
-    """The constraints ``graph`` violates, from Refinery's output for ``source``."""
-    if model is None:
-        raise RefineryError("Refinery did not return a model to validate")
-    violations = reference_errors(graph) + _errors(model, graph.objects_by_name())
-    return ValidationReport(violations, source, model, graph.identity)
-
-
-def read_matches(
-    model: JsonOutput | None, graph: Graph, source: str, predicates: Sequence[str]
-) -> QueryResult:
-    """The matches of ``predicates``, and the constraints ``graph`` violates, from
-    Refinery's output for ``source``."""
-    if model is None:
-        raise RefineryError("Refinery did not return a model to query")
-    by_name = graph.objects_by_name()
-    node_names = _node_names(model, by_name)
-    exists = {node.name: node.exists for node in graph.nodes}
-    relations = {r.name: r for r in model.relations}
-    matches = []
-    for predicate in predicates:
-        relation = relations.get(predicate)
-        if relation is None:
-            raise ValueError(f"Refinery returned no relation named {predicate!r}")
-        for raw in model.partial_interpretation.get(relation.name, []):
-            value: LogicValue = raw[-1]  # type: ignore[assignment]
-            if value not in ("true", "unknown"):
-                continue  # errors are reported as contradictions
-            names = tuple(node_names[i] for i in raw[: relation.arity])  # type: ignore[index]
-            if any(name.endswith("::new") for name in names):
-                continue  # objects that don't exist in a closed world
-            # Refinery doesn't weaken a predicate for the existence of
-            # its arguments (only of nodes quantified in its body).
-            if any(exists.get(name) == "unknown" for name in names):
-                value = "unknown"
-            nodes = tuple(by_name.get(name) for name in names)
-            parameters = tuple(relation.parameter_names or ())
-            matches.append(Match(predicate, names, nodes, value, parameters))
-    errors = [
-        error
-        for error in reference_errors(graph) + _errors(model, by_name)
-        # Refinery still evaluates constraints on the C::new objects the
-        # closed world says don't exist.
-        if not any(name.endswith("::new") for name in error.node_names)
-    ]
-    return QueryResult(matches, errors, source, model)
-
-
 def reference_errors(graph: Graph) -> list[Violation]:
     """Keys in reference-by-key fields that match no object, or several."""
     errors = []
@@ -226,50 +180,3 @@ def reference_errors(graph: Graph) -> list[Violation]:
             node_names = (node.name, repr(value.value))
             errors.append(Violation("reference", constraint, node_names, (node.obj, None)))
     return errors
-
-
-_MULTIPLICITY_SUFFIX = "::invalidMultiplicity"
-
-
-def _classify(relation: str, is_error_predicate: bool) -> ViolationKind | None:
-    if relation == "builtin::invalidContainer":
-        return "containment"
-    if relation.startswith("builtin::"):
-        # Consequences of other errors (e.g., builtin::contains for a cycle).
-        return None
-    if is_error_predicate:
-        return "multiplicity" if relation.endswith(_MULTIPLICITY_SUFFIX) else "rule"
-    return "contradiction"
-
-
-def _errors(model: JsonOutput, by_name: dict[str, BaseModel]) -> list[Violation]:
-    """The tuples of error predicates and builtin constraints that are ``error``."""
-    node_names = _node_names(model, by_name)
-    violations = []
-    for relation in model.relations:
-        is_error_predicate = relation.detail.type == "pred" and relation.detail.kind == "error"
-        kind = _classify(relation.name, is_error_predicate)
-        if kind is None:
-            continue
-        for raw in model.partial_interpretation.get(relation.name, []):
-            if raw[-1] != "error":
-                continue
-            names = tuple(node_names[i] for i in raw[: relation.arity])  # type: ignore[index]
-            nodes = tuple(by_name.get(name) for name in names)
-            violations.append(Violation(kind, relation.name, names, nodes))
-    return violations
-
-
-def _node_names(model: JsonOutput, by_name: dict[str, BaseModel]) -> list[str]:
-    """The name of each node of ``model``, as pyfinery named it in the problem.
-
-    Refinery returns a name without the quotes pyfinery wrote it with when the name
-    doesn't need them in Refinery's syntax, e.g. ``e`` for ``'e'`` (pyfinery quotes
-    more names than Refinery has to, to be safe)."""
-    names = []
-    for node in model.nodes:
-        name = node.name
-        if name not in by_name and quote_id(name) in by_name:
-            name = quote_id(name)
-        names.append(name)
-    return names

@@ -19,7 +19,13 @@ from dataclasses import dataclass
 from decimal import ROUND_CEILING, ROUND_FLOOR, Context, Decimal
 from fractions import Fraction
 
-from pyfinery.models import ErrorValue, JsonOutput, RelationMetadata, TupleElement, UnknownValue
+from pyfinery.http.models import (
+    ErrorValue,
+    JsonOutput,
+    RelationMetadata,
+    TupleElement,
+    UnknownValue,
+)
 
 from .problems import Assertion, Expectation, java_unescape
 

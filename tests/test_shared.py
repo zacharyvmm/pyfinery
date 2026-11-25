@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 import pyfinery as pf
-from pyfinery import client, server
+from pyfinery.http import client, server
 
 BASE = "http://refinery.test/api/v1"
 

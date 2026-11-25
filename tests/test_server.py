@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: EPL-2.0
 
+import asyncio
 import time
 
 import httpx
@@ -62,3 +63,17 @@ def test_threads_apply_to_every_kind_of_request():
 def test_env_overrides_threads():
     server = pf.RefineryServer(threads=4, env={"REFINERY_XTEXT_SEMANTICS_THREAD_COUNT": "0"})
     assert server._env["REFINERY_XTEXT_SEMANTICS_THREAD_COUNT"] == "0"
+
+
+def test_clients_of_a_server_take_the_client_options():
+    server = pf.RefineryServer()
+    server.port = 1
+    http_client = httpx.Client()
+    with server.client(headers={"X-A": "1"}, http_client=http_client) as client:
+        assert client.base_url == server.base_url
+        assert client._headers == {"X-A": "1"} and client._http is http_client
+    client = server.async_client(timeout=3.0)
+    assert client.base_url == server.base_url and client._http.timeout == httpx.Timeout(3.0)
+    asyncio.run(client.aclose())
+    with pytest.raises(TypeError):
+        server.client(retries=3)  # type: ignore[call-arg]

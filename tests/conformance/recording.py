@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from pyfinery import Refinery, RefineryError, RefineryServer
-from pyfinery.models import JsonOutput, JsonOutputFormat, OutputFormats, SourceOutputFormat
+from pyfinery.http.models import JsonOutput, JsonOutputFormat, OutputFormats, SourceOutputFormat
 
 from .problems import Case, load
 

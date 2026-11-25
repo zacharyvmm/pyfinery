@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 import pyfinery as pf
-from pyfinery._protocol import SSEDecoder
+from pyfinery.http.protocol import SSEDecoder
 
 from .conftest import Recorder, sse, sse_response
 

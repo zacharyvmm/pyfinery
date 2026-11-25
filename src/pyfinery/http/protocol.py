@@ -27,7 +27,7 @@ from typing import Any, Literal
 import httpx
 from pydantic import BaseModel, ValidationError
 
-from .errors import ProtocolError, RefineryError, from_error_result
+from ..errors import ProtocolError, RefineryError, from_error_result
 from .models import ErrorResult, GenerateResult, GenerateStatus
 
 type ProblemSource = str | os.PathLike[str]

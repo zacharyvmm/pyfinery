@@ -7,13 +7,6 @@
 See https://refinery.tools for the problem specification language.
 """
 
-from .client import (
-    DEFAULT_BASE_URL,
-    AsyncRefinery,
-    AsyncRefineryChat,
-    Refinery,
-    RefineryChat,
-)
 from .errors import (
     BadRequestError,
     InvalidProblemError,
@@ -39,7 +32,10 @@ from .graph import (
     ValidationReport,
     Violation,
 )
-from .models import (
+from .http import (
+    DEFAULT_BASE_URL,
+    AsyncRefinery,
+    AsyncRefineryChat,
     ChatMessage,
     ConcretizationResult,
     GenerateManyResult,
@@ -50,13 +46,16 @@ from .models import (
     JsonOutputFormat,
     NodeMetadata,
     OutputFormats,
+    Refinery,
+    RefineryChat,
+    RefineryServer,
     RelationMetadata,
     Scope,
     SemanticsResult,
+    ServerStartError,
     SourceOutputFormat,
     TextToModelResult,
 )
-from .server import RefineryServer, ServerStartError
 
 __all__ = [
     "DEFAULT_BASE_URL",

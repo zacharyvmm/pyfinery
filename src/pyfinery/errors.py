@@ -15,7 +15,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .models import ErrorResult, Issue, RequestErrorDetail
+    from .http.models import ErrorResult, Issue, RequestErrorDetail
 
 
 class RefineryError(Exception):

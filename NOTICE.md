@@ -27,7 +27,7 @@ SPDX-License-Identifier: EPL-2.0
 - Copyright (c) 2021-2025 The Refinery Authors
 - License: EPL-2.0
 
-`src/pyfinery/client.py`, `src/pyfinery/models.py`, `src/pyfinery/errors.py` and `src/pyfinery/_protocol.py` are Python ports of this client. They were translated from TypeScript to Python and adapted to Python idioms (pydantic models instead of zod schemas, httpx instead of `fetch`, iterators and callbacks instead of the `onStatus` modes).
+`src/pyfinery/http/client.py`, `src/pyfinery/http/models.py`, `src/pyfinery/errors.py` and `src/pyfinery/http/protocol.py` are Python ports of this client. They were translated from TypeScript to Python and adapted to Python idioms (pydantic models instead of zod schemas, httpx instead of `fetch`, iterators and callbacks instead of the `onStatus` modes).
 
 ### Refinery file system tutorial
 
@@ -47,4 +47,4 @@ SPDX-License-Identifier: EPL-2.0
 
 ### Refinery documentation
 
-The API behaviour, Docker image (`ghcr.io/graphs4value/refinery`) and server environment variables used by `src/pyfinery/server.py` are described in the [Refinery documentation](https://refinery.tools/learn/docker/). This project doesn't redistribute the Docker image.
+The API behaviour, Docker image (`ghcr.io/graphs4value/refinery`) and server environment variables used by `src/pyfinery/http/server.py` are described in the [Refinery documentation](https://refinery.tools/learn/docker/). This project doesn't redistribute the Docker image.

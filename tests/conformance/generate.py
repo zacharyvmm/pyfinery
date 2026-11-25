@@ -31,7 +31,7 @@ import sys
 from dataclasses import dataclass, field
 
 from pyfinery import Refinery, RefineryError, RefineryServer
-from pyfinery.models import JsonOutput
+from pyfinery.http.models import JsonOutput
 
 from .interpretation import Interpretation, errors
 from .recording import FORMAT, IMAGE, ROOT

@@ -17,8 +17,9 @@ from typing import Self
 
 import httpx
 
+from ..errors import InvalidProblemError, RefineryError, RefineryTimeoutError
 from .client import AsyncRefinery, Refinery
-from .errors import InvalidProblemError, RefineryError, RefineryTimeoutError
+from .protocol import DEFAULT_TIMEOUT
 
 DEFAULT_IMAGE = "ghcr.io/zacharyvmm/refinery:latest"
 CONTAINER_PORT = 8888
@@ -150,11 +151,27 @@ class RefineryServer:
         """API base URL to pass to :class:`~pyfinery.Refinery`."""
         return f"{self.url}/api/v1"
 
-    def client(self, **kwargs) -> Refinery:
-        return Refinery(self.base_url, **kwargs)
+    def client(
+        self,
+        *,
+        headers: Mapping[str, str] | None = None,
+        timeout: httpx.Timeout | float | None = DEFAULT_TIMEOUT,
+        http_client: httpx.Client | None = None,
+    ) -> Refinery:
+        """A :class:`Refinery` client of this server."""
+        return Refinery(self.base_url, headers=headers, timeout=timeout, http_client=http_client)
 
-    def async_client(self, **kwargs) -> AsyncRefinery:
-        return AsyncRefinery(self.base_url, **kwargs)
+    def async_client(
+        self,
+        *,
+        headers: Mapping[str, str] | None = None,
+        timeout: httpx.Timeout | float | None = DEFAULT_TIMEOUT,
+        http_client: httpx.AsyncClient | None = None,
+    ) -> AsyncRefinery:
+        """An :class:`AsyncRefinery` client of this server."""
+        return AsyncRefinery(
+            self.base_url, headers=headers, timeout=timeout, http_client=http_client
+        )
 
     def _docker_cmd(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         return subprocess.run([self._docker, *args], capture_output=True, text=True, check=check)
