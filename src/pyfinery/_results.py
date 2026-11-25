@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 from ._instances import Graph
 from ._options import LogicValue
-from ._syntax import is_plain_id, quote_id, unquote_id
+from ._syntax import is_single_id, quote_id, unquote_id
 from .errors import RefineryError
 from .http.models import JsonOutput
 
@@ -168,33 +168,39 @@ def declared_predicates(rules: Iterable[str]) -> list[str]:
     return names
 
 
-def resolve_predicate[T](name: str, relations: Mapping[str, T]) -> T | None:
-    """Resolve ``name`` against ``relations`` keyed by Refinery's printed relation names.
+class PredicateIndex[T]:
+    """O(1) predicate lookup built once per query, keeping qualified and single-segment names
+    separate.
 
-    Names from :func:`declared_predicates` are decoded single-segment names and match only
-    their canonical spelling (``quote_id(name)``, or ``name`` when Refinery leaves a plain
-    keyword unquoted). Explicit selectors match verbatim first (preserving qualified names
-    such as ``builtin::exists``), then canonical quoted spelling, then decoded Xtext escapes.
+    Single-segment relations (plain identifiers and single quoted tokens such as
+    ``'builtin::exists'`` or ``'he said \\"yes\\"'``) are indexed by their decoded name
+    (``unquote_id``). Qualified names (``builtin::exists``, ``'My Class'::'my field'``) stay
+    only in ``exact`` so they never collide with single-segment quoted predicates.
     """
-    if isinstance(name, _DeclaredName):
-        return _lookup_decoded(name, relations)
-    if name in relations:
-        return relations[name]
-    canonical = quote_id(name)
-    if canonical in relations:
-        return relations[canonical]
-    if name.startswith("'") and name.endswith("'"):
-        return _lookup_decoded(unquote_id(name), relations)
-    return None
 
+    __slots__ = ("exact", "single")
 
-def _lookup_decoded[T](decoded: str, relations: Mapping[str, T]) -> T | None:
-    canonical = quote_id(decoded)
-    if canonical in relations:
-        return relations[canonical]
-    if is_plain_id(decoded):
-        return relations.get(decoded)
-    return None
+    def __init__(self, relations: Mapping[str, T]) -> None:
+        self.exact = relations
+        self.single: dict[str, T] = {}
+        for key, value in relations.items():
+            if is_single_id(key):
+                self.single[unquote_id(key)] = value
+
+    def resolve(self, name: str) -> T | None:
+        """Resolve ``name``: decoded ``_DeclaredName``s match only ``single``; explicit selectors
+        match verbatim first, then decoded single-segment names, then decoded Xtext escapes."""
+        if isinstance(name, _DeclaredName):
+            return self.single.get(name)
+        found = self.exact.get(name)
+        if found is not None:
+            return found
+        found = self.single.get(name)
+        if found is not None:
+            return found
+        if is_single_id(name) and name.startswith("'"):
+            return self.single.get(unquote_id(name))
+        return None
 
 
 def reference_errors(graph: Graph) -> list[Violation]:

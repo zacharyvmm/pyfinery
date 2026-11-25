@@ -84,7 +84,19 @@ def test_quote_id():
 
 @pytest.mark.parametrize(
     "name",
-    ["plain_1", "class", "it's", "back\\slash", "end\\", "'", "a b", "line\nbreak", "\t\r\b\f"],
+    [
+        "plain_1",
+        "class",
+        "it's",
+        'he said "yes"',
+        "back\\slash",
+        "end\\",
+        "'",
+        "a b",
+        "ready\n",
+        "line\nbreak",
+        "\t\r\b\f",
+    ],
 )
 def test_unquote_id_reverses_quote_id(name):
     assert unquote_id(quote_id(name)) == name
@@ -98,6 +110,8 @@ def test_unquote_id_reads_each_escape_once():
 
 def test_unquote_id_decodes_xtext_escapes():
     assert quote_id("\n") == r"'\n'"
+    assert quote_id("ready\n") == r"'ready\n'"
+    assert quote_id('he said "yes"') == "'he said \\\"yes\\\"'"
     assert unquote_id(r"'\u0061'") == "a"
     assert unquote_id(r"'\u000a'") == "\n"
     assert unquote_id(r"'\\u0061'") == r"\u0061"

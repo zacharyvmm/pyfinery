@@ -91,7 +91,10 @@ def test_quoted_predicate_resolution_never_collides_with_serialized_names():
             r"'\n'": 3,
             "builtin::exists": 4,
             "'builtin::exists'": 5,
-            "default": 6,
+            "atom": 6,
+            "'he said \\\"yes\\\"'": 7,
+            r"'ready\n'": 8,
+            "'My Class'::'my field'": 9,
         },
         unsupported={},
     )
@@ -101,10 +104,15 @@ def test_quoted_predicate_resolution_never_collides_with_serialized_names():
     assert problem_name(both, "a b") == "'a b'"  # pyright: ignore[reportArgumentType]
     assert problem_name(both, "builtin::exists") == "builtin::exists"  # pyright: ignore[reportArgumentType]
     assert problem_name(both, "'builtin::exists'") == "'builtin::exists'"  # pyright: ignore[reportArgumentType]
+    assert problem_name(both, "'My Class'::'my field'") == "'My Class'::'my field'"  # pyright: ignore[reportArgumentType]
     assert problem_name(both, declared_predicates(["pred 'builtin::exists'(x)."])[0]) == (
         "'builtin::exists'"
     )  # pyright: ignore[reportArgumentType]
-    assert problem_name(both, declared_predicates(["pred default(x)."])[0]) == "default"  # pyright: ignore[reportArgumentType]
+    assert problem_name(both, declared_predicates(["pred atom(x)."])[0]) == "atom"  # pyright: ignore[reportArgumentType]
+    assert problem_name(both, declared_predicates(["pred 'he said \"yes\"'(x)."])[0]) == (
+        "'he said \\\"yes\\\"'"
+    )  # pyright: ignore[reportArgumentType]
+    assert problem_name(both, declared_predicates([r"pred 'ready\n'(x)."])[0]) == r"'ready\n'"  # pyright: ignore[reportArgumentType]
 
     only_first = SimpleNamespace(queries={"'a b'": 1}, unsupported={})
     with pytest.raises(ValueError, match="No predicate named"):

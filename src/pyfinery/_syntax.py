@@ -10,7 +10,8 @@ import math
 import re
 from typing import Any
 
-_ID = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_ID = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*\Z")
+_QUOTED_ID = re.compile(r"\A'(?:[^'\\]|\\.)*'\Z")
 _KEYWORDS = frozenset(
     [
         "abstract",
@@ -58,9 +59,9 @@ _KEYWORDS = frozenset(
 )
 
 
-def is_plain_id(name: str) -> bool:
-    """Whether ``name`` is a single unquoted ASCII identifier token (no quotes or ``::``)."""
-    return _ID.match(name) is not None
+def is_single_id(name: str) -> bool:
+    """Whether ``name`` is one identifier token (plain or quoted), not qualified with ``::``."""
+    return _ID.match(name) is not None or _QUOTED_ID.match(name) is not None
 
 
 def quote_id(name: str) -> str:
@@ -70,6 +71,7 @@ def quote_id(name: str) -> str:
     escaped = (
         name.replace("\\", "\\\\")
         .replace("'", "\\'")
+        .replace('"', '\\"')
         .replace("\b", "\\b")
         .replace("\t", "\\t")
         .replace("\n", "\\n")
