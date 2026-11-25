@@ -27,9 +27,15 @@ from ._schema import Schema
 from .http.client import AsyncRefinery, Refinery
 from .http.engine import AsyncClientEngine, ClientEngine, Problems
 
-__all__ = ["AsyncEngine", "Engine", "async_engine", "sync_engine"]
+__all__ = ["AsyncEngine", "Engine", "async_engine", "reject_awaitable", "sync_engine"]
 
 _METHODS = ("validate_graph", "query_graph")
+_OPERATIONS = {
+    "validate": "validate_graph",
+    "avalidate": "validate_graph",
+    "query": "query_graph",
+    "aquery": "query_graph",
+}
 
 
 @runtime_checkable
@@ -84,7 +90,8 @@ class AsyncEngine(Protocol):
 
 
 class _Awaited:
-    """A synchronous engine as an asynchronous one: it runs in the caller's thread."""
+    """A synchronous engine (or one whose method returns an awaitable via a wrapper)
+    adapted as an asynchronous one."""
 
     def __init__(self, engine: Engine) -> None:
         self.engine = engine
@@ -96,7 +103,10 @@ class _Awaited:
         rules: Sequence[str],
         predicates: Sequence[Predicate],
     ) -> ValidationReport:
-        return self.engine.validate_graph(schema, graph, rules, predicates)
+        result = self.engine.validate_graph(schema, graph, rules, predicates)
+        if inspect.isawaitable(result):
+            return await result
+        return result
 
     async def query_graph(
         self,
@@ -106,7 +116,22 @@ class _Awaited:
         predicates: Sequence[Predicate],
         select: Sequence[str],
     ) -> QueryResult:
-        return self.engine.query_graph(schema, graph, rules, predicates, select)
+        result = self.engine.query_graph(schema, graph, rules, predicates, select)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+
+def reject_awaitable[T](result: T, backend: object, method: str) -> T:
+    """Reject an awaitable returned on a synchronous path (e.g. from a plain wrapper
+    forwarding a coroutine) without leaving an unawaited coroutine warning."""
+    if inspect.isawaitable(result):
+        if inspect.iscoroutine(result):
+            result.close()
+        raise TypeError(
+            f"{method}() needs a synchronous engine, not {_name(backend)}; use a{method}()"
+        )
+    return result
 
 
 def sync_engine(backend: object, source: str, rules: Sequence[str], method: str) -> Engine:
@@ -159,7 +184,10 @@ def _name(obj: object) -> str:
 
 
 def _operation(method: str) -> str:
-    return "validate_graph" if method in ("validate", "avalidate") else "query_graph"
+    try:
+        return _OPERATIONS[method]
+    except KeyError:
+        raise ValueError(f"Unknown engine method {method!r}") from None
 
 
 def _is_engine(obj: object) -> bool:

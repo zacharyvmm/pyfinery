@@ -62,7 +62,7 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel
 
-from ._engines import async_engine, sync_engine
+from ._engines import async_engine, reject_awaitable, sync_engine
 from ._instances import build_graph, collect, link_opposites
 from ._options import (
     ClassOptions,
@@ -260,7 +260,9 @@ class Metamodel:
         predicates = list(predicates)
         graph = build_graph(self.schema, objects)
         rules = [*self.rules, *rules]
-        return found.validate_graph(self.schema, graph, rules, predicates)
+        return reject_awaitable(
+            found.validate_graph(self.schema, graph, rules, predicates), refinery, "validate"
+        )
 
     async def avalidate(
         self,
@@ -302,7 +304,9 @@ class Metamodel:
         graph = build_graph(self.schema, objects, existence=True)
         selected = list(select) if select is not None else declared_predicates(rules)
         rules = [*self.rules, *rules]
-        return found.query_graph(self.schema, graph, rules, predicates, selected)
+        return reject_awaitable(
+            found.query_graph(self.schema, graph, rules, predicates, selected), refinery, "query"
+        )
 
     async def aquery(
         self,

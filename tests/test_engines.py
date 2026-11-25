@@ -225,6 +225,33 @@ def test_mixed_sync_async_engine_dispatches_per_method():
         mm.validate(objects(), mixed)  # pyright: ignore[reportArgumentType]
 
 
+def test_decorated_async_engine_methods_work_and_reject_sync():
+    def forward(fn):
+        def wrapper(*args, **kwargs):
+            return fn(*args, **kwargs)
+
+        return wrapper
+
+    class DecoratedAsync:
+        @forward
+        async def validate_graph(self, schema, graph, rules, predicates) -> ValidationReport:
+            return ValidationReport([], "decorated", None, graph.identity)
+
+        @forward
+        async def query_graph(self, schema, graph, rules, predicates, select) -> QueryResult:
+            return QueryResult([], [], "decorated", None)
+
+    mm, engine_ = metamodel(), DecoratedAsync()
+    report = asyncio.run(mm.avalidate(objects(), engine_, EXTRA))  # pyright: ignore[reportArgumentType]
+    result = asyncio.run(mm.aquery(objects(), engine_, EXTRA))  # pyright: ignore[reportArgumentType]
+    assert report.ok and report.source == "decorated"
+    assert result.source == "decorated"
+    with pytest.raises(TypeError, match=r"validate\(\) needs a synchronous engine.*use avalidate"):
+        mm.validate(objects(), engine_)  # pyright: ignore[reportArgumentType]
+    with pytest.raises(TypeError, match=r"query\(\) needs a synchronous engine.*use aquery"):
+        mm.query(objects(), engine_)  # pyright: ignore[reportArgumentType]
+
+
 def test_async_engines_are_awaited():
     mm, mine = metamodel(), AsyncValidating()
     assert asyncio.run(mm.aquery(objects(), mine, EXTRA)).source == "mine"
