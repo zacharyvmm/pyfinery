@@ -130,12 +130,12 @@ def test_feature_union_supports_runtime_isinstance_and_compat_accessors():
     count = by_name["count"]
     assert isinstance(count, AttributeFeature)
     assert count.target == "int" and count.is_attribute and not count.is_enum
-    assert count.kind == "ref" and count.opposite is None and not count.by_key
+    assert count.kind == "refers" and count.opposite is None and not count.by_key
 
     color = by_name["color"]
     assert isinstance(color, EnumFeature)
     assert color.target is Color and not color.is_attribute and color.is_enum
-    assert color.kind == "ref" and color.opposite is None and not color.by_key
+    assert color.kind == "refers" and color.opposite is None and not color.by_key
 
     leaf = by_name["leaf"]
     assert isinstance(leaf, ReferenceFeature)

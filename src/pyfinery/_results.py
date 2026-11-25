@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Hashable, Iterable, Sequence
+from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 from ._instances import Graph
 from ._options import LogicValue
-from ._syntax import quote_id, unquote_id
+from ._syntax import is_plain_id, quote_id, unquote_id
 from .errors import RefineryError
 from .http.models import JsonOutput
 
@@ -168,16 +168,33 @@ def declared_predicates(rules: Iterable[str]) -> list[str]:
     return names
 
 
-def resolve_predicate[T](name: str, by_decoded: dict[str, T]) -> T | None:
-    """Resolve ``name`` against ``by_decoded`` (Refinery relations keyed by ``unquote_id``).
+def resolve_predicate[T](name: str, relations: Mapping[str, T]) -> T | None:
+    """Resolve ``name`` against ``relations`` keyed by Refinery's printed relation names.
 
-    Names returned by :func:`declared_predicates` are already decoded and match only exact
-    decoded keys; explicit selectors also match quoted Refinery spellings (e.g. ``'\\u000a'``).
+    Names from :func:`declared_predicates` are decoded single-segment names and match only
+    their canonical spelling (``quote_id(name)``, or ``name`` when Refinery leaves a plain
+    keyword unquoted). Explicit selectors match verbatim first (preserving qualified names
+    such as ``builtin::exists``), then canonical quoted spelling, then decoded Xtext escapes.
     """
-    found = by_decoded.get(name)
-    if found is not None or isinstance(name, _DeclaredName):
-        return found
-    return by_decoded.get(unquote_id(name))
+    if isinstance(name, _DeclaredName):
+        return _lookup_decoded(name, relations)
+    if name in relations:
+        return relations[name]
+    canonical = quote_id(name)
+    if canonical in relations:
+        return relations[canonical]
+    if name.startswith("'") and name.endswith("'"):
+        return _lookup_decoded(unquote_id(name), relations)
+    return None
+
+
+def _lookup_decoded[T](decoded: str, relations: Mapping[str, T]) -> T | None:
+    canonical = quote_id(decoded)
+    if canonical in relations:
+        return relations[canonical]
+    if is_plain_id(decoded):
+        return relations.get(decoded)
+    return None
 
 
 def reference_errors(graph: Graph) -> list[Violation]:

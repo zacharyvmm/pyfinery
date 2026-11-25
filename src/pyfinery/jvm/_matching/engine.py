@@ -25,7 +25,6 @@ from ..._options import Predicate
 from ..._render import predicate_facts
 from ..._results import QueryResult, ValidationReport, reference_errors, resolve_predicate
 from ..._schema import Schema
-from ..._syntax import unquote_id
 from ..errors import UnsupportedRuleError
 from .cache import compiled
 from .compile import CompiledProblem
@@ -100,8 +99,8 @@ def require_supported(problem: CompiledProblem, predicates: Sequence[str] = ()) 
 
 def problem_name(problem: CompiledProblem, name: str) -> str:
     """The name of the predicate ``name`` (as declared, or as selected) in ``problem``."""
-    by_decoded = {unquote_id(key): key for key in (*problem.queries, *problem.unsupported)}
-    found = resolve_predicate(name, by_decoded)
+    relations = {key: key for key in (*problem.queries, *problem.unsupported)}
+    found = resolve_predicate(name, relations)
     if found is not None:
         return found
     raise ValueError(f"No predicate named {str(name)!r} to report")

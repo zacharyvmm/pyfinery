@@ -84,11 +84,27 @@ def test_quoted_predicate_resolution_never_collides_with_serialized_names():
     assert declared == ["'a b'"]
 
     # JVM resolver: resolves '\u000a' to canonical '\n' and keeps declared '\'a b\'' separate.
-    both = SimpleNamespace(queries={"'a b'": 1, r"'\'a b\''": 2, r"'\n'": 3}, unsupported={})
+    both = SimpleNamespace(
+        queries={
+            "'a b'": 1,
+            r"'\'a b\''": 2,
+            r"'\n'": 3,
+            "builtin::exists": 4,
+            "'builtin::exists'": 5,
+            "default": 6,
+        },
+        unsupported={},
+    )
     assert problem_name(both, declared[0]) == r"'\'a b\''"  # pyright: ignore[reportArgumentType]
     assert problem_name(both, r"'\u000a'") == r"'\n'"  # pyright: ignore[reportArgumentType]
-    assert problem_name(both, "'a b'") == r"'\'a b\''"  # pyright: ignore[reportArgumentType]
+    assert problem_name(both, "'a b'") == "'a b'"  # pyright: ignore[reportArgumentType]
     assert problem_name(both, "a b") == "'a b'"  # pyright: ignore[reportArgumentType]
+    assert problem_name(both, "builtin::exists") == "builtin::exists"  # pyright: ignore[reportArgumentType]
+    assert problem_name(both, "'builtin::exists'") == "'builtin::exists'"  # pyright: ignore[reportArgumentType]
+    assert problem_name(both, declared_predicates(["pred 'builtin::exists'(x)."])[0]) == (
+        "'builtin::exists'"
+    )  # pyright: ignore[reportArgumentType]
+    assert problem_name(both, declared_predicates(["pred default(x)."])[0]) == "default"  # pyright: ignore[reportArgumentType]
 
     only_first = SimpleNamespace(queries={"'a b'": 1}, unsupported={})
     with pytest.raises(ValueError, match="No predicate named"):
@@ -96,7 +112,8 @@ def test_quoted_predicate_resolution_never_collides_with_serialized_names():
     # Explicit quoted selector still resolves "'a b'" -> 'a b' when no "'a b'" predicate exists.
     assert problem_name(only_first, "'a b'") == "'a b'"  # pyright: ignore[reportArgumentType]
 
-    # HTTP read_matches: automatic selection matches '\'a b\'' (empty), not "'a b'" (true).
+    # HTTP read_matches: automatic selection matches '\'a b\'' (empty), not "'a b'" (true),
+    # and qualified builtin::exists stays distinct from quoted 'builtin::exists'.
     model_both = {
         "concreteness": "partial",
         "nodes": [{"name": "keys", "simpleName": "keys", "kind": "default"}],
@@ -115,11 +132,34 @@ def test_quoted_predicate_resolution_never_collides_with_serialized_names():
                 "detail": {"type": "pred", "kind": "defined"},
                 "parameterNames": ["f"],
             },
+            {
+                "name": "builtin::exists",
+                "simpleName": "exists",
+                "arity": 1,
+                "detail": {"type": "pred", "kind": "base"},
+                "parameterNames": ["n"],
+            },
+            {
+                "name": "'builtin::exists'",
+                "simpleName": "'builtin::exists'",
+                "arity": 1,
+                "detail": {"type": "pred", "kind": "defined"},
+                "parameterNames": ["f"],
+            },
         ],
-        "partialInterpretation": {"'a b'": [[0, "true"]], r"'\'a b\''": []},
+        "partialInterpretation": {
+            "'a b'": [[0, "true"]],
+            r"'\'a b\''": [],
+            "builtin::exists": [[0, "true"]],
+            "'builtin::exists'": [],
+        },
     }
 
-    def run_http(model_json: dict) -> pf.QueryResult:
+    def run_http(
+        model_json: dict,
+        rules: list[str] | None = None,
+        select: list[str] | None = None,
+    ) -> pf.QueryResult:
         body = sse({"result": "success", "value": {"issues": [], "json": model_json}})
         recorder = Recorder(lambda _: sse_response(body))
         client = pf.Refinery(
@@ -128,10 +168,20 @@ def test_quoted_predicate_resolution_never_collides_with_serialized_names():
         return metamodel().query(
             [uncertain_graph()],
             client,
-            [r"pred '\u0027a b\u0027'(File f) <-> File(f), !File(f)."],
+            rules or [r"pred '\u0027a b\u0027'(File f) <-> File(f), !File(f)."],
+            select=select,
         )
 
     assert run_http(model_both).matches == []
+    assert [m.node_names for m in run_http(model_both, select=["builtin::exists"]).matches] == [
+        ("keys",)
+    ]
+    assert (
+        run_http(
+            model_both, rules=["pred 'builtin::exists'(File f) <-> File(f), !File(f)."]
+        ).matches
+        == []
+    )
 
     model_only_first = {
         **model_both,

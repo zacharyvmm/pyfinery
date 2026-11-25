@@ -61,8 +61,8 @@ class AttributeFeature:
         return self.data_type
 
     @property
-    def kind(self) -> Literal["ref"]:
-        return "ref"
+    def kind(self) -> Literal["refers"]:
+        return "refers"
 
     @property
     def opposite(self) -> None:
@@ -93,8 +93,8 @@ class EnumFeature:
     upper: int | None
 
     @property
-    def kind(self) -> Literal["ref"]:
-        return "ref"
+    def kind(self) -> Literal["refers"]:
+        return "refers"
 
     @property
     def opposite(self) -> None:

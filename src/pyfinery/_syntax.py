@@ -58,6 +58,11 @@ _KEYWORDS = frozenset(
 )
 
 
+def is_plain_id(name: str) -> bool:
+    """Whether ``name`` is a single unquoted ASCII identifier token (no quotes or ``::``)."""
+    return _ID.match(name) is not None
+
+
 def quote_id(name: str) -> str:
     """Render ``name`` as a Refinery identifier, quoting it if necessary."""
     if _ID.match(name) and name not in _KEYWORDS:

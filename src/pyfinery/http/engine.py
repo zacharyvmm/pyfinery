@@ -30,7 +30,7 @@ from .._results import (
     resolve_predicate,
 )
 from .._schema import Schema
-from .._syntax import quote_id, unquote_id
+from .._syntax import quote_id
 from ..errors import RefineryError, RefineryTimeoutError
 from .client import AsyncRefinery, Refinery
 from .models import JsonOutput, JsonOutputFormat, OutputFormats, SourceOutputFormat
@@ -186,10 +186,10 @@ def read_matches(
     by_name = graph.objects_by_name()
     node_names = _node_names(model, by_name)
     exists = {node.name: node.exists for node in graph.nodes}
-    by_decoded = {unquote_id(r.name): r for r in model.relations}
+    relations = {r.name: r for r in model.relations}
     matches = []
     for predicate in predicates:
-        relation = resolve_predicate(predicate, by_decoded)
+        relation = resolve_predicate(predicate, relations)
         if relation is None:
             raise ValueError(f"Refinery returned no relation named {str(predicate)!r}")
         for raw in model.partial_interpretation.get(relation.name, []):
