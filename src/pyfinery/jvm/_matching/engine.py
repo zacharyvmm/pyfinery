@@ -39,8 +39,8 @@ class JvmEngine(Engine):
 
     :meth:`query_graph` matches complete graphs only: an object that may not
     exist, or a fact that only may hold, raises
-    :class:`~pyfinery.jvm.UnsupportedRuleError`; use a Refinery client or the
-    bits engine to reason about what may hold.
+    :class:`~pyfinery.jvm.UnsupportedRuleError`; use a Refinery client to
+    reason about what may hold.
     """
 
     def validate_graph(

@@ -308,9 +308,6 @@ class Metamodel:
         or subclass memberships) while keeping uncertainty: objects whose
         ``exists`` is ``"unknown"`` and :class:`Predicate` facts that are
         ``"unknown"`` make the matches that depend on them ``"unknown"``.
-
-        Pass a :class:`~pyfinery.bits.BitsEngine` instead of a client to
-        evaluate the rules in Python, without a server (see :mod:`pyfinery.bits`).
         """
         found = query_engine(refinery, self._problems())
         rules, predicates = list(rules), list(predicates)
@@ -381,9 +378,9 @@ class Metamodel:
         given, has an iterable of predicates per graph, given to that graph too.
         Each graph is its own closed world, as if queried alone.
 
-        A :class:`~pyfinery.bits.BitsEngine` reads the rules once, and evaluates
-        them on graphs of about the same size at once; other engines query the
-        graphs one at a time. A graph that :meth:`query` would raise for raises
+        An engine that evaluates many graphs at once (a
+        :class:`~pyfinery._engines.BatchQueryEngine`) is given them all; other
+        engines query the graphs one at a time. A graph that :meth:`query` would raise for raises
         here, the first in order; with ``return_exceptions=True``, its exception
         is in the list in its place, and the other graphs are answered.
         """
