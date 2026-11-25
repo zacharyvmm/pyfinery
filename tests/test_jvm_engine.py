@@ -645,7 +645,7 @@ def test_quoted_feature_and_predicate_names_match():
             select=["hit"],
             predicates=[pred],
         )
-        print(json.dumps([list(m.node_names) for m in result.matches]))
+        print(json.dumps([[n.name for n in m.nodes] for m in result.matches]))
         """
     )
     assert out == [["b", "i"]]
