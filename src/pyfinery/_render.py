@@ -124,7 +124,7 @@ def render_facts(schema: Schema, graph: Graph, *, canonical_opposites: bool = Fa
                         literal = attribute_literal(value.value, feature.data_type)
                         lines.append(f"{symbol}({name}): {literal}.")
                 case EnumFeature():
-                    literal = _enum_literal(feature.target, value.value)
+                    literal = enum_literal(feature.target, value.value)
                     lines.append(f"{prefix}{symbol}({name}, {literal}).")
                 case ReferenceFeature():
                     if target is None:
@@ -163,7 +163,7 @@ def _declare_feature(feature: Feature) -> str:
     return f"{prefix}{target}{bounds} {name}{opposite}"
 
 
-def _enum_literal(enum_type: EnumLike, value: Any) -> str:
+def enum_literal(enum_type: EnumLike, value: Any) -> str:
     """The Refinery name of an enum value, e.g. ``Color::red``."""
     member = value if isinstance(enum_type, LiteralEnum) else value.name
     return f"{class_name(enum_type)}::{quote_id(member)}"

@@ -50,14 +50,14 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from ..._mapping import AttributeType, Catalogue, attribute_type
 from ..._options import Predicate
 from ..._render import _declare_predicate, render_metamodel
 from ..._results import ViolationKind
-from ..._schema import AttributeFeature, Schema, class_name
+from ..._schema import AttributeFeature, AttributeType, Schema, class_name
 from ..._syntax import quote_id
 from ...errors import InvalidProblemError
 from .classes import java
+from .mapping import Catalogue
 from .structure import CONTAINS, INVALID_CONTAINER, Check, structure
 
 NODE = "builtin::node"
@@ -380,7 +380,9 @@ class CompiledProblem:
         j = java()
         name = self._attribute_names[str(function.name())]
         if name not in self.symbols:
-            self.attributes[name] = attribute_type(self.catalogue.features[name])
+            feature = self.catalogue.features[name]
+            assert isinstance(feature, AttributeFeature)
+            self.attributes[name] = feature.data_type
             domain = function.abstractDomain()
             self.symbols[name] = j.Symbol.of(name, int(function.arity()), domain.abstractType())
         return self.symbols[name]
