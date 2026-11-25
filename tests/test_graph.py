@@ -93,6 +93,48 @@ def test_unquote_id_reads_each_escape_once():
     assert unquote_id("plain") == "plain"
 
 
+def test_unquote_id_decodes_xtext_escapes():
+    assert unquote_id(r"'\u0061'") == "a"
+    assert unquote_id(r"'\\u0061'") == r"\u0061"
+    assert unquote_id(r"'\t\n\r\b\f\"\'\\'") == "\t\n\r\b\f\"'\\"
+    assert unquote_id(r"'\uD83D\uDE00'") == "\U0001f600"
+
+
+def test_feature_union_supports_runtime_isinstance_and_compat_accessors():
+    from enum import Enum
+
+    from pydantic import BaseModel
+
+    from pyfinery.graph import AttributeFeature, EnumFeature, Feature, ReferenceFeature
+
+    class Color(Enum):
+        RED = "red"
+
+    class Leaf(BaseModel):
+        value: int
+
+    class Root(BaseModel):
+        count: int
+        color: Color
+        leaf: Leaf
+
+    mm = Metamodel(Root)
+    by_name = {f.name: f for f in mm.features[Root]}
+    assert all(isinstance(f, Feature) for f in by_name.values())
+
+    count = by_name["count"]
+    assert isinstance(count, AttributeFeature)
+    assert count.target == "int" and count.is_attribute and not count.is_enum
+
+    color = by_name["color"]
+    assert isinstance(color, EnumFeature)
+    assert color.target is Color and not color.is_attribute and color.is_enum
+
+    leaf = by_name["leaf"]
+    assert isinstance(leaf, ReferenceFeature)
+    assert leaf.target is Leaf and not leaf.is_attribute and not leaf.is_enum
+
+
 def test_generated_names_avoid_explicit_ids():
     taken = Dir(name="filesystem_1")
     graph = build_graph(metamodel().schema, [taken, Filesystem(root=Dir(name="x"))])

@@ -56,6 +56,18 @@ class AttributeFeature:
     lower: int
     upper: int | None
 
+    @property
+    def target(self) -> AttributeType:
+        return self.data_type
+
+    @property
+    def is_attribute(self) -> Literal[True]:
+        return True
+
+    @property
+    def is_enum(self) -> Literal[False]:
+        return False
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class EnumFeature:
@@ -67,6 +79,14 @@ class EnumFeature:
     many: bool
     lower: int
     upper: int | None
+
+    @property
+    def is_attribute(self) -> Literal[False]:
+        return False
+
+    @property
+    def is_enum(self) -> Literal[True]:
+        return True
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -83,8 +103,17 @@ class ReferenceFeature:
     opposite: str | None = None
     by_key: bool = False
 
+    @property
+    def is_attribute(self) -> Literal[False]:
+        return False
 
-type Feature = AttributeFeature | EnumFeature | ReferenceFeature
+    @property
+    def is_enum(self) -> Literal[False]:
+        return False
+
+
+# Runtime union so callers can check ``isinstance(feature, Feature)``.
+Feature = AttributeFeature | EnumFeature | ReferenceFeature
 
 
 @dataclass(slots=True)

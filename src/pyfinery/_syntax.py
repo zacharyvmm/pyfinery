@@ -66,15 +66,58 @@ def quote_id(name: str) -> str:
     return f"'{escaped}'"
 
 
-_ESCAPE = re.compile(r"\\(.)", re.DOTALL)
+_SIMPLE_ESCAPES = {
+    "b": "\b",
+    "t": "\t",
+    "n": "\n",
+    "f": "\f",
+    "r": "\r",
+    '"': '"',
+    "'": "'",
+    "\\": "\\",
+}
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 
 
 def unquote_id(name: str) -> str:
     """The name a Refinery identifier stands for: a quoted one (``'odd name'``) without its
-    quotes and backslash escapes, any other as it is."""
+    quotes and Xtext/Java escapes (``\\b``, ``\\t``, ``\\n``, ``\\f``, ``\\r``, ``\\"``,
+    ``\\'``, ``\\\\``, ``\\uXXXX``), any other as it is."""
     if len(name) < 2 or name[0] != "'" or name[-1] != "'":
         return name
-    return _ESCAPE.sub(lambda m: m.group(1), name[1:-1])
+    body = name[1:-1]
+    out: list[str] = []
+    i = 0
+    length = len(body)
+    while i < length:
+        ch = body[i]
+        if ch != "\\" or i + 1 >= length:
+            out.append(ch)
+            i += 1
+            continue
+        esc = body[i + 1]
+        if esc in _SIMPLE_ESCAPES:
+            out.append(_SIMPLE_ESCAPES[esc])
+            i += 2
+        elif esc == "u" and i + 6 <= length and all(c in _HEX_DIGITS for c in body[i + 2 : i + 6]):
+            code = int(body[i + 2 : i + 6], 16)
+            i += 6
+            # Combine a UTF-16 surrogate pair written as two adjacent \uXXXX escapes.
+            if (
+                0xD800 <= code <= 0xDBFF
+                and i + 6 <= length
+                and body[i : i + 2] == "\\u"
+                and all(c in _HEX_DIGITS for c in body[i + 2 : i + 6])
+            ):
+                low = int(body[i + 2 : i + 6], 16)
+                if 0xDC00 <= low <= 0xDFFF:
+                    code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00)
+                    i += 6
+            out.append(chr(code))
+        else:
+            out.append(esc)
+            i += 2
+    return "".join(out)
 
 
 def encodable(text: str) -> bool:

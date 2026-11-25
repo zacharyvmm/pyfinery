@@ -100,7 +100,8 @@ def require_supported(problem: CompiledProblem, predicates: Sequence[str] = ()) 
 
 def problem_name(problem: CompiledProblem, name: str) -> str:
     """The name of the predicate ``name`` (as declared, or as selected) in ``problem``."""
-    for candidate in (name, quote_id(name), unquote_id(name)):
+    unquoted = unquote_id(name)
+    for candidate in (name, quote_id(name), unquoted, quote_id(unquoted)):
         if candidate in problem.queries or candidate in problem.unsupported:
             return candidate
     raise ValueError(f"No predicate named {name!r} to report")
