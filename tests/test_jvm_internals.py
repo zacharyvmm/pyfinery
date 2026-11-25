@@ -109,7 +109,7 @@ def test_error_queries_follow_the_relations_and_list_each_check_once():
 
 
 class FakeTrace:
-    """A problem trace that knows relations under their quoted names only."""
+    """A problem trace that strips Refinery quotes from every segment of a relation name."""
 
     class Partial:
         def __init__(self, name: str) -> None:
@@ -119,16 +119,51 @@ class FakeTrace:
             return self._name
 
     def getPartialRelation(self, name: str) -> Partial:  # noqa: N802 (Refinery's name)
-        if not name.startswith("'"):
+        if "'" not in name:
             raise LookupError(name)  # as a Java exception would be
-        return self.Partial(name.strip("'"))
+        return self.Partial("::".join(part.strip("'") for part in name.split("::")))
 
 
 def test_symbols_are_also_found_under_rendered_names():
-    symbols = {"my class": "symbol"}
-    named = _compile._with_rendered_names(symbols, FakeTrace(), ["'my class'", "'gone'", "x"])
-    assert named == {"my class": "symbol", "'my class'": "symbol"}
-    assert symbols == {"my class": "symbol"}  # not changed
+    from pydantic import BaseModel
+
+    from pyfinery import Metamodel, Predicate
+
+    class Item(BaseModel):
+        pass
+
+    class Box(BaseModel):
+        default: Item | None = None
+
+    mm = Metamodel(Box)
+    catalogue = Catalogue(mm.schema)
+    predicates = [Predicate("odd name", (Box,), lambda _: True)]
+    written = _compile._written_relations(catalogue, predicates)
+    assert "Box::'default'" in written
+    assert "'odd name'" in written
+
+    symbols = {"Box::default": "feature-symbol", "odd name": "pred-symbol"}
+    named = _compile._with_rendered_names(symbols, FakeTrace(), written)
+    assert named["Box::'default'"] == "feature-symbol"
+    assert named["'odd name'"] == "pred-symbol"
+    assert symbols == {"Box::default": "feature-symbol", "odd name": "pred-symbol"}
+
+
+def test_checkpoint_preserves_model_snapshot_accessors():
+    from pyfinery.jvm import Checkpoint
+
+    snapshot = ModelSnapshot(
+        version=3,
+        facts=frozenset({("Dir", (5,), True)}),
+        known={"a": 5},
+        next_id=6,
+        nodes_by_id={},
+    )
+    checkpoint = Checkpoint(model=snapshot, roots={}, predicates=(), reported={})
+    assert checkpoint.version == 3
+    assert checkpoint.facts == frozenset({("Dir", (5,), True)})
+    assert checkpoint.known == {"a": 5}
+    assert checkpoint.next_id == 6
 
 
 class FakeModel:

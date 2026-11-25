@@ -619,3 +619,33 @@ def test_a_query_evaluates_each_predicate_once():
         """
     )
     assert out == {"matches": [["home"]], "calls": ["home"]}
+
+
+def test_quoted_feature_and_predicate_names_match():
+    out = run(
+        """
+        from pydantic import BaseModel
+        from pyfinery import Metamodel, Predicate
+        from pyfinery.jvm import JvmEngine
+
+        class Item(BaseModel):
+            name: str
+
+        class Box(BaseModel):
+            name: str
+            default: Item | None = None
+
+        mm = Metamodel(Box)
+        box = Box(name="b", default=Item(name="i"))
+        pred = Predicate("odd name", (Box,), evaluate=lambda b: b.name == "b")
+        result = mm.query(
+            [box],
+            JvmEngine(),
+            ["pred hit(Box b, Item i) <-> 'odd name'(b), Box::'default'(b, i)."],
+            select=["hit"],
+            predicates=[pred],
+        )
+        print(json.dumps([list(m.node_names) for m in result.matches]))
+        """
+    )
+    assert out == [["b", "i"]]

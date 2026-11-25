@@ -35,7 +35,7 @@ from .._render import predicate_facts
 from .._results import ValidationReport, Violation, reference_errors
 from .compile import compiled
 from .engine import require_supported
-from .model import ModelSnapshot, PlainModel
+from .model import Key, ModelSnapshot, PlainModel
 
 if TYPE_CHECKING:
     from ..graph import Metamodel
@@ -64,6 +64,22 @@ class Checkpoint:
     roots: dict[int, BaseModel]
     predicates: tuple[Predicate, ...]
     reported: dict[ViolationKey, Violation]
+
+    @property
+    def version(self) -> Any:
+        return self.model.version
+
+    @property
+    def facts(self) -> frozenset[Key]:
+        return self.model.facts
+
+    @property
+    def known(self) -> dict[Any, int]:
+        return self.model.known
+
+    @property
+    def next_id(self) -> int:
+        return self.model.next_id
 
 
 class Session:
