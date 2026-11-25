@@ -7,13 +7,13 @@ from collections.abc import Hashable, Iterable
 from typing import Any
 
 from ..._instances import Graph, Node
-from ..._mapping import NodeIds, facts
 from ..._options import Predicate
 from ..._results import Match, Violation, ViolationKind
 from ..._schema import AttributeFeature, ReferenceFeature
 from ..._syntax import quote_id
 from .classes import java
 from .compile import CONTAINED, CONTAINER, NODE, CompiledProblem
+from .mapping import graph_facts
 from .values import NO_VALUE, to_java
 
 type PredicateFact = tuple[Predicate, tuple[Node, ...], str]
@@ -45,11 +45,13 @@ class PlainModel:
         self._class_names = _class_memberships(problem)
         self.facts: set[Key] = set()
         """What the model holds."""
-        self.ids = self._new_ids()
-        """The ids of the nodes of the graph last synchronized."""
         self.known: dict[Hashable, int] = {}
         """Node ids by node identity, of every node the model has held: an id is never reused."""
         self.next_id = problem.reserved_ids
+        """The id the next new node gets: past the ids of the constants."""
+        self._constant_names = {node_id: name for name, node_id in problem.constants.items()}
+        self._nodes_by_id: dict[int, Node] = {}
+        """The nodes of the graph last synchronized, by id."""
         self.graph: Graph | None = None
         constants: set[Key] = set()
         for name, node_id in problem.constants.items():
@@ -65,29 +67,29 @@ class PlainModel:
     def sync(self, graph: Graph, predicate_facts: Iterable[PredicateFact] = ()) -> int:
         """Make the model hold the facts of ``graph`` and ``predicate_facts`` (those that
         certainly hold); return how many facts changed."""
-        ids = self._new_ids()
+        node_ids: dict[Node, int] = {}
         for node in graph.nodes:
             node_id = self.known.get(node.identity)
             if node_id is None:
                 node_id = self.known[node.identity] = self.next_id
                 self.next_id += 1
-            ids.put(node, node_id)
+            node_ids[node] = node_id
         wanted = set(self._constants)
-        wanted.update(self._graph_facts(graph, ids))
+        wanted.update(self._graph_facts(graph, node_ids))
         for predicate, nodes, answer in predicate_facts:
             if answer == "true":
-                wanted.add((quote_id(predicate.name), tuple(ids.id_of(n) for n in nodes), True))
+                wanted.add((quote_id(predicate.name), tuple(node_ids[n] for n in nodes), True))
         added, removed = wanted - self.facts, self.facts - wanted
         self._write(added, removed)
         self.facts = wanted
-        self.ids = ids
+        self._nodes_by_id = {node_id: node for node, node_id in node_ids.items()}
         self.graph = graph
         return len(added) + len(removed)
 
-    def _graph_facts(self, graph: Graph, ids: NodeIds) -> Iterable[Key]:
+    def _graph_facts(self, graph: Graph, node_ids: dict[Node, int]) -> Iterable[Key]:
         catalogue, read = self.problem.catalogue, self.problem.attributes
         valued = set()
-        for fact in facts(catalogue, graph, ids):
+        for fact in graph_facts(catalogue, graph, node_ids, self.problem.constants):
             feature = catalogue.features.get(fact.relation)
             if not isinstance(feature, AttributeFeature) or fact.relation in read:
                 yield fact.relation, fact.nodes, fact.value  # not an attribute no rule reads
@@ -95,11 +97,11 @@ class PlainModel:
         for name in read:  # unknown for the objects of the attribute's class without a value
             owner = catalogue.features[name].owner
             for node in graph.nodes:
-                key = (ids.id_of(node),)
+                key = (node_ids[node],)
                 if isinstance(node.obj, owner) and (name, key) not in valued:
                     yield name, key, NO_VALUE
         for node in graph.nodes:
-            node_id = (ids.id_of(node),)
+            node_id = (node_ids[node],)
             yield NODE, node_id, True
             for name in self._class_names.get(type(node.obj), ()):
                 yield name, node_id, True
@@ -129,12 +131,6 @@ class PlainModel:
                 int(symbol.arity()),
             )
         return found
-
-    def _new_ids(self) -> NodeIds:
-        ids = NodeIds(self.problem.reserved_ids)
-        for name, node_id in self.problem.constants.items():
-            ids.constant(name, node_id)
-        return ids
 
     # -- reading ---------------------------------------------------------------------------------
 
@@ -174,12 +170,12 @@ class PlainModel:
         """The names and Python objects of the nodes of ``key`` (``None`` for a constant)."""
         names, nodes = [], []
         for node_id in key:
-            constant = self.ids.constant_name(node_id)
+            constant = self._constant_names.get(node_id)
             if constant is not None:
                 names.append(constant)
                 nodes.append(None)
             else:
-                node = self.ids.node(node_id)
+                node = self._nodes_by_id[node_id]
                 names.append(node.name)
                 nodes.append(node.obj)
         return tuple(names), tuple(nodes)

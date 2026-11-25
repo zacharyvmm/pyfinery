@@ -14,9 +14,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from ..._mapping import Catalogue
 from ..._results import ViolationKind
 from ..._schema import AttributeFeature, Feature, ReferenceFeature, Schema, class_name
+from .mapping import Catalogue
 
 CONTAINS = "pyfinery_contains"
 """The containment links: every containment reference, as one relation."""

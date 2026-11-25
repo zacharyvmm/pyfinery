@@ -8,8 +8,8 @@ import pytest
 from pydantic import Field
 
 from pyfinery import Container, Contains, Metamodel, Ref, RefineryNode
-from pyfinery._mapping import Catalogue
 from pyfinery.jvm._matching import cache as _cache
+from pyfinery.jvm._matching.mapping import Catalogue
 from pyfinery.jvm._matching.structure import (
     CONTAINS,
     INVALID_CONTAINER,

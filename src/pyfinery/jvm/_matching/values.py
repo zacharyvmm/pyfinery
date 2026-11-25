@@ -14,7 +14,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from ..._mapping import AttributeType
+from ..._schema import AttributeType
 from .classes import java
 
 NO_VALUE = object()
@@ -23,7 +23,7 @@ NO_VALUE = object()
 _DOMAINS = {"boolean": "TruthValue", "int": "IntInterval", "real": "RealInterval"}
 
 
-def to_java(data_type: AttributeType, value: object) -> Any:
+def to_java(data_type: AttributeType, value: Any) -> Any:
     """The exact Refinery value of ``value``, an attribute of type ``data_type``."""
     j = java()
     if value is NO_VALUE:
