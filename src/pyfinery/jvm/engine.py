@@ -19,15 +19,14 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 
-from ..._engines import Engine
-from ..._instances import Graph
-from ..._options import Predicate
-from ..._render import predicate_facts
-from ..._results import PredicateIndex, QueryResult, ValidationReport, reference_errors
-from ..._schema import Schema
-from ..errors import UnsupportedRuleError
-from .cache import compiled
-from .compile import CompiledProblem
+from .._engines import Engine
+from .._instances import Graph
+from .._options import Predicate
+from .._render import predicate_facts
+from .._results import PredicateIndex, QueryResult, ValidationReport, reference_errors
+from .._schema import Schema
+from .compile import CompiledProblem, compiled
+from .errors import UnsupportedRuleError
 from .model import PlainModel, PredicateFact
 
 __all__ = ["JvmEngine"]

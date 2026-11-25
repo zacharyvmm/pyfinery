@@ -22,9 +22,9 @@ as it changes, keep it in a :class:`Session`.
 
 from __future__ import annotations
 
-from ._matching.engine import JvmEngine
-from ._matching.session import Changes, Checkpoint, Session
-from ._runtime import (
+from .engine import JvmEngine
+from .errors import JvmError, UnsupportedRuleError
+from .runtime import (
     MINIMUM_VERSION,
     Settings,
     Status,
@@ -36,7 +36,7 @@ from ._runtime import (
     started,
     status,
 )
-from .errors import JvmError, UnsupportedRuleError
+from .session import Changes, Checkpoint, Session
 
 __all__ = [
     "Changes",

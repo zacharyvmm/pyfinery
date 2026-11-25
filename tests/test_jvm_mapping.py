@@ -12,7 +12,7 @@ from pyfinery._instances import Graph, Node, build_graph
 from pyfinery._options import LogicValue
 from pyfinery._render import render_facts
 from pyfinery._schema import EnumFeature, Feature
-from pyfinery.jvm._matching.mapping import Catalogue, Fact, graph_facts
+from pyfinery.jvm.mapping import Catalogue, Fact, graph_facts
 
 from . import deployment_models, generic_models, graph_models, nested_models
 

@@ -3,7 +3,7 @@
 A process has one JVM, and its classpath is fixed when it starts, so what it can
 do (validation and queries; generation too, if configured) is decided by
 :func:`configure` before :func:`start`. Nothing here knows Refinery's
-semantics; :mod:`pyfinery.jvm._matching` uses the JVM this starts.
+semantics; the matching modules of :mod:`pyfinery.jvm` use the JVM this starts.
 """
 
 from __future__ import annotations
@@ -14,10 +14,9 @@ import threading
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
-from ..errors import JvmError
+from .errors import JvmError
 from .jars import FEATURES, Feature, default_cache_dir, fetch, host_platform, manifest
 from .jdk import MINIMUM_VERSION, Jdk, find_jdk
 from .setup import compile_helpers, ortools_libraries, unpack_natives
@@ -61,6 +60,16 @@ class Settings:
 
 
 @dataclass(frozen=True, slots=True)
+class JvmHelpers:
+    """pyfinery's helper classes in the running JVM (compiled from ``java/``)."""
+
+    Bulk: Any
+    """Reads and writes many tuples of a model in one call."""
+    Natives: Any
+    """Loads OR-tools' native libraries."""
+
+
+@dataclass(frozen=True, slots=True)
 class Status:
     """The running JVM: what it was started with and how long that took."""
 
@@ -81,7 +90,7 @@ class Status:
 _lock = threading.RLock()
 _settings = Settings()
 _status: Status | None = None
-_helpers: dict[str, Any] = {}
+_helpers: JvmHelpers | None = None
 
 
 def configure(
@@ -229,15 +238,18 @@ def start() -> Status:
         return _status
 
 
-def helpers() -> SimpleNamespace:
+def helpers() -> JvmHelpers:
     """The helper classes, ``Bulk`` and ``Natives``, starting the JVM if it hasn't started."""
+    global _helpers
     start()
-    if not _helpers:
-        jpype = _jpype()
-        _helpers.update(
-            Bulk=jpype.JClass("pyfinery.jvm.Bulk"), Natives=jpype.JClass("pyfinery.jvm.Natives")
-        )
-    return SimpleNamespace(**_helpers)
+    with _lock:
+        if _helpers is None:
+            jpype = _jpype()
+            _helpers = JvmHelpers(
+                Bulk=jpype.JClass("pyfinery.jvm.Bulk"),
+                Natives=jpype.JClass("pyfinery.jvm.Natives"),
+            )
+        return _helpers
 
 
 def require(feature: Feature) -> Status:

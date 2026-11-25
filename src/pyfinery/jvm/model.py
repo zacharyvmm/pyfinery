@@ -1,20 +1,30 @@
 """One plain Refinery model of a :class:`CompiledProblem`: a graph's facts written into it as
-the difference from what it holds, its violations and matches read back."""
+the difference from what it holds, its violations and matches read back.
+
+Refinery keeps the value of an attribute in an abstract domain: an interval
+of integers or of reals, a four-valued truth value, a string that may be
+unknown. A plain model holds each value as the exact element of its domain,
+``7`` as the interval ``[7, 7]``, so the comparisons and arithmetic Refinery's
+compiler emits work on it unchanged, and a check holds when it is certainly
+true. An attribute with no value reads as the domain's ``unknown``, of which
+no check is certain.
+"""
 
 from __future__ import annotations
 
+import math
 from collections.abc import Hashable, Iterable
+from dataclasses import dataclass
 from typing import Any
 
-from ..._instances import Graph, Node
-from ..._options import Predicate
-from ..._results import Match, Violation, ViolationKind
-from ..._schema import AttributeFeature, ReferenceFeature
-from ..._syntax import quote_id
+from .._instances import Graph, Node
+from .._options import Predicate
+from .._results import Match, Violation, ViolationKind
+from .._schema import AttributeFeature, AttributeType, ReferenceFeature
+from .._syntax import quote_id
 from .classes import java
 from .compile import CONTAINED, CONTAINER, NODE, CompiledProblem
 from .mapping import graph_facts
-from .values import NO_VALUE, to_java
 
 type PredicateFact = tuple[Predicate, tuple[Node, ...], str]
 """A tuple of a :class:`~pyfinery.Predicate` and its logic value, as
@@ -24,12 +34,49 @@ type Key = tuple[str, tuple[int, ...], object]
 """A fact of a plain model: a relation, a tuple of node ids, and its value there: ``True`` (it
 holds), or the Python value of an attribute."""
 
+NO_VALUE = object()
+"""The value of an attribute an object of its class has no value for: unknown."""
+
+_DOMAINS = {"boolean": "TruthValue", "int": "IntInterval", "real": "RealInterval"}
+
+
+def to_java(data_type: AttributeType, value: Any) -> Any:
+    """The exact Refinery value of ``value``, an attribute of type ``data_type``."""
+    j = java()
+    if value is NO_VALUE:
+        return getattr(j, _DOMAINS.get(data_type, "StringValue")).UNKNOWN
+    match data_type:
+        case "boolean":
+            return j.TruthValue.TRUE if value else j.TruthValue.FALSE
+        case "int":
+            return j.IntInterval.of(j.BigInteger(str(int(value))))
+        case "real":
+            number = float(value)
+            if not math.isfinite(number):
+                raise ValueError(f"Refinery cannot represent the real value {number!r}")
+            return j.RealInterval.of(repr(number))
+        case _:
+            return j.StringValue.of(str(value))
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ModelSnapshot:
+    """A state of a :class:`PlainModel` to :meth:`~PlainModel.restore`: the store's version, and
+    what the Python side knows of it."""
+
+    version: Any
+    """The version :meth:`PlainModel.snapshot` committed."""
+    facts: frozenset[Key]
+    known: dict[Hashable, int]
+    next_id: int
+    nodes_by_id: dict[int, Node]
+
 
 class PlainModel:
     """A model of ``problem``'s store, which :meth:`sync` keeps equal to a graph."""
 
     def __init__(self, problem: CompiledProblem) -> None:
-        from .._runtime import _jpype, helpers
+        from .runtime import _jpype, helpers
 
         j = java()
         self.problem = problem
@@ -52,7 +99,6 @@ class PlainModel:
         self._constant_names = {node_id: name for name, node_id in problem.constants.items()}
         self._nodes_by_id: dict[int, Node] = {}
         """The nodes of the graph last synchronized, by id."""
-        self.graph: Graph | None = None
         constants: set[Key] = set()
         for name, node_id in problem.constants.items():
             enum_type, _ = problem.catalogue.literals[name]
@@ -61,8 +107,6 @@ class PlainModel:
         self._constants = constants
         self._write(constants, set())
         self.facts = set(constants)
-
-    # -- writing ---------------------------------------------------------------------------------
 
     def sync(self, graph: Graph, predicate_facts: Iterable[PredicateFact] = ()) -> int:
         """Make the model hold the facts of ``graph`` and ``predicate_facts`` (those that
@@ -83,7 +127,6 @@ class PlainModel:
         self._write(added, removed)
         self.facts = wanted
         self._nodes_by_id = {node_id: node for node, node_id in node_ids.items()}
-        self.graph = graph
         return len(added) + len(removed)
 
     def _graph_facts(self, graph: Graph, node_ids: dict[Node, int]) -> Iterable[Key]:
@@ -132,8 +175,6 @@ class PlainModel:
             )
         return found
 
-    # -- reading ---------------------------------------------------------------------------------
-
     def tuples(self, predicate: str) -> list[tuple[int, ...]]:
         """The tuples of ``predicate``, as node ids, sorted."""
         self._queries.flushChanges()
@@ -180,13 +221,24 @@ class PlainModel:
                 nodes.append(node.obj)
         return tuple(names), tuple(nodes)
 
-    # -- versions ----------------------------------------------------------------------------------
+    def snapshot(self) -> ModelSnapshot:
+        """Commit the model, and return its state to :meth:`restore` later."""
+        return ModelSnapshot(
+            version=self.model.commit(),
+            facts=frozenset(self.facts),
+            known=dict(self.known),
+            next_id=self.next_id,
+            nodes_by_id=dict(self._nodes_by_id),
+        )
 
-    def commit(self) -> Any:
-        return self.model.commit()
-
-    def restore(self, version: Any) -> None:
-        self.model.restore(version)
+    def restore(self, snapshot: ModelSnapshot) -> None:
+        """Go back to ``snapshot``: the store's version, the facts, the node ids, and the nodes
+        :meth:`label` names."""
+        self.model.restore(snapshot.version)
+        self.facts = set(snapshot.facts)
+        self.known = dict(snapshot.known)
+        self.next_id = snapshot.next_id
+        self._nodes_by_id = dict(snapshot.nodes_by_id)
 
     def close(self) -> None:
         self.model.close()

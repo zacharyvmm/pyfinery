@@ -29,16 +29,16 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
-from ..._instances import build_graph
-from ..._options import Predicate
-from ..._render import predicate_facts
-from ..._results import ValidationReport, Violation, reference_errors
-from .cache import compiled
+from .._instances import build_graph
+from .._options import Predicate
+from .._render import predicate_facts
+from .._results import ValidationReport, Violation, reference_errors
+from .compile import compiled
 from .engine import require_supported
-from .model import Key, PlainModel
+from .model import ModelSnapshot, PlainModel
 
 if TYPE_CHECKING:
-    from ...graph import Metamodel
+    from ..graph import Metamodel
 
 __all__ = ["Changes", "Checkpoint", "Session"]
 
@@ -56,16 +56,13 @@ class Changes:
         return bool(self.added or self.removed)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class Checkpoint:
     """A state of a :class:`Session` to :meth:`~Session.rollback` to."""
 
-    version: Any
+    model: ModelSnapshot
     roots: dict[int, BaseModel]
     predicates: tuple[Predicate, ...]
-    facts: frozenset[Key]
-    known: dict[Any, int]
-    next_id: int
     reported: dict[ViolationKey, Violation]
 
 
@@ -95,8 +92,6 @@ class Session:
         self._reported: dict[ViolationKey, Violation] = {}
         self._closed = False
         self.add(*objects)
-
-    # -- the graph ---------------------------------------------------------------------------------
 
     @property
     def objects(self) -> list[BaseModel]:
@@ -129,8 +124,6 @@ class Session:
                 "session's; start another session to declare others"
             )
         self._predicates = new
-
-    # -- validating --------------------------------------------------------------------------------
 
     def validate(self) -> ValidationReport:
         """The constraints the graph violates now, as :meth:`~pyfinery.Metamodel.validate`
@@ -167,31 +160,21 @@ class Session:
         self._reported = keys
         return found
 
-    # -- undoing -----------------------------------------------------------------------------------
-
     def checkpoint(self) -> Checkpoint:
         """The session's state, to :meth:`rollback` to. Objects changed in place since are not
         changed back: only what the session holds is."""
         self._check_open()
-        model = self._model
         return Checkpoint(
-            model.commit(),
-            dict(self._roots),
-            self._predicates,
-            frozenset(model.facts),
-            dict(model.known),
-            model.next_id,
-            dict(self._reported),
+            model=self._model.snapshot(),
+            roots=dict(self._roots),
+            predicates=self._predicates,
+            reported=dict(self._reported),
         )
 
     def rollback(self, checkpoint: Checkpoint) -> None:
         """Go back to ``checkpoint``: the objects, predicates, model and reported violations."""
         self._check_open()
-        model = self._model
-        model.restore(checkpoint.version)
-        model.facts = set(checkpoint.facts)
-        model.known = dict(checkpoint.known)
-        model.next_id = checkpoint.next_id
+        self._model.restore(checkpoint.model)
         self._roots = dict(checkpoint.roots)
         self._predicates = checkpoint.predicates
         self._reported = dict(checkpoint.reported)
@@ -204,8 +187,6 @@ class Session:
             yield self
         finally:
             self.rollback(checkpoint)
-
-    # -- lifetime ----------------------------------------------------------------------------------
 
     def close(self) -> None:
         """Free the model; the session can't be used afterwards."""

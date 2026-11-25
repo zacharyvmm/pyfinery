@@ -11,13 +11,13 @@ from pathlib import Path
 
 import pytest
 
-import pyfinery.jvm._runtime as jvm  # where the JVM's state lives, to patch
+import pyfinery.jvm.runtime as jvm  # where the JVM's state lives, to patch
 from pyfinery.errors import RefineryError
-from pyfinery.jvm._runtime import jars as _jars
-from pyfinery.jvm._runtime import jdk as _java
-from pyfinery.jvm._runtime import setup as _setup
-from pyfinery.jvm._runtime.jars import Jar, Manifest
+from pyfinery.jvm import jars as _jars
+from pyfinery.jvm import jdk as _java
+from pyfinery.jvm import setup as _setup
 from pyfinery.jvm.errors import JvmError
+from pyfinery.jvm.jars import Jar, Manifest
 
 # -- finding the JDK ----------------------------------------------------------
 
@@ -374,19 +374,22 @@ def test_settings_cannot_change_once_started(fresh, monkeypatch, tmp_path):
         fresh.configure(generation=True)
 
 
-def test_generation_before_start_starts_with_it(fresh, monkeypatch):
+def test_generation_before_start_starts_with_it(fresh, monkeypatch, tmp_path):
+    jdk = _java.inspect_jdk(fake_jdk(tmp_path / "jdk"))
     seen = []
     monkeypatch.setattr(
         jvm,
         "start",
-        lambda: seen.append(jvm._settings) or jvm.Status(jvm._settings, None, None, ()),
+        lambda: seen.append(jvm._settings) or jvm.Status(jvm._settings, jdk, tmp_path, ()),
     )
     assert fresh.require("generation").generation
     assert seen[0].generation
 
 
 def test_generation_after_a_start_without_it(fresh, monkeypatch, tmp_path):
-    running = jvm.Status(jvm.Settings(), None, tmp_path, ())
+    running = jvm.Status(
+        jvm.Settings(), _java.inspect_jdk(fake_jdk(tmp_path / "jdk")), tmp_path, ()
+    )
     monkeypatch.setattr(jvm, "_status", running)
     monkeypatch.setattr(jvm, "start", lambda: running)
     assert fresh.require("validation") is running
