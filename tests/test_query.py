@@ -77,7 +77,7 @@ def testdeclared_predicates():
 def test_quoted_predicate_resolution_never_collides_with_serialized_names():
     from types import SimpleNamespace
 
-    from pyfinery.jvm._matching.engine import problem_name
+    from pyfinery.jvm.engine import problem_name
 
     # Metamodel declares 'a b' (key "'a b'"), query declares '\u0027a b\u0027' (key "'\'a b\''").
     declared = declared_predicates([r"pred '\u0027a b\u0027'(File f) <-> File(f), !File(f)."])

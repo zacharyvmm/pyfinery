@@ -12,7 +12,7 @@ import zipfile
 from importlib import resources
 from pathlib import Path
 
-from ..errors import JvmError
+from .errors import JvmError
 from .jars import Jar
 from .jdk import Jdk
 

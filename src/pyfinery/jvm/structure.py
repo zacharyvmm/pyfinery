@@ -14,8 +14,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from ..._results import ViolationKind
-from ..._schema import AttributeFeature, Feature, ReferenceFeature, Schema, class_name
+from .._results import ViolationKind
+from .._schema import AttributeFeature, Feature, ReferenceFeature, Schema, class_name
 from .mapping import Catalogue
 
 CONTAINS = "pyfinery_contains"

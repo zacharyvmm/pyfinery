@@ -8,9 +8,9 @@ import pytest
 from pydantic import Field
 
 from pyfinery import Container, Contains, Metamodel, Ref, RefineryNode
-from pyfinery.jvm._matching import cache as _cache
-from pyfinery.jvm._matching.mapping import Catalogue
-from pyfinery.jvm._matching.structure import (
+from pyfinery.jvm import compile as _compile
+from pyfinery.jvm.mapping import Catalogue
+from pyfinery.jvm.structure import (
     CONTAINS,
     INVALID_CONTAINER,
     Check,
@@ -153,7 +153,7 @@ def test_graph_models_structure():
     assert all(check.predicate in lines for check in found.checks)
 
 
-# -- the compile cache, with a stand-in for CompiledProblem ---------------------------------------
+# -- the compile cache, with a stand-in for compile_problem ------------------------------------
 
 
 class _Fake:
@@ -167,37 +167,37 @@ class _Fake:
 
 @pytest.fixture
 def fake_compile(monkeypatch):
-    monkeypatch.setattr(_cache, "CompiledProblem", _Fake)
+    monkeypatch.setattr(_compile, "compile_problem", _Fake)
     _Fake.made = 0
-    _cache.clear()
+    _compile.clear_compiled()
     yield _Fake
-    _cache.clear()
+    _compile.clear_compiled()
 
 
 def test_cache_reuses_and_evicts(fake_compile, monkeypatch):
     from pyfinery import Predicate
 
     schema = graph_models.metamodel().schema
-    first = _cache.compiled(schema, ["a"])
-    assert _cache.compiled(schema, ("a",)) is first  # any sequence of the same rules
-    assert _cache.compiled(schema, ["b"]) is not first
+    first = _compile.compiled(schema, ["a"])
+    assert _compile.compiled(schema, ("a",)) is first  # any sequence of the same rules
+    assert _compile.compiled(schema, ["b"]) is not first
     # Predicates count by name and parameters, not by their facts.
-    p1 = _cache.compiled(schema, ["a"], [Predicate("p", (graph_models.Dir,), tuples=[])])
-    p2 = _cache.compiled(
+    p1 = _compile.compiled(schema, ["a"], [Predicate("p", (graph_models.Dir,), tuples=[])])
+    p2 = _compile.compiled(
         schema, ["a"], [Predicate("p", (graph_models.Dir,), evaluate=lambda d: True)]
     )
     assert p1 is p2 and p1 is not first
     # Another schema object compiles anew.
-    assert _cache.compiled(graph_models.metamodel().schema, ["a"]) is not first
+    assert _compile.compiled(graph_models.metamodel().schema, ["a"]) is not first
     assert fake_compile.made == 4
 
-    monkeypatch.setattr(_cache, "SIZE", 2)
-    _cache.clear()
-    a = _cache.compiled(schema, ["a"])
-    _cache.compiled(schema, ["b"])
-    assert _cache.compiled(schema, ["a"]) is a  # now the most recently used
-    _cache.compiled(schema, ["c"])  # evicts b
-    assert _cache.compiled(schema, ["a"]) is a
+    monkeypatch.setattr(_compile, "CACHE_SIZE", 2)
+    _compile.clear_compiled()
+    a = _compile.compiled(schema, ["a"])
+    _compile.compiled(schema, ["b"])
+    assert _compile.compiled(schema, ["a"]) is a  # now the most recently used
+    _compile.compiled(schema, ["c"])  # evicts b
+    assert _compile.compiled(schema, ["a"]) is a
     made = fake_compile.made
-    _cache.compiled(schema, ["b"])
+    _compile.compiled(schema, ["b"])
     assert fake_compile.made == made + 1

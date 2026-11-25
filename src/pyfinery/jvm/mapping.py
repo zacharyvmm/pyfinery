@@ -16,9 +16,9 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from ..._instances import Graph, Node
-from ..._render import enum_literal, feature_symbol
-from ..._schema import (
+from .._instances import Graph, Node
+from .._render import enum_literal, feature_symbol
+from .._schema import (
     AttributeFeature,
     ClassLike,
     EnumFeature,
