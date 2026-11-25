@@ -13,6 +13,7 @@ import pytest
 import pyfinery as pf
 from pyfinery import Container, Contains, Metamodel, Ref, RefineryNode
 from pyfinery._instances import build_graph
+from pyfinery._syntax import unquote_id
 from pyfinery.graph import quote_id
 
 from .conftest import Recorder, sse, sse_response
@@ -79,6 +80,17 @@ def test_quote_id():
     assert quote_id("class") == "'class'"
     assert quote_id("it's") == "'it\\'s'"
     assert quote_id("1st") == "'1st'"
+
+
+@pytest.mark.parametrize("name", ["plain_1", "class", "it's", "back\\slash", "end\\", "'", "a b"])
+def test_unquote_id_reverses_quote_id(name):
+    assert unquote_id(quote_id(name)) == name
+
+
+def test_unquote_id_reads_each_escape_once():
+    # An escaped backslash followed by an escaped quote: \\ then \'.
+    assert unquote_id("'a\\\\\\'b'") == "a\\'b"
+    assert unquote_id("plain") == "plain"
 
 
 def test_generated_names_avoid_explicit_ids():

@@ -61,7 +61,14 @@ def uncertain_graph() -> Graph:
 
 def testdeclared_predicates():
     rules = [*RULES, "error pred 'odd name'(File f) <-> !secretFile(f).", "pred writes(a, b)."]
-    assert declared_predicates(rules) == ["writes", "exfiltration", "removes", "odd name"]
+    rules.append("pred 'it\\'s \\\\'(File f).")
+    assert declared_predicates(rules) == [
+        "writes",
+        "exfiltration",
+        "removes",
+        "odd name",
+        "it's \\",
+    ]
 
 
 def test_query_problem_closes_the_world():

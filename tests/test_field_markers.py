@@ -9,6 +9,7 @@ import pytest
 from pydantic import AliasChoices, AliasPath, ConfigDict, Field, ValidationError, field_validator
 
 from pyfinery import Container, Contains, Metamodel, Ref, RefineryNode
+from pyfinery.graph import ReferenceFeature
 
 from .graph_models import Dir, File, Filesystem, Link, metamodel
 
@@ -37,10 +38,12 @@ class OldLink(OldFSObject):
 
 
 def _features(metamodel: Metamodel) -> set[tuple[str, str, str, str | None, int, int | None]]:
+    """The references of ``metamodel``: only they have a kind and an opposite."""
     return {
         (cls.__name__, f.name, f.kind, f.opposite, f.lower, f.upper)
         for cls, features in metamodel.schema.features.items()
         for f in features
+        if isinstance(f, ReferenceFeature)
     }
 
 

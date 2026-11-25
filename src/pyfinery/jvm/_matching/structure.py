@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 
 from ..._mapping import Catalogue
 from ..._results import ViolationKind
-from ..._schema import Feature, Schema, class_name
+from ..._schema import AttributeFeature, Feature, ReferenceFeature, Schema, class_name
 
 CONTAINS = "pyfinery_contains"
 """The containment links: every containment reference, as one relation."""
@@ -48,8 +48,9 @@ def structure(schema: Schema, catalogue: Catalogue) -> Structure:
     lines: list[str] = []
     found = Structure("")
     features = [f for cls in schema.classes for f in schema.features[cls]]
-    containment = [f for f in features if f.kind == "contains" and not f.is_attribute]
-    containers = [f for f in features if f.kind == "container"]
+    references = [f for f in features if isinstance(f, ReferenceFeature)]
+    containment = [f for f in references if f.kind == "contains"]
+    containers = [f for f in references if f.kind == "container"]
 
     if containment:
         found.containment = True
@@ -101,7 +102,9 @@ def structure(schema: Schema, catalogue: Catalogue) -> Structure:
                 found.checks.append(Check(predicate, "contradiction", name))
 
     for i, feature in enumerate(features):
-        if feature.is_attribute or feature.kind == "container":
+        if isinstance(feature, AttributeFeature):
+            continue
+        if isinstance(feature, ReferenceFeature) and feature.kind == "container":
             continue
         clauses = _multiplicity(feature, catalogue)
         if not clauses:

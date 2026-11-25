@@ -25,7 +25,7 @@ from ..._options import Predicate
 from ..._render import predicate_facts
 from ..._results import QueryResult, ValidationReport, reference_errors
 from ..._schema import Schema
-from ..._syntax import quote_id
+from ..._syntax import quote_id, unquote_id
 from ..errors import UnsupportedRuleError
 from .cache import compiled
 from .compile import CompiledProblem
@@ -100,12 +100,9 @@ def require_supported(problem: CompiledProblem, predicates: Sequence[str] = ()) 
 
 def problem_name(problem: CompiledProblem, name: str) -> str:
     """The name of the predicate ``name`` (as declared, or as selected) in ``problem``."""
-    for candidate in (name, quote_id(name)):
+    for candidate in (name, quote_id(name), unquote_id(name)):
         if candidate in problem.queries or candidate in problem.unsupported:
             return candidate
-    unquoted = name[1:-1] if name.startswith("'") and name.endswith("'") else None
-    if unquoted is not None and (unquoted in problem.queries or unquoted in problem.unsupported):
-        return unquoted
     raise ValueError(f"No predicate named {name!r} to report")
 
 

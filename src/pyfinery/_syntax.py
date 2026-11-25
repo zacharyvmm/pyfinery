@@ -66,6 +66,17 @@ def quote_id(name: str) -> str:
     return f"'{escaped}'"
 
 
+_ESCAPE = re.compile(r"\\(.)", re.DOTALL)
+
+
+def unquote_id(name: str) -> str:
+    """The name a Refinery identifier stands for: a quoted one (``'odd name'``) without its
+    quotes and backslash escapes, any other as it is."""
+    if len(name) < 2 or name[0] != "'" or name[-1] != "'":
+        return name
+    return _ESCAPE.sub(lambda m: m.group(1), name[1:-1])
+
+
 def encodable(text: str) -> bool:
     """Whether ``text`` can be sent as JSON: not if it holds a lone surrogate."""
     try:

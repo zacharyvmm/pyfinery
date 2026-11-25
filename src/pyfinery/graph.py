@@ -49,10 +49,11 @@ relations computed in Python (e.g. regular expressions) to rules.
 
 This module holds :class:`Metamodel` and re-exports the rest, which lives in
 private modules: the options in ``_options``, the types and fields in
-``_schema``, the graph of nodes built from objects in ``_instances``, the
-problems sent to Refinery in ``_render``, the engines that validate and query
-in ``_engines`` (Refinery clients as engines in ``http``), Refinery syntax in
-``_syntax``, and reports in ``_results``.
+``_schema`` (read from annotations by ``_annotations``), the graph of nodes
+built from objects in ``_instances``, the problems sent to Refinery in
+``_render``, the engines that validate and query in ``_engines`` (Refinery
+clients as engines in ``http``), Refinery syntax in ``_syntax``, and reports
+in ``_results``.
 """
 
 from __future__ import annotations
@@ -85,28 +86,33 @@ from ._results import (
     declared_predicates,
 )
 from ._schema import (
+    AttributeFeature,
+    AttributeType,
     ClassLike,
+    EnumFeature,
     EnumLike,
     Feature,
     LiteralEnum,
+    ReferenceFeature,
     UnionClass,
     check,
     class_name,
     discover,
 )
-from ._syntax import (
-    quote_id,
-)
+from ._syntax import quote_id
 
 if TYPE_CHECKING:
     from ._engines import AsyncEngine, Engine
     from .http.client import AsyncRefinery, Refinery
 
 __all__ = [
+    "AttributeFeature",
+    "AttributeType",
     "ClassLike",
     "ClassOptions",
     "Container",
     "Contains",
+    "EnumFeature",
     "EnumLike",
     "Feature",
     "LiteralEnum",
@@ -117,6 +123,7 @@ __all__ = [
     "Predicate",
     "QueryResult",
     "Ref",
+    "ReferenceFeature",
     "ReferenceKind",
     "RefineryNode",
     "UnionClass",

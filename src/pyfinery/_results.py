@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 from ._instances import Graph
 from ._options import LogicValue
-from ._syntax import quote_id
+from ._syntax import quote_id, unquote_id
 from .errors import RefineryError
 from .http.models import JsonOutput
 
@@ -158,9 +158,7 @@ def declared_predicates(rules: Iterable[str]) -> list[str]:
     names = []
     for rule in rules:
         for match in _PRED_DECLARATION.finditer(rule):
-            name = match.group(1)
-            if name.startswith("'"):
-                name = name[1:-1].replace("\\'", "'").replace("\\\\", "\\")
+            name = unquote_id(match.group(1))
             if name not in names:
                 names.append(name)
     return names
