@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import subprocess
-import sys
-from pathlib import Path
 
 import httpx
 import pytest
@@ -228,34 +225,6 @@ def test_engines_are_passed_through():
     assert query_engine(mine, Problems("", [])) is mine
     assert engine(mine, Problems("", [])) is mine
     assert isinstance(mine, QueryEngine) and isinstance(mine, Engine)
-
-
-# -- the bits engine ----------------------------------------------------------
-
-
-def test_the_bits_engine_queries_and_does_not_validate():
-    pytest.importorskip("numpy")
-    from pyfinery.bits import BitsEngine
-
-    bits, mm = BitsEngine(), metamodel()
-    assert isinstance(bits, QueryEngine) and not isinstance(bits, Engine)
-    assert query_engine(bits, Problems(mm.source, mm.rules)) is bits
-    with pytest.raises(TypeError, match="the bits engine only queries"):
-        mm.validate(objects(), bits)
-    with pytest.raises(TypeError, match="the bits engine only queries"):
-        asyncio.run(mm.avalidate(objects(), bits))
-
-
-def test_choosing_an_engine_does_not_import_the_bits_engine():
-    code = (
-        "import sys, pyfinery\n"
-        "from tests.graph_models import Dir, Filesystem, metamodel\n"
-        "class Mine:\n"
-        "    def query_graph(self, *args): return None\n"
-        "metamodel().query([Filesystem(root=Dir(name='a'))], Mine())\n"
-        "assert 'pyfinery.bits' not in sys.modules and 'numpy' not in sys.modules\n"
-    )
-    subprocess.run([sys.executable, "-c", code], check=True, cwd=Path(__file__).parent.parent)
 
 
 def test_objects_shaped_like_a_client_are_still_clients():

@@ -8,10 +8,10 @@ from the objects, the rules (the metamodel's own, then those of the call), the
 to report. :class:`~pyfinery.Metamodel` combines its rules with those of the call
 and builds the graph; what an engine does with them is its own business:
 
-- a :class:`QueryEngine` queries, e.g. :class:`~pyfinery.bits.BitsEngine`;
-- a :class:`BatchQueryEngine` also queries many graphs at once, e.g.
-  :class:`~pyfinery.bits.BitsEngine` (:meth:`~pyfinery.Metamodel.query_batch`
-  queries graphs one at a time with other engines);
+- a :class:`QueryEngine` queries;
+- a :class:`BatchQueryEngine` also queries many graphs at once
+  (:meth:`~pyfinery.Metamodel.query_batch` queries graphs one at a time with
+  other engines);
 - an :class:`Engine` also validates;
 - :class:`AsyncQueryEngine` and :class:`AsyncEngine` are their asynchronous variants.
 
@@ -268,9 +268,7 @@ class AsyncClientEngine:
 
 
 class _Awaited:
-    """A synchronous engine as an asynchronous one: it runs in the caller's thread,
-    as :class:`~pyfinery.bits.BitsEngine` did before :meth:`~pyfinery.Metamodel.aquery`
-    awaited engines."""
+    """A synchronous engine as an asynchronous one: it runs in the caller's thread."""
 
     def __init__(self, engine: QueryEngine) -> None:
         self.engine = engine
@@ -302,7 +300,7 @@ class _Awaited:
 def query_engine(refinery: object, problems: Problems, method: str = "query") -> QueryEngine:
     """``refinery`` as the engine :meth:`~pyfinery.Metamodel.query` needs: a
     :class:`Refinery` client wrapped in a :class:`ClientEngine`, or an object with a
-    synchronous ``query_graph`` (e.g. :class:`~pyfinery.bits.BitsEngine`) as it is."""
+    synchronous ``query_graph`` as it is."""
     if isinstance(refinery, Refinery) or _is_client(refinery, asynchronous=False):
         return ClientEngine(refinery, problems)  # type: ignore[arg-type]
     if (
@@ -370,9 +368,8 @@ def _only_queries(method: str, found: object) -> TypeError:
 
 
 def _name(obj: object) -> str:
-    """How an error names what was passed: the bits engine as it always has."""
-    name = type(obj).__name__
-    return "the bits engine" if name == "BitsEngine" else name
+    """How an error names what was passed."""
+    return type(obj).__name__
 
 
 def _is_client(obj: object, *, asynchronous: bool) -> bool:

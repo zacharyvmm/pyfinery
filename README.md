@@ -157,7 +157,7 @@ result = metamodel.query([deployment], JvmEngine(), [
 # true: reachesUnencrypted(worker, db)
 ```
 
-When parts of your data are uncertain, Refinery's four-valued logic keeps track of it, and each match is either **true** (it certainly holds) or **unknown** (it only may hold). That needs a Refinery server (`refinery`, a client as in [Validating with a Refinery server](#validating-with-a-refinery-server)), or the bits engine below; the JVM engine refuses uncertain data with `UnsupportedRuleError`:
+When parts of your data are uncertain, Refinery's four-valued logic keeps track of it, and each match is either **true** (it certainly holds) or **unknown** (it only may hold). That needs a Refinery server (`refinery`, a client as in [Validating with a Refinery server](#validating-with-a-refinery-server)); the JVM engine refuses uncertain data with `UnsupportedRuleError`:
 
 ```python
 guessed = Metamodel(
@@ -200,62 +200,6 @@ Uncertainty can come from three places, each given as a logic value, `"true"` (o
 - **What's reported:** every `pred` declared in the query's rules, unless you choose with `select=[...]`. Metamodel violations found along the way are in `result.errors`.
 - **Debugging and async:** `query_problem(...)` shows what is sent, and `aquery()` is the async variant.
 - **`validate()` is two-valued:** facts that are `"unknown"` count as not holding there, and every object exists.
-
-### Querying without a server
-
-`pyfinery.bits` evaluates the rules of `query()` in Python, with NumPy, instead of sending them to Refinery. Install the `bits` extra (`uv add 'pyfinery[bits] @ git+https://github.com/zacharyvmm/pyfinery'`) and pass a `BitsEngine` where `query()` takes a client:
-
-```python
-from pyfinery.bits import BitsEngine
-
-result = guessed.query([deployment], BitsEngine(), [
-    "pred reachesUnencrypted(Service s, Database d) <-> "
-    "Service::depends_on+(s, d), !Database::encrypted(d).",
-])
-```
-
-The matches are the ones Refinery computes, with the same logic values. Relations are packed bit matrices, and only the rules' predicates are computed, not every relation of the metamodel. A query over 4,000 objects takes well under a second. The engine is checked against Refinery's answers in `tests/conformance` and on random graphs.
-
-- **Rules:** classes, references, attributes and predicates, `+`, `!`, `==` and `!=`, comparisons of attribute values, `must` and `may` in `shadow` predicates, and `error` predicates. Aggregation (`count`, `sum`, ...), arithmetic, `candidate` and assertions in rules raise `pyfinery.bits.UnsupportedRuleError`; use Refinery for those.
-- **Refinement:** Refinery refines uncertain facts from what must hold: a required reference whose only value is uncertain must hold, an object has exactly one container (if a containment can hold its class), containment has no cycles, and an `error` predicate must not hold. The bits engine doesn't, so where that would change the answer, it raises `UnsupportedRuleError` rather than answer differently. A graph without uncertainty is refused only where Refinery finds it contradictory: an object in two containers or a containment cycle (when the query depends on containment), or an instance of an abstract class.
-- **Errors:** `result.errors` holds keys that resolve to no object and the tuples of the rules' predicates that are `error`. Multiplicities and containment aren't checked: use `validate()`, which needs Refinery.
-- **Without a metamodel:** `pyfinery.bits.evaluate(rules, model)` evaluates rules over any `PartialModel`, e.g. one read from Refinery's JSON output with `PartialModel.from_json(...)`.
-- **Build once, evaluate often, combine:** `PackedModel.build(model)` packs a `PartialModel`'s relations into bit matrices once, and `Rules.compile(rules)` reads and checks rules once; `evaluate(rules, packed)` (or `packed.evaluate(rules)`) evaluates them on any built model. A built model's relations are numpy arrays of packed bits: `packed["edge"].must` is the matrix of the edges that must hold. `g1 + g2` puts two built graphs side by side (the second's nodes after the first's, atoms they share once), and `connect` adds tuples between them:
-
-  ```python
-  from pyfinery.bits import PackedModel, Rules, evaluate
-
-  rules = Rules.compile("pred reach(a, b) <-> edge+(a, b).")
-  g1, g2 = PackedModel.build(model_1), PackedModel.build(model_2)
-  both, placed = g1.combine(g2)  # placed[j]: where g2's node j is in both
-  both = both.connect("edge", [(0, placed[0])])
-  evaluate(rules, both)
-  ```
-
-### Querying many graphs at once
-
-`query_batch()` asks the same rules of many graphs, each its own closed world as if queried alone, and returns a `QueryResult` per graph, in order. With a `BitsEngine`, the rules are read once and evaluated on graphs of about the same size together: their relations are stacked into arrays with a leading axis of graphs, and each step of the evaluation (matrix products, closures, joins) is one array operation over all of them. Other engines query the graphs one at a time.
-
-```python
-results = metamodel.query_batch(
-    [[deployment_1], [deployment_2], [deployment_3]],  # the objects of each graph
-    BitsEngine(),
-    rules,
-    predicates=[floating_tag],             # given to every graph
-    graph_predicates=[facts_1, facts_2, facts_3],  # optional: one list per graph
-    return_exceptions=True,                # a refused graph's exception in its place
-)
-```
-
-On 1,000 graphs of about 8 objects each, `query_batch()` takes 1.1 ms a graph and `query()` 5.9 ms; on 100 graphs of about 100 objects, 11 ms and 22 ms. Beyond evaluation, each graph is still built, checked and read back on its own in Python, which is most of what's left for larger graphs.
-
-Without a metamodel, `evaluate_batch(rules, models)` (or `PackedBatch.build(models).evaluate(rules)`) evaluates rules on `PartialModel`s or `PackedModel`s, and `values[g]` is graph `g`'s answer. In a batch, `batch["edge"].must` has shape `(graphs, n, words)`: each graph's nodes take the first slots, padded to the largest graph, and the atoms of every graph one slot each after them.
-
-### Evaluating on a GPU
-
-With [CuPy](https://cupy.dev) installed for your CUDA version (e.g. `pip install cupy-cuda13x`), pass `device="cuda"` to evaluate on an NVIDIA GPU: `BitsEngine("cuda")`, `evaluate_batch(rules, models, device="cuda")`, `evaluate(rules, model, device="cuda")` or `PackedBatch.build(models, device="cuda")`. The answers are the same. A batch's relations are then CuPy arrays (`batch.to("cpu")` copies them back); `values[g]` and `values.tuples()` are NumPy arrays. Building batches, comparing attribute values (exact numbers) and reading matches back stay on the CPU.
-
-On a laptop RTX 3050, `evaluate_batch` of seven rules (closures, joins, a comparison) took 76 ms on 1,000 graphs of 50 nodes against 463 ms on the CPU, 101 ms against 300 ms on 100 graphs of 200 nodes, and 129 ms against 202 ms on one graph of 2,000 nodes. Through `query_batch`, a GPU saves little yet: building and reading back each graph in Python takes most of the time.
 
 ## Mapping Pydantic classes to Refinery
 
