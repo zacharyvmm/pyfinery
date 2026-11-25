@@ -17,21 +17,6 @@ from .errors import (
     ServerError,
     UnsatisfiableError,
 )
-from .graph import (
-    ClassOptions,
-    Container,
-    Contains,
-    LogicValue,
-    Match,
-    Metamodel,
-    ModelValidationError,
-    Predicate,
-    QueryResult,
-    Ref,
-    RefineryNode,
-    ValidationReport,
-    Violation,
-)
 from .http import (
     DEFAULT_BASE_URL,
     AsyncRefinery,
@@ -55,6 +40,25 @@ from .http import (
     ServerStartError,
     SourceOutputFormat,
     TextToModelResult,
+)
+
+# Load http before graph: _results imports http.models at runtime, and http imports http.engine.
+# isort: split
+
+from .graph import (
+    ClassOptions,
+    Container,
+    Contains,
+    LogicValue,
+    Match,
+    Metamodel,
+    ModelValidationError,
+    Predicate,
+    QueryResult,
+    Ref,
+    RefineryNode,
+    ValidationReport,
+    Violation,
 )
 
 __all__ = [

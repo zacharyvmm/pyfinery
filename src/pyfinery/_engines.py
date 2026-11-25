@@ -116,20 +116,20 @@ def sync_engine(backend: object, source: str, rules: Sequence[str], method: str)
     ``rules``, or a synchronous :class:`Engine` as it is."""
     if isinstance(backend, Refinery) or _is_client(backend, asynchronous=False):
         return ClientEngine(backend, Problems(source, rules))  # type: ignore[arg-type]
-    if (
-        isinstance(backend, AsyncRefinery)
-        or _is_async(backend)
-        or _is_client(backend, asynchronous=True)
-    ):
+    if isinstance(backend, AsyncRefinery) or _is_client(backend, asynchronous=True):
         raise TypeError(
             f"{method}() needs a synchronous engine, not {_name(backend)}; use a{method}()"
         )
-    if not isinstance(backend, Engine):
+    if not _is_engine(backend):
         raise TypeError(
             f"{method}() needs a Refinery client or an engine with validate_graph() and "
             f"query_graph(), not {_name(backend)}"
         )
-    return backend
+    if _is_async(backend, _operation(method)):
+        raise TypeError(
+            f"{method}() needs a synchronous engine, not {_name(backend)}; use a{method}()"
+        )
+    return backend  # type: ignore[return-value]
 
 
 def async_engine(backend: object, source: str, rules: Sequence[str], method: str) -> AsyncEngine:
@@ -143,13 +143,13 @@ def async_engine(backend: object, source: str, rules: Sequence[str], method: str
         raise TypeError(
             f"{method}() needs an AsyncRefinery client, not a Refinery; use {method[1:]}()"
         )
-    if not isinstance(backend, AsyncEngine):
+    if not _is_engine(backend):
         raise TypeError(
             f"{method}() needs an AsyncRefinery client or an engine with validate_graph() and "
             f"query_graph(), not {_name(backend)}"
         )
-    if _is_async(backend):
-        return backend
+    if _is_async(backend, _operation(method)):
+        return backend  # type: ignore[return-value]
     return _Awaited(backend)  # type: ignore[arg-type]
 
 
@@ -158,10 +158,18 @@ def _name(obj: object) -> str:
     return type(obj).__name__
 
 
+def _operation(method: str) -> str:
+    return "validate_graph" if method in ("validate", "avalidate") else "query_graph"
+
+
+def _is_engine(obj: object) -> bool:
+    return all(callable(getattr(obj, name, None)) for name in _METHODS)
+
+
 def _is_client(obj: object, *, asynchronous: bool) -> bool:
     """Whether ``obj`` is not an engine but has a client's ``concretize`` and ``semantics``, as
     coroutine functions or not: such objects were accepted as clients before engines existed."""
-    if any(hasattr(obj, name) for name in _METHODS):
+    if hasattr(obj, "query_graph"):
         return False
     methods = [getattr(obj, name, None) for name in ("concretize", "semantics")]
     if not all(callable(method) for method in methods):
@@ -169,6 +177,5 @@ def _is_client(obj: object, *, asynchronous: bool) -> bool:
     return all(inspect.iscoroutinefunction(method) == asynchronous for method in methods)
 
 
-def _is_async(obj: object) -> bool:
-    """Whether ``obj`` has an engine method that is a coroutine function."""
-    return any(inspect.iscoroutinefunction(getattr(obj, name, None)) for name in _METHODS)
+def _is_async(obj: object, method: str) -> bool:
+    return inspect.iscoroutinefunction(getattr(obj, method, None))

@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Hashable, Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -17,9 +17,7 @@ from ._instances import Graph
 from ._options import LogicValue
 from ._syntax import quote_id
 from .errors import RefineryError
-
-if TYPE_CHECKING:
-    from .http.models import JsonOutput
+from .http.models import JsonOutput
 
 ViolationKind = Literal["rule", "multiplicity", "containment", "contradiction", "reference"]
 
