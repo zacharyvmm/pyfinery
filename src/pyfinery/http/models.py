@@ -39,10 +39,6 @@ class RefineryModel(BaseModel):
     )
 
 
-# ---------------------------------------------------------------------------
-# Requests
-# ---------------------------------------------------------------------------
-
 PartialInterpretationPreservation = Literal["keep", "discard"]
 
 
@@ -152,10 +148,6 @@ class TextToModelRequest(RefineryModel):
     text: str
     format: OutputFormats = Field(default_factory=OutputFormats)
 
-
-# ---------------------------------------------------------------------------
-# Responses
-# ---------------------------------------------------------------------------
 
 Severity = Literal["error", "warning", "info", "ignore"]
 
@@ -345,11 +337,6 @@ class ChatMessage(RefineryModel):
 
 
 TextToModelResult = ConcretizationResult
-
-
-# ---------------------------------------------------------------------------
-# Error results
-# ---------------------------------------------------------------------------
 
 
 class RequestErrorDetail(RefineryModel):

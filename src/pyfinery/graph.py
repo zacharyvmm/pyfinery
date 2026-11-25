@@ -51,25 +51,19 @@ This module holds :class:`Metamodel` and re-exports the rest, which lives in
 private modules: the options in ``_options``, the types and fields in
 ``_schema``, the graph of nodes built from objects in ``_instances``, the
 problems sent to Refinery in ``_render``, the engines that validate and query
-in ``_engines``, Refinery syntax in ``_syntax``, and reports in ``_results``.
+in ``_engines`` (Refinery clients as engines in ``http``), Refinery syntax in
+``_syntax``, and reports in ``_results``.
 """
 
 from __future__ import annotations
 
 from collections.abc import Hashable, Iterable, Mapping
-from typing import TYPE_CHECKING, Literal, overload
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel
 
-from ._engines import (
-    BatchQueryEngine,
-    Problems,
-    async_engine,
-    async_query_engine,
-    engine,
-    query_engine,
-)
-from ._instances import Graph, build_graph, collect, link_opposites
+from ._engines import async_engine, reject_awaitable, sync_engine
+from ._instances import build_graph, collect, link_opposites
 from ._options import (
     ClassOptions,
     Container,
@@ -80,7 +74,7 @@ from ._options import (
     ReferenceKind,
     RefineryNode,
 )
-from ._render import render_facts, render_metamodel
+from ._render import render_facts, render_metamodel, render_query_problem
 from ._results import (
     Match,
     ModelValidationError,
@@ -105,8 +99,8 @@ from ._syntax import (
 )
 
 if TYPE_CHECKING:
-    from ._engines import AsyncEngine, AsyncQueryEngine, Engine, QueryEngine
-    from .client import AsyncRefinery, Refinery
+    from ._engines import AsyncEngine, Engine
+    from .http.client import AsyncRefinery, Refinery
 
 __all__ = [
     "ClassLike",
@@ -199,8 +193,6 @@ class Metamodel:
         """The Refinery name of a class, union, or enum."""
         return class_name(node_class)
 
-    # -- instances ----------------------------------------------------------
-
     def collect(self, objects: Iterable[BaseModel]) -> list[BaseModel]:
         """All nodes reachable from ``objects`` through reference fields.
 
@@ -236,8 +228,6 @@ class Metamodel:
         """The metamodel, rules, and the facts of the graph reachable from ``objects``."""
         return self.source + "\n" + render_facts(self.schema, build_graph(self.schema, objects))
 
-    # -- validation ---------------------------------------------------------
-
     def validate(
         self,
         objects: Iterable[BaseModel],
@@ -266,11 +256,13 @@ class Metamodel:
         :class:`~pyfinery.InvalidProblemError` if the rules don't compile;
         constraint violations are returned in the report.
         """
-        found = engine(refinery, self._problems())
+        found = sync_engine(refinery, self.source, self.rules, "validate")
         predicates = list(predicates)
         graph = build_graph(self.schema, objects)
         rules = [*self.rules, *rules]
-        return found.validate_graph(self.schema, graph, rules, predicates)
+        return reject_awaitable(
+            found.validate_graph(self.schema, graph, rules, predicates), refinery, "validate"
+        )
 
     async def avalidate(
         self,
@@ -281,18 +273,16 @@ class Metamodel:
         predicates: Iterable[Predicate] = (),
     ) -> ValidationReport:
         """Asynchronous variant of :meth:`validate`."""
-        found = async_engine(refinery, self._problems())
+        found = async_engine(refinery, self.source, self.rules, "avalidate")
         predicates = list(predicates)
         graph = build_graph(self.schema, objects)
         rules = [*self.rules, *rules]
         return await found.validate_graph(self.schema, graph, rules, predicates)
 
-    # -- queries ------------------------------------------------------------
-
     def query(
         self,
         objects: Iterable[BaseModel],
-        refinery: Refinery | QueryEngine,
+        refinery: Refinery | Engine,
         rules: Iterable[str] = (),
         *,
         predicates: Iterable[Predicate] = (),
@@ -309,122 +299,31 @@ class Metamodel:
         ``exists`` is ``"unknown"`` and :class:`Predicate` facts that are
         ``"unknown"`` make the matches that depend on them ``"unknown"``.
         """
-        found = query_engine(refinery, self._problems())
+        found = sync_engine(refinery, self.source, self.rules, "query")
         rules, predicates = list(rules), list(predicates)
         graph = build_graph(self.schema, objects, existence=True)
         selected = list(select) if select is not None else declared_predicates(rules)
         rules = [*self.rules, *rules]
-        return found.query_graph(self.schema, graph, rules, predicates, selected)
+        return reject_awaitable(
+            found.query_graph(self.schema, graph, rules, predicates, selected), refinery, "query"
+        )
 
     async def aquery(
         self,
         objects: Iterable[BaseModel],
-        refinery: AsyncRefinery | AsyncQueryEngine | QueryEngine,
+        refinery: AsyncRefinery | AsyncEngine | Engine,
         rules: Iterable[str] = (),
         *,
         predicates: Iterable[Predicate] = (),
         select: Iterable[str] | None = None,
     ) -> QueryResult:
         """Asynchronous variant of :meth:`query`."""
-        found = async_query_engine(refinery, self._problems())
+        found = async_engine(refinery, self.source, self.rules, "aquery")
         rules, predicates = list(rules), list(predicates)
         graph = build_graph(self.schema, objects, existence=True)
         selected = list(select) if select is not None else declared_predicates(rules)
         rules = [*self.rules, *rules]
         return await found.query_graph(self.schema, graph, rules, predicates, selected)
-
-    @overload
-    def query_batch(
-        self,
-        graphs: Iterable[Iterable[BaseModel]],
-        refinery: Refinery | QueryEngine,
-        rules: Iterable[str] = (),
-        *,
-        predicates: Iterable[Predicate] = (),
-        graph_predicates: Iterable[Iterable[Predicate]] | None = None,
-        select: Iterable[str] | None = None,
-        return_exceptions: Literal[False] = False,
-    ) -> list[QueryResult]: ...
-
-    @overload
-    def query_batch(
-        self,
-        graphs: Iterable[Iterable[BaseModel]],
-        refinery: Refinery | QueryEngine,
-        rules: Iterable[str] = (),
-        *,
-        predicates: Iterable[Predicate] = (),
-        graph_predicates: Iterable[Iterable[Predicate]] | None = None,
-        select: Iterable[str] | None = None,
-        return_exceptions: Literal[True],
-    ) -> list[QueryResult | Exception]: ...
-
-    def query_batch(
-        self,
-        graphs: Iterable[Iterable[BaseModel]],
-        refinery: Refinery | QueryEngine,
-        rules: Iterable[str] = (),
-        *,
-        predicates: Iterable[Predicate] = (),
-        graph_predicates: Iterable[Iterable[Predicate]] | None = None,
-        select: Iterable[str] | None = None,
-        return_exceptions: bool = False,
-    ) -> list[QueryResult] | list[QueryResult | Exception]:
-        """:meth:`query` each of ``graphs``, the objects of one graph each, with the same
-        rules: the results, in order.
-
-        ``predicates`` are given to every graph (a :class:`Predicate` with
-        ``evaluate`` is called on each graph's nodes); ``graph_predicates``, if
-        given, has an iterable of predicates per graph, given to that graph too.
-        Each graph is its own closed world, as if queried alone.
-
-        An engine that evaluates many graphs at once (a
-        :class:`~pyfinery._engines.BatchQueryEngine`) is given them all; other
-        engines query the graphs one at a time. A graph that :meth:`query` would raise for raises
-        here, the first in order; with ``return_exceptions=True``, its exception
-        is in the list in its place, and the other graphs are answered.
-        """
-        found = query_engine(refinery, self._problems(), "query_batch")
-        rules, shared = list(rules), list(predicates)
-        objects = [list(g) for g in graphs]
-        own = [list(p) for p in graph_predicates] if graph_predicates is not None else None
-        if own is not None and len(own) != len(objects):
-            raise ValueError(
-                f"graph_predicates has {len(own)} entries for {len(objects)} graphs: give one "
-                "per graph"
-            )
-        given = [[*shared, *mine] for mine in own] if own is not None else [shared] * len(objects)
-        selected = list(select) if select is not None else declared_predicates(rules)
-        rules = [*self.rules, *rules]
-        results: list[QueryResult | Exception | None] = [None] * len(objects)
-        if not isinstance(found, BatchQueryEngine):
-            # One graph at a time, in order: the first to raise stops the others.
-            for i, roots in enumerate(objects):
-                try:
-                    graph = build_graph(self.schema, roots, existence=True)
-                    results[i] = found.query_graph(self.schema, graph, rules, given[i], selected)
-                except Exception as e:
-                    if not return_exceptions:
-                        raise
-                    results[i] = e
-            return results  # type: ignore[return-value]
-        built: list[tuple[int, Graph]] = []
-        for i, roots in enumerate(objects):
-            try:
-                built.append((i, build_graph(self.schema, roots, existence=True)))
-            except Exception as e:
-                results[i] = e
-        answers = found.query_graphs(
-            self.schema, [g for _, g in built], rules, [given[i] for i, _ in built], selected
-        )
-        for (i, _), answer in zip(built, answers, strict=True):
-            results[i] = answer
-        if not return_exceptions:  # the first graph in order that query() would raise for
-            for result in results:
-                if isinstance(result, Exception):
-                    raise result
-        assert all(r is not None for r in results)
-        return results  # type: ignore[return-value]
 
     def query_problem(
         self,
@@ -434,10 +333,6 @@ class Metamodel:
         predicates: Iterable[Predicate] = (),
     ) -> str:
         """The problem :meth:`query` would send, e.g. to debug it in the web editor."""
-        rules, predicates = [*self.rules, *rules], list(predicates)
+        rules, predicates = list(rules), list(predicates)
         graph = build_graph(self.schema, objects, existence=True)
-        return self._problems().query(self.schema, graph, rules, predicates)
-
-    def _problems(self) -> Problems:
-        """What a client engine sends for this metamodel: its source, with its rules."""
-        return Problems(self.source, self.rules)
+        return render_query_problem(self.schema, self.source, graph, rules, predicates)

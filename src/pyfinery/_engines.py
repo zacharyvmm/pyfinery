@@ -5,62 +5,53 @@ An engine is given what the metamodel knows, never a rendered problem: the
 :class:`~pyfinery._schema.Schema`, the :class:`~pyfinery._instances.Graph` built
 from the objects, the rules (the metamodel's own, then those of the call), the
 :class:`~pyfinery.Predicate` objects, and, to query, the names of the predicates
-to report. :class:`~pyfinery.Metamodel` combines its rules with those of the call
-and builds the graph; what an engine does with them is its own business:
+to report. An :class:`Engine` validates and queries; an :class:`AsyncEngine` is
+its asynchronous variant.
 
-- a :class:`QueryEngine` queries;
-- a :class:`BatchQueryEngine` also queries many graphs at once
-  (:meth:`~pyfinery.Metamodel.query_batch` queries graphs one at a time with
-  other engines);
-- an :class:`Engine` also validates;
-- :class:`AsyncQueryEngine` and :class:`AsyncEngine` are their asynchronous variants.
-
-:class:`ClientEngine` and :class:`AsyncClientEngine` make a Refinery client one:
-they render the problem, send it to the server's ``concretize`` (to validate) or
-``semantics`` (to query), and read the report from what it returns.
-:func:`engine`, :func:`query_engine`, :func:`async_engine` and
-:func:`async_query_engine` turn what the user passed into the engine a method
-needs, or raise :class:`TypeError`.
+:func:`sync_engine` and :func:`async_engine` turn what the user passed into the
+engine a method needs, or raise :class:`TypeError`: a Refinery client becomes a
+:class:`~pyfinery.http.ClientEngine` or :class:`~pyfinery.http.AsyncClientEngine`,
+an engine is used as it is, and a synchronous engine runs in asynchronous methods.
 """
 
 from __future__ import annotations
 
 import inspect
-from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
 from ._instances import Graph
 from ._options import Predicate
-from ._render import render_metamodel, render_query_problem, render_validation_problem
-from ._results import QueryResult, ValidationReport, read_matches, read_violations
+from ._results import QueryResult, ValidationReport
 from ._schema import Schema
-from .client import AsyncRefinery, Refinery
-from .errors import RefineryTimeoutError
-from .models import JsonOutputFormat, OutputFormats, SourceOutputFormat
+from .http.client import AsyncRefinery, Refinery
+from .http.engine import AsyncClientEngine, ClientEngine, Problems
 
-__all__ = [
-    "AsyncClientEngine",
-    "AsyncEngine",
-    "AsyncQueryEngine",
-    "BatchQueryEngine",
-    "ClientEngine",
-    "Engine",
-    "Problems",
-    "QueryEngine",
-    "async_engine",
-    "async_query_engine",
-    "engine",
-    "query_engine",
-]
+__all__ = ["AsyncEngine", "Engine", "async_engine", "reject_awaitable", "sync_engine"]
 
-
-# -- protocols ----------------------------------------------------------------
+_METHODS = ("validate_graph", "query_graph")
+_OPERATIONS = {
+    "validate": "validate_graph",
+    "avalidate": "validate_graph",
+    "query": "query_graph",
+    "aquery": "query_graph",
+}
 
 
 @runtime_checkable
-class QueryEngine(Protocol):
-    """Evaluates :meth:`~pyfinery.Metamodel.query`."""
+class Engine(Protocol):
+    """Evaluates :meth:`~pyfinery.Metamodel.validate` and :meth:`~pyfinery.Metamodel.query`."""
+
+    def validate_graph(
+        self,
+        schema: Schema,
+        graph: Graph,
+        rules: Sequence[str],
+        predicates: Sequence[Predicate],
+    ) -> ValidationReport:
+        """The constraints ``graph`` violates, of the metamodel and ``rules`` (the
+        metamodel's, then those of the call), counting only what certainly holds."""
+        ...
 
     def query_graph(
         self,
@@ -77,42 +68,16 @@ class QueryEngine(Protocol):
 
 
 @runtime_checkable
-class BatchQueryEngine(QueryEngine, Protocol):
-    """Evaluates :meth:`~pyfinery.Metamodel.query_batch` on many graphs at once."""
+class AsyncEngine(Protocol):
+    """Asynchronous variant of :class:`Engine`."""
 
-    def query_graphs(
-        self,
-        schema: Schema,
-        graphs: Sequence[Graph],
-        rules: Sequence[str],
-        predicates: Sequence[Sequence[Predicate]],
-        select: Sequence[str],
-    ) -> list[QueryResult | Exception]:
-        """What :meth:`query_graph` gives each of ``graphs``, with its own
-        ``predicates``, or the exception it raises."""
-        ...
-
-
-@runtime_checkable
-class Engine(QueryEngine, Protocol):
-    """Evaluates :meth:`~pyfinery.Metamodel.validate` as well as
-    :meth:`~pyfinery.Metamodel.query`."""
-
-    def validate_graph(
+    async def validate_graph(
         self,
         schema: Schema,
         graph: Graph,
         rules: Sequence[str],
         predicates: Sequence[Predicate],
-    ) -> ValidationReport:
-        """The constraints ``graph`` violates, of the metamodel and ``rules`` (the
-        metamodel's, then those of the call), counting only what certainly holds."""
-        ...
-
-
-@runtime_checkable
-class AsyncQueryEngine(Protocol):
-    """Asynchronous variant of :class:`QueryEngine`."""
+    ) -> ValidationReport: ...
 
     async def query_graph(
         self,
@@ -124,155 +89,25 @@ class AsyncQueryEngine(Protocol):
     ) -> QueryResult: ...
 
 
-@runtime_checkable
-class AsyncEngine(AsyncQueryEngine, Protocol):
-    """Asynchronous variant of :class:`Engine`."""
-
-    async def validate_graph(
-        self,
-        schema: Schema,
-        graph: Graph,
-        rules: Sequence[str],
-        predicates: Sequence[Predicate],
-    ) -> ValidationReport: ...
-
-
-# -- the problems sent to a server --------------------------------------------
-
-
-class Problems:
-    """Renders the problems sent to a Refinery server for a metamodel.
-
-    ``source`` is the metamodel as :class:`~pyfinery.Metamodel` rendered it, with
-    its own ``rules``; when the rules an engine is given start with those, the
-    source is reused, so the problem is the one :meth:`~pyfinery.Metamodel.problem`
-    and :meth:`~pyfinery.Metamodel.query_problem` show. Other rules are rendered
-    with the metamodel in full.
-    """
-
-    def __init__(self, source: str, rules: Sequence[str]) -> None:
-        self.source = source
-        self.rules = list(rules)
-
-    def validation(
-        self, schema: Schema, graph: Graph, rules: Sequence[str], predicates: Sequence[Predicate]
-    ) -> str:
-        """The metamodel, the rules, and the facts of ``graph``: what certainly holds."""
-        metamodel, rest = self._split(schema, rules)
-        return render_validation_problem(schema, metamodel, graph, rest, predicates)
-
-    def query(
-        self, schema: Schema, graph: Graph, rules: Sequence[str], predicates: Sequence[Predicate]
-    ) -> str:
-        """The metamodel, the rules, and the facts of ``graph`` in a closed world that
-        keeps what is unknown."""
-        metamodel, rest = self._split(schema, rules)
-        return render_query_problem(schema, metamodel, graph, rest, predicates)
-
-    def _split(self, schema: Schema, rules: Sequence[str]) -> tuple[str, list[str]]:
-        """The metamodel with the rules it holds, and the rules left to add."""
-        mine = len(self.rules)
-        if list(rules[:mine]) == self.rules:
-            return self.source, list(rules[mine:])
-        return render_metamodel(schema, list(rules)), []
-
-
-# -- clients as engines -------------------------------------------------------
-
-
-_JSON_ONLY = OutputFormats(json_=JsonOutputFormat(), source=SourceOutputFormat(enabled=False))
-
-
-@contextmanager
-def _explain_timeout() -> Iterator[None]:
-    """Add what to do about it to a timeout of validation or a query."""
-    try:
-        yield
-    except RefineryTimeoutError as e:
-        raise RefineryTimeoutError(
-            f"{e.message}. Validation runs under the server's semantics timeout (1 second by "
-            "default); raise it with RefineryServer(semantics_timeout=<ms>) or the "
-            "REFINERY_SEMANTICS_TIMEOUT_MS environment variable of the server. Refinery "
-            "computes every relation in full, so helper predicates with many tuples (e.g., "
-            "with three parameters) are often what makes it slow, and the upstream Refinery "
-            "image is much slower than pyfinery's default on large graphs; see Performance in "
-            "pyfinery's README."
-        ) from e
-
-
-class ClientEngine:
-    """A :class:`Refinery` client as an :class:`Engine`: validates with the server's
-    ``concretize``, and queries with its ``semantics``."""
-
-    def __init__(self, client: Refinery, problems: Problems) -> None:
-        self.client = client
-        self.problems = problems
-
-    def validate_graph(
-        self,
-        schema: Schema,
-        graph: Graph,
-        rules: Sequence[str],
-        predicates: Sequence[Predicate],
-    ) -> ValidationReport:
-        source = self.problems.validation(schema, graph, rules, predicates)
-        with _explain_timeout():
-            result = self.client.concretize(source, format=_JSON_ONLY)
-        return read_violations(result.json_, graph, source)
-
-    def query_graph(
-        self,
-        schema: Schema,
-        graph: Graph,
-        rules: Sequence[str],
-        predicates: Sequence[Predicate],
-        select: Sequence[str],
-    ) -> QueryResult:
-        source = self.problems.query(schema, graph, rules, predicates)
-        with _explain_timeout():
-            result = self.client.semantics(source, format=_JSON_ONLY)
-        return read_matches(result.json_, graph, source, select)
-
-
-class AsyncClientEngine:
-    """An :class:`AsyncRefinery` client as an :class:`AsyncEngine`."""
-
-    def __init__(self, client: AsyncRefinery, problems: Problems) -> None:
-        self.client = client
-        self.problems = problems
-
-    async def validate_graph(
-        self,
-        schema: Schema,
-        graph: Graph,
-        rules: Sequence[str],
-        predicates: Sequence[Predicate],
-    ) -> ValidationReport:
-        source = self.problems.validation(schema, graph, rules, predicates)
-        with _explain_timeout():
-            result = await self.client.concretize(source, format=_JSON_ONLY)
-        return read_violations(result.json_, graph, source)
-
-    async def query_graph(
-        self,
-        schema: Schema,
-        graph: Graph,
-        rules: Sequence[str],
-        predicates: Sequence[Predicate],
-        select: Sequence[str],
-    ) -> QueryResult:
-        source = self.problems.query(schema, graph, rules, predicates)
-        with _explain_timeout():
-            result = await self.client.semantics(source, format=_JSON_ONLY)
-        return read_matches(result.json_, graph, source, select)
-
-
 class _Awaited:
-    """A synchronous engine as an asynchronous one: it runs in the caller's thread."""
+    """A synchronous engine (or one whose method returns an awaitable via a wrapper)
+    adapted as an asynchronous one."""
 
-    def __init__(self, engine: QueryEngine) -> None:
+    def __init__(self, engine: Engine) -> None:
         self.engine = engine
 
+    async def validate_graph(
+        self,
+        schema: Schema,
+        graph: Graph,
+        rules: Sequence[str],
+        predicates: Sequence[Predicate],
+    ) -> ValidationReport:
+        result = self.engine.validate_graph(schema, graph, rules, predicates)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
     async def query_graph(
         self,
         schema: Schema,
@@ -281,95 +116,82 @@ class _Awaited:
         predicates: Sequence[Predicate],
         select: Sequence[str],
     ) -> QueryResult:
-        return self.engine.query_graph(schema, graph, rules, predicates, select)
-
-    async def validate_graph(
-        self,
-        schema: Schema,
-        graph: Graph,
-        rules: Sequence[str],
-        predicates: Sequence[Predicate],
-    ) -> ValidationReport:
-        assert isinstance(self.engine, Engine)
-        return self.engine.validate_graph(schema, graph, rules, predicates)
+        result = self.engine.query_graph(schema, graph, rules, predicates, select)
+        if inspect.isawaitable(result):
+            return await result
+        return result
 
 
-# -- what the user passed, as an engine ---------------------------------------
-
-
-def query_engine(refinery: object, problems: Problems, method: str = "query") -> QueryEngine:
-    """``refinery`` as the engine :meth:`~pyfinery.Metamodel.query` needs: a
-    :class:`Refinery` client wrapped in a :class:`ClientEngine`, or an object with a
-    synchronous ``query_graph`` as it is."""
-    if isinstance(refinery, Refinery) or _is_client(refinery, asynchronous=False):
-        return ClientEngine(refinery, problems)  # type: ignore[arg-type]
-    if (
-        isinstance(refinery, AsyncRefinery)
-        or _is_async(refinery, "query_graph")
-        or _is_client(refinery, asynchronous=True)
-    ):
-        hint = f"; use a{method}()" if method == "query" else ""
-        raise TypeError(f"{method}() needs a synchronous engine, not {_name(refinery)}{hint}")
-    if not isinstance(refinery, QueryEngine):
+def reject_awaitable[T](result: T, backend: object, method: str) -> T:
+    """Reject an awaitable returned on a synchronous path (e.g. from a plain wrapper
+    forwarding a coroutine) without leaving an unawaited coroutine warning."""
+    if inspect.isawaitable(result):
+        if inspect.iscoroutine(result):
+            result.close()
         raise TypeError(
-            f"{method}() needs a Refinery client or an engine with query_graph(), "
-            f"not {_name(refinery)}"
+            f"{method}() needs a synchronous engine, not {_name(backend)}; use a{method}()"
         )
-    return refinery
+    return result
 
 
-def engine(refinery: object, problems: Problems, method: str = "validate") -> Engine:
-    """``refinery`` as the engine :meth:`~pyfinery.Metamodel.validate` needs: as
-    :func:`query_engine`, but it must also have ``validate_graph``."""
-    found = query_engine(refinery, problems, method)
-    if not isinstance(found, Engine):
-        raise _only_queries(method, found)
-    return found
+def sync_engine(backend: object, source: str, rules: Sequence[str], method: str) -> Engine:
+    """``backend`` as the engine :meth:`~pyfinery.Metamodel.validate` and
+    :meth:`~pyfinery.Metamodel.query` need: a :class:`Refinery` client wrapped in a
+    :class:`ClientEngine` that renders problems from the metamodel's ``source`` and
+    ``rules``, or a synchronous :class:`Engine` as it is."""
+    if isinstance(backend, Refinery) or _is_client(backend, asynchronous=False):
+        return ClientEngine(backend, Problems(source, rules))  # type: ignore[arg-type]
+    if isinstance(backend, AsyncRefinery) or _is_client(backend, asynchronous=True):
+        raise TypeError(
+            f"{method}() needs a synchronous engine, not {_name(backend)}; use a{method}()"
+        )
+    if not _is_engine(backend):
+        raise TypeError(
+            f"{method}() needs a Refinery client or an engine with validate_graph() and "
+            f"query_graph(), not {_name(backend)}"
+        )
+    if _is_async(backend, _operation(method)):
+        raise TypeError(
+            f"{method}() needs a synchronous engine, not {_name(backend)}; use a{method}()"
+        )
+    return backend  # type: ignore[return-value]
 
 
-def async_query_engine(
-    refinery: object, problems: Problems, method: str = "aquery"
-) -> AsyncQueryEngine:
-    """``refinery`` as the engine :meth:`~pyfinery.Metamodel.aquery` needs: an
-    :class:`AsyncRefinery` client wrapped in an :class:`AsyncClientEngine`, an object
-    with an asynchronous ``query_graph`` as it is, or one with a synchronous one
-    awaited in the caller's thread."""
-    if isinstance(refinery, AsyncRefinery) or _is_client(refinery, asynchronous=True):
-        return AsyncClientEngine(refinery, problems)  # type: ignore[arg-type]
-    if isinstance(refinery, Refinery) or _is_client(refinery, asynchronous=False):
+def async_engine(backend: object, source: str, rules: Sequence[str], method: str) -> AsyncEngine:
+    """``backend`` as the engine :meth:`~pyfinery.Metamodel.avalidate` and
+    :meth:`~pyfinery.Metamodel.aquery` need: an :class:`AsyncRefinery` client wrapped
+    in an :class:`AsyncClientEngine`, an :class:`AsyncEngine` as it is, or a
+    synchronous :class:`Engine` awaited in the caller's thread."""
+    if isinstance(backend, AsyncRefinery) or _is_client(backend, asynchronous=True):
+        return AsyncClientEngine(backend, Problems(source, rules))  # type: ignore[arg-type]
+    if isinstance(backend, Refinery) or _is_client(backend, asynchronous=False):
         raise TypeError(
             f"{method}() needs an AsyncRefinery client, not a Refinery; use {method[1:]}()"
         )
-    if not isinstance(refinery, AsyncQueryEngine):
+    if not _is_engine(backend):
         raise TypeError(
-            f"{method}() needs an AsyncRefinery client or an engine with query_graph(), "
-            f"not {_name(refinery)}"
+            f"{method}() needs an AsyncRefinery client or an engine with validate_graph() and "
+            f"query_graph(), not {_name(backend)}"
         )
-    if _is_async(refinery, "query_graph"):
-        return refinery
-    return _Awaited(refinery)  # type: ignore[arg-type]
-
-
-def async_engine(refinery: object, problems: Problems, method: str = "avalidate") -> AsyncEngine:
-    """``refinery`` as the engine :meth:`~pyfinery.Metamodel.avalidate` needs: as
-    :func:`async_query_engine`, but it must also have ``validate_graph``."""
-    found = async_query_engine(refinery, problems, method)
-    target = found.engine if isinstance(found, _Awaited) else found
-    if not isinstance(target, AsyncEngine):
-        raise _only_queries(method, target)
-    return found  # type: ignore[return-value]
-
-
-def _only_queries(method: str, found: object) -> TypeError:
-    return TypeError(
-        f"{method}() needs an engine that validates, such as a Refinery client; "
-        f"{_name(found)} only queries"
-    )
+    if _is_async(backend, _operation(method)):
+        return backend  # type: ignore[return-value]
+    return _Awaited(backend)  # type: ignore[arg-type]
 
 
 def _name(obj: object) -> str:
     """How an error names what was passed."""
     return type(obj).__name__
+
+
+def _operation(method: str) -> str:
+    try:
+        return _OPERATIONS[method]
+    except KeyError:
+        raise ValueError(f"Unknown engine method {method!r}") from None
+
+
+def _is_engine(obj: object) -> bool:
+    return all(callable(getattr(obj, name, None)) for name in _METHODS)
 
 
 def _is_client(obj: object, *, asynchronous: bool) -> bool:

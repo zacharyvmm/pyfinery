@@ -9,20 +9,12 @@ import pytest
 
 import pyfinery as pf
 from pyfinery import Predicate
-from pyfinery._engines import (
-    AsyncClientEngine,
-    ClientEngine,
-    Engine,
-    Problems,
-    QueryEngine,
-    async_engine,
-    async_query_engine,
-    engine,
-    query_engine,
-)
+from pyfinery._engines import AsyncEngine, Engine, _Awaited, async_engine, sync_engine
 from pyfinery._instances import build_graph
 from pyfinery._render import render_query_problem, render_validation_problem
 from pyfinery._results import QueryResult, ValidationReport
+from pyfinery.http import AsyncClientEngine, ClientEngine
+from pyfinery.http.engine import Problems
 
 from .conftest import Recorder, sse, sse_response
 from .graph_models import Dir, Filesystem, metamodel
@@ -60,8 +52,8 @@ def _recorder() -> Recorder:
     return Recorder(lambda _: sse_response(body))
 
 
-class QueryOnly:
-    """An engine of one's own that only queries, recording what it is given."""
+class Validating:
+    """An engine of one's own, recording what it is given."""
 
     def __init__(self) -> None:
         self.calls: list[tuple] = []
@@ -70,8 +62,6 @@ class QueryOnly:
         self.calls.append(("query", schema, graph, rules, predicates, select))
         return QueryResult([], [], "mine", None)
 
-
-class Validating(QueryOnly):
     def validate_graph(self, schema, graph, rules, predicates) -> ValidationReport:
         self.calls.append(("validate", schema, graph, rules, predicates))
         return ValidationReport([], "mine", None, graph.identity)
@@ -88,9 +78,6 @@ class AsyncValidating:
     async def validate_graph(self, schema, graph, rules, predicates) -> ValidationReport:
         self.calls.append(("validate", schema, graph, rules, predicates))
         return ValidationReport([], "mine", None, graph.identity)
-
-
-# -- clients ------------------------------------------------------------------
 
 
 def test_validate_wraps_a_client():
@@ -129,10 +116,13 @@ def test_async_clients_are_wrapped():
 
 
 def test_client_engines_are_engines():
-    problems = Problems("", [])
-    assert isinstance(engine(_client(_recorder()), problems), ClientEngine)
-    assert isinstance(async_engine(_async_client(_recorder()), problems), AsyncClientEngine)
-    assert isinstance(ClientEngine(_client(_recorder()), problems), Engine)
+    mm = metamodel()
+    found = sync_engine(_client(_recorder()), mm.source, mm.rules, "validate")
+    assert isinstance(found, ClientEngine) and isinstance(found, Engine)
+    assert (found.problems.source, found.problems.rules) == (mm.source, mm.rules)
+    found = async_engine(_async_client(_recorder()), mm.source, mm.rules, "avalidate")
+    assert isinstance(found, AsyncClientEngine) and isinstance(found, AsyncEngine)
+    assert (found.problems.source, found.problems.rules) == (mm.source, mm.rules)
 
 
 def test_problems_render_rules_not_of_the_metamodel_in_full():
@@ -155,13 +145,14 @@ def test_the_wrong_kind_of_client_is_refused():
         asyncio.run(mm.aquery(objects(), _client(_recorder())))
     with pytest.raises(TypeError, match=r"avalidate\(\) needs an AsyncRefinery client"):
         asyncio.run(mm.avalidate(objects(), _client(_recorder())))
-    with pytest.raises(TypeError, match=r"engine with query_graph\(\), not object"):
+    with pytest.raises(
+        TypeError, match=r"engine with validate_graph\(\) and query_graph\(\), not object"
+    ):
         mm.query(objects(), object())
-    with pytest.raises(TypeError, match=r"engine with query_graph\(\), not object"):
+    with pytest.raises(
+        TypeError, match=r"engine with validate_graph\(\) and query_graph\(\), not object"
+    ):
         asyncio.run(mm.aquery(objects(), object()))
-
-
-# -- engines of one's own -----------------------------------------------------
 
 
 def test_a_custom_engine_queries():
@@ -193,13 +184,72 @@ def test_a_custom_engine_validates():
     )
 
 
-def test_validate_needs_an_engine_that_validates():
+def test_engines_must_validate_and_query():
+    class QueryOnly:
+        def query_graph(self, schema, graph, rules, predicates, select) -> QueryResult:
+            return QueryResult([], [], "mine", None)
+
+    class AsyncQueryOnly:
+        async def query_graph(self, schema, graph, rules, predicates, select) -> QueryResult:
+            return QueryResult([], [], "mine", None)
+
+    class NonCallableValidate:
+        validate_graph = 0
+
+        def query_graph(self, schema, graph, rules, predicates, select) -> QueryResult:
+            return QueryResult([], [], "mine", None)
+
     mm = metamodel()
-    with pytest.raises(TypeError, match=r"validate\(\) needs an engine that validates.*QueryOnly"):
-        mm.validate(objects(), QueryOnly())
-    with pytest.raises(TypeError, match=r"avalidate\(\) needs an engine that validates"):
-        asyncio.run(mm.avalidate(objects(), QueryOnly()))
-    assert mm.query(objects(), QueryOnly()).source == "mine"
+    for bad in (QueryOnly(), AsyncQueryOnly(), NonCallableValidate()):
+        for call in (mm.validate, mm.query):
+            with pytest.raises(TypeError, match=r"needs a Refinery client or an engine"):
+                call(objects(), bad)  # pyright: ignore[reportArgumentType]
+        for acall in (mm.avalidate, mm.aquery):
+            with pytest.raises(TypeError, match=r"needs an AsyncRefinery client or an engine"):
+                asyncio.run(acall(objects(), bad))  # pyright: ignore[reportArgumentType]
+
+
+def test_mixed_sync_async_engine_dispatches_per_method():
+    class Mixed:
+        async def validate_graph(self, schema, graph, rules, predicates) -> ValidationReport:
+            return ValidationReport([], "mixed", None, graph.identity)
+
+        def query_graph(self, schema, graph, rules, predicates, select) -> QueryResult:
+            return QueryResult([], [], "mixed", None)
+
+    mm, mixed = metamodel(), Mixed()
+    assert mm.query(objects(), mixed, EXTRA).source == "mixed"  # pyright: ignore[reportArgumentType]
+    assert asyncio.run(mm.aquery(objects(), mixed, EXTRA)).source == "mixed"  # pyright: ignore[reportArgumentType]
+    assert asyncio.run(mm.avalidate(objects(), mixed, EXTRA)).source == "mixed"  # pyright: ignore[reportArgumentType]
+    with pytest.raises(TypeError, match=r"validate\(\) needs a synchronous engine.*use avalidate"):
+        mm.validate(objects(), mixed)  # pyright: ignore[reportArgumentType]
+
+
+def test_decorated_async_engine_methods_work_and_reject_sync():
+    def forward(fn):
+        def wrapper(*args, **kwargs):
+            return fn(*args, **kwargs)
+
+        return wrapper
+
+    class DecoratedAsync:
+        @forward
+        async def validate_graph(self, schema, graph, rules, predicates) -> ValidationReport:
+            return ValidationReport([], "decorated", None, graph.identity)
+
+        @forward
+        async def query_graph(self, schema, graph, rules, predicates, select) -> QueryResult:
+            return QueryResult([], [], "decorated", None)
+
+    mm, engine_ = metamodel(), DecoratedAsync()
+    report = asyncio.run(mm.avalidate(objects(), engine_, EXTRA))  # pyright: ignore[reportArgumentType]
+    result = asyncio.run(mm.aquery(objects(), engine_, EXTRA))  # pyright: ignore[reportArgumentType]
+    assert report.ok and report.source == "decorated"
+    assert result.source == "decorated"
+    with pytest.raises(TypeError, match=r"validate\(\) needs a synchronous engine.*use avalidate"):
+        mm.validate(objects(), engine_)  # pyright: ignore[reportArgumentType]
+    with pytest.raises(TypeError, match=r"query\(\) needs a synchronous engine.*use aquery"):
+        mm.query(objects(), engine_)  # pyright: ignore[reportArgumentType]
 
 
 def test_async_engines_are_awaited():
@@ -208,13 +258,17 @@ def test_async_engines_are_awaited():
     assert asyncio.run(mm.avalidate(objects(), mine, EXTRA)).source == "mine"
     assert [c[0] for c in mine.calls] == ["query", "validate"]
     assert mine.calls[0][3] == [*mm.rules, *EXTRA] and mine.calls[0][5] == ["named"]
-    assert async_query_engine(mine, Problems("", [])) is mine
-    with pytest.raises(TypeError, match=r"query\(\) needs a synchronous engine"):
-        mm.query(objects(), mine)
+    assert async_engine(mine, mm.source, mm.rules, "aquery") is mine
+    with pytest.raises(TypeError, match=r"query\(\) needs a synchronous engine.*use aquery"):
+        mm.query(objects(), mine)  # pyright: ignore[reportArgumentType]
+    with pytest.raises(TypeError, match=r"validate\(\) needs a synchronous engine.*avalidate"):
+        mm.validate(objects(), mine)  # pyright: ignore[reportArgumentType]
 
 
 def test_sync_engines_run_in_async_methods():
     mm, mine = metamodel(), Validating()
+    awaited = async_engine(mine, mm.source, mm.rules, "aquery")
+    assert isinstance(awaited, _Awaited) and awaited.engine is mine
     assert asyncio.run(mm.aquery(objects(), mine, EXTRA)).source == "mine"
     assert asyncio.run(mm.avalidate(objects(), mine)).source == "mine"
     assert [c[0] for c in mine.calls] == ["query", "validate"]
@@ -222,9 +276,9 @@ def test_sync_engines_run_in_async_methods():
 
 def test_engines_are_passed_through():
     mine = Validating()
-    assert query_engine(mine, Problems("", [])) is mine
-    assert engine(mine, Problems("", [])) is mine
-    assert isinstance(mine, QueryEngine) and isinstance(mine, Engine)
+    assert sync_engine(mine, "", [], "query") is mine
+    assert sync_engine(mine, "", [], "validate") is mine
+    assert isinstance(mine, Engine)
 
 
 def test_objects_shaped_like_a_client_are_still_clients():
@@ -240,6 +294,10 @@ def test_objects_shaped_like_a_client_are_still_clients():
         def semantics(self, *args, **kwargs):
             return self.client.semantics(*args, **kwargs)
 
+    class ShapedWithValidateHelper(Shaped):
+        def validate_graph(self) -> None:
+            pass
+
     class AsyncShaped(Shaped):
         async def concretize(self, *args, **kwargs):
             return await self.client.concretize(*args, **kwargs)
@@ -247,11 +305,28 @@ def test_objects_shaped_like_a_client_are_still_clients():
         async def semantics(self, *args, **kwargs):
             return await self.client.semantics(*args, **kwargs)
 
-    problems = Problems("", [])
-    assert isinstance(engine(Shaped(None), problems), ClientEngine)
-    assert isinstance(async_engine(AsyncShaped(None), problems), AsyncClientEngine)
+    class AsyncShapedWithValidateHelper(AsyncShaped):
+        def validate_graph(self) -> None:
+            pass
+
+    assert isinstance(sync_engine(Shaped(None), "", [], "validate"), ClientEngine)
+    assert isinstance(sync_engine(ShapedWithValidateHelper(None), "", [], "validate"), ClientEngine)
+    assert isinstance(async_engine(AsyncShaped(None), "", [], "avalidate"), AsyncClientEngine)
+    assert isinstance(
+        async_engine(AsyncShapedWithValidateHelper(None), "", [], "avalidate"), AsyncClientEngine
+    )
     mm, recorder = metamodel(), _recorder()
     assert mm.validate(objects(), Shaped(_client(recorder))).ok
     assert recorder.requests[0].url.path.endswith("/concretize")
     with pytest.raises(TypeError, match=r"query\(\) needs a synchronous engine"):
         mm.query(objects(), AsyncShaped(None))
+
+
+def test_result_type_hints_resolve_at_runtime():
+    from typing import get_type_hints
+
+    from pydantic import TypeAdapter
+
+    assert "model" in get_type_hints(ValidationReport)
+    assert "model" in get_type_hints(QueryResult)
+    assert "properties" in TypeAdapter(QueryResult).json_schema()

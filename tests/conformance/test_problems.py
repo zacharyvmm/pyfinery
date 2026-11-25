@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from pyfinery.models import JsonOutput
+from pyfinery.http.models import JsonOutput
 
 from .interpretation import Interpretation, check, errors, refines
 from .problems import Assertion, Expectation, ProblemFileError, split

@@ -41,7 +41,7 @@ def test_json_output_helpers():
     assert model.relation("contents").name == "Dir::contents"
     assert model.tuples("Dir") == [("dir1", "true"), ("file1", "false")]
     assert model.true_tuples("contents") == [("dir1", "file1")]
-    assert model.tuples("Dir::contents")[1][-1] == pf.models.UnknownValue(unknown="?")
+    assert model.tuples("Dir::contents")[1][-1] == pf.http.models.UnknownValue(unknown="?")
     with pytest.raises(KeyError):
         model.relation("missing")
 

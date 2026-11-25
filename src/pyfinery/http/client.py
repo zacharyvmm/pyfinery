@@ -22,17 +22,6 @@ from typing import Any, Self
 import httpx
 from pydantic import BaseModel
 
-from ._protocol import (
-    DEFAULT_TIMEOUT,
-    Endpoint,
-    EventParser,
-    ProblemSource,
-    error_from_response,
-    normalize_base_url,
-    parse_generate_many_status,
-    read_source,
-    unexpected_end_of_stream,
-)
 from .models import (
     ChatMessage,
     ConcretizationResult,
@@ -48,6 +37,17 @@ from .models import (
     SemanticsResult,
     TextToModelRequest,
     TextToModelResult,
+)
+from .protocol import (
+    DEFAULT_TIMEOUT,
+    Endpoint,
+    EventParser,
+    ProblemSource,
+    error_from_response,
+    normalize_base_url,
+    parse_generate_many_status,
+    read_source,
+    unexpected_end_of_stream,
 )
 
 DEFAULT_BASE_URL = "http://localhost:8888/api/v1"
@@ -136,11 +136,6 @@ class _BaseClient:
             "json": request.model_dump(mode="json", exclude_none=True),
             "headers": {**self._headers, "Accept": "text/event-stream"},
         }
-
-
-# ---------------------------------------------------------------------------
-# Synchronous API
-# ---------------------------------------------------------------------------
 
 
 class _SyncClient(_BaseClient):
@@ -390,11 +385,6 @@ class RefineryChat(_SyncClient):
     ) -> TextToModelResult:
         """Build an instance model of ``metamodel`` from a natural language description."""
         return self._run(self.stream_text_to_model(metamodel, text, format=format), on_status)
-
-
-# ---------------------------------------------------------------------------
-# Asynchronous API
-# ---------------------------------------------------------------------------
 
 
 class _AsyncClient(_BaseClient):
