@@ -74,6 +74,74 @@ def testdeclared_predicates():
     ]
 
 
+def test_quoted_predicate_resolution_never_collides_with_serialized_names():
+    from types import SimpleNamespace
+
+    from pyfinery.jvm._matching.engine import problem_name
+
+    # Metamodel declares 'a b' (key "'a b'"), query declares '\u0027a b\u0027' (key "'\'a b\''").
+    declared = declared_predicates([r"pred '\u0027a b\u0027'(File f) <-> File(f), !File(f)."])
+    assert declared == ["'a b'"]
+
+    # JVM resolver: resolves '\u000a' to canonical '\n' and keeps declared '\'a b\'' separate.
+    both = SimpleNamespace(queries={"'a b'": 1, r"'\'a b\''": 2, r"'\n'": 3}, unsupported={})
+    assert problem_name(both, declared[0]) == r"'\'a b\''"  # pyright: ignore[reportArgumentType]
+    assert problem_name(both, r"'\u000a'") == r"'\n'"  # pyright: ignore[reportArgumentType]
+    assert problem_name(both, "'a b'") == r"'\'a b\''"  # pyright: ignore[reportArgumentType]
+    assert problem_name(both, "a b") == "'a b'"  # pyright: ignore[reportArgumentType]
+
+    only_first = SimpleNamespace(queries={"'a b'": 1}, unsupported={})
+    with pytest.raises(ValueError, match="No predicate named"):
+        problem_name(only_first, declared[0])  # pyright: ignore[reportArgumentType]
+    # Explicit quoted selector still resolves "'a b'" -> 'a b' when no "'a b'" predicate exists.
+    assert problem_name(only_first, "'a b'") == "'a b'"  # pyright: ignore[reportArgumentType]
+
+    # HTTP read_matches: automatic selection matches '\'a b\'' (empty), not "'a b'" (true).
+    model_both = {
+        "concreteness": "partial",
+        "nodes": [{"name": "keys", "simpleName": "keys", "kind": "default"}],
+        "relations": [
+            {
+                "name": "'a b'",
+                "simpleName": "'a b'",
+                "arity": 1,
+                "detail": {"type": "pred", "kind": "defined"},
+                "parameterNames": ["f"],
+            },
+            {
+                "name": r"'\'a b\''",
+                "simpleName": r"'\'a b\''",
+                "arity": 1,
+                "detail": {"type": "pred", "kind": "defined"},
+                "parameterNames": ["f"],
+            },
+        ],
+        "partialInterpretation": {"'a b'": [[0, "true"]], r"'\'a b\''": []},
+    }
+
+    def run_http(model_json: dict) -> pf.QueryResult:
+        body = sse({"result": "success", "value": {"issues": [], "json": model_json}})
+        recorder = Recorder(lambda _: sse_response(body))
+        client = pf.Refinery(
+            "http://x", http_client=httpx.Client(transport=httpx.MockTransport(recorder))
+        )
+        return metamodel().query(
+            [uncertain_graph()],
+            client,
+            [r"pred '\u0027a b\u0027'(File f) <-> File(f), !File(f)."],
+        )
+
+    assert run_http(model_both).matches == []
+
+    model_only_first = {
+        **model_both,
+        "relations": [model_both["relations"][0]],
+        "partialInterpretation": {"'a b'": [[0, "true"]]},
+    }
+    with pytest.raises(ValueError, match="Refinery returned no relation named"):
+        run_http(model_only_first)
+
+
 def test_query_problem_closes_the_world():
     source = metamodel().query_problem([uncertain_graph()], RULES, predicates=PREDICATES)
     lines = source.splitlines()

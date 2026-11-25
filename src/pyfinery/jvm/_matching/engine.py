@@ -23,9 +23,9 @@ from ..._engines import Engine
 from ..._instances import Graph
 from ..._options import Predicate
 from ..._render import predicate_facts
-from ..._results import QueryResult, ValidationReport, reference_errors
+from ..._results import QueryResult, ValidationReport, reference_errors, resolve_predicate
 from ..._schema import Schema
-from ..._syntax import quote_id, unquote_id
+from ..._syntax import unquote_id
 from ..errors import UnsupportedRuleError
 from .cache import compiled
 from .compile import CompiledProblem
@@ -78,7 +78,7 @@ class JvmEngine(Engine):
         model = PlainModel(problem)
         try:
             model.sync(graph, facts)
-            matches = [m for name, p in selected.items() for m in model.matches(p, name)]
+            matches = [m for name, p in selected.items() for m in model.matches(p, str(name))]
             errors = reference_errors(graph) + model.violations()
         finally:
             model.close()
@@ -100,11 +100,11 @@ def require_supported(problem: CompiledProblem, predicates: Sequence[str] = ()) 
 
 def problem_name(problem: CompiledProblem, name: str) -> str:
     """The name of the predicate ``name`` (as declared, or as selected) in ``problem``."""
-    unquoted = unquote_id(name)
-    for candidate in (name, quote_id(name), unquoted, quote_id(unquoted)):
-        if candidate in problem.queries or candidate in problem.unsupported:
-            return candidate
-    raise ValueError(f"No predicate named {name!r} to report")
+    by_decoded = {unquote_id(key): key for key in (*problem.queries, *problem.unsupported)}
+    found = resolve_predicate(name, by_decoded)
+    if found is not None:
+        return found
+    raise ValueError(f"No predicate named {str(name)!r} to report")
 
 
 def refuse_uncertainty(graph: Graph, predicate_facts: Iterable[PredicateFact]) -> None:

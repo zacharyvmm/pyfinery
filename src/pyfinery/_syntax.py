@@ -62,7 +62,15 @@ def quote_id(name: str) -> str:
     """Render ``name`` as a Refinery identifier, quoting it if necessary."""
     if _ID.match(name) and name not in _KEYWORDS:
         return name
-    escaped = name.replace("\\", "\\\\").replace("'", "\\'")
+    escaped = (
+        name.replace("\\", "\\\\")
+        .replace("'", "\\'")
+        .replace("\b", "\\b")
+        .replace("\t", "\\t")
+        .replace("\n", "\\n")
+        .replace("\f", "\\f")
+        .replace("\r", "\\r")
+    )
     return f"'{escaped}'"
 
 

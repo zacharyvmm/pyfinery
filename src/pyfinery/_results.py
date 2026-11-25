@@ -150,18 +150,34 @@ class QueryResult:
         ]
 
 
+class _DeclaredName(str):
+    """A predicate name already decoded from a ``pred`` declaration, never unquoted again."""
+
+
 _PRED_DECLARATION = re.compile(r"\bpred\s+([A-Za-z_][A-Za-z0-9_]*|'(?:[^'\\]|\\.)*')")
 
 
 def declared_predicates(rules: Iterable[str]) -> list[str]:
     """Names of the predicates declared in ``rules`` (``error`` predicates included)."""
-    names = []
+    names: list[str] = []
     for rule in rules:
         for match in _PRED_DECLARATION.finditer(rule):
-            name = unquote_id(match.group(1))
+            name = _DeclaredName(unquote_id(match.group(1)))
             if name not in names:
                 names.append(name)
     return names
+
+
+def resolve_predicate[T](name: str, by_decoded: dict[str, T]) -> T | None:
+    """Resolve ``name`` against ``by_decoded`` (Refinery relations keyed by ``unquote_id``).
+
+    Names returned by :func:`declared_predicates` are already decoded and match only exact
+    decoded keys; explicit selectors also match quoted Refinery spellings (e.g. ``'\\u000a'``).
+    """
+    found = by_decoded.get(name)
+    if found is not None or isinstance(name, _DeclaredName):
+        return found
+    return by_decoded.get(unquote_id(name))
 
 
 def reference_errors(graph: Graph) -> list[Violation]:

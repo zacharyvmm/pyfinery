@@ -27,9 +27,10 @@ from .._results import (
     Violation,
     ViolationKind,
     reference_errors,
+    resolve_predicate,
 )
 from .._schema import Schema
-from .._syntax import quote_id
+from .._syntax import quote_id, unquote_id
 from ..errors import RefineryError, RefineryTimeoutError
 from .client import AsyncRefinery, Refinery
 from .models import JsonOutput, JsonOutputFormat, OutputFormats, SourceOutputFormat
@@ -185,12 +186,12 @@ def read_matches(
     by_name = graph.objects_by_name()
     node_names = _node_names(model, by_name)
     exists = {node.name: node.exists for node in graph.nodes}
-    relations = {r.name: r for r in model.relations}
+    by_decoded = {unquote_id(r.name): r for r in model.relations}
     matches = []
     for predicate in predicates:
-        relation = relations.get(predicate)
+        relation = resolve_predicate(predicate, by_decoded)
         if relation is None:
-            raise ValueError(f"Refinery returned no relation named {predicate!r}")
+            raise ValueError(f"Refinery returned no relation named {str(predicate)!r}")
         for raw in model.partial_interpretation.get(relation.name, []):
             value: LogicValue = raw[-1]  # type: ignore[assignment]
             if value not in ("true", "unknown"):
@@ -204,7 +205,7 @@ def read_matches(
                 value = "unknown"
             nodes = tuple(by_name.get(name) for name in names)
             parameters = tuple(relation.parameter_names or ())
-            matches.append(Match(predicate, names, nodes, value, parameters))
+            matches.append(Match(str(predicate), names, nodes, value, parameters))
     errors = [
         error
         for error in reference_errors(graph) + _errors(model, by_name)

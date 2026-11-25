@@ -61,6 +61,18 @@ class AttributeFeature:
         return self.data_type
 
     @property
+    def kind(self) -> Literal["ref"]:
+        return "ref"
+
+    @property
+    def opposite(self) -> None:
+        return None
+
+    @property
+    def by_key(self) -> Literal[False]:
+        return False
+
+    @property
     def is_attribute(self) -> Literal[True]:
         return True
 
@@ -79,6 +91,18 @@ class EnumFeature:
     many: bool
     lower: int
     upper: int | None
+
+    @property
+    def kind(self) -> Literal["ref"]:
+        return "ref"
+
+    @property
+    def opposite(self) -> None:
+        return None
+
+    @property
+    def by_key(self) -> Literal[False]:
+        return False
 
     @property
     def is_attribute(self) -> Literal[False]:

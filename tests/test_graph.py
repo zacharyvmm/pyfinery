@@ -82,7 +82,10 @@ def test_quote_id():
     assert quote_id("1st") == "'1st'"
 
 
-@pytest.mark.parametrize("name", ["plain_1", "class", "it's", "back\\slash", "end\\", "'", "a b"])
+@pytest.mark.parametrize(
+    "name",
+    ["plain_1", "class", "it's", "back\\slash", "end\\", "'", "a b", "line\nbreak", "\t\r\b\f"],
+)
 def test_unquote_id_reverses_quote_id(name):
     assert unquote_id(quote_id(name)) == name
 
@@ -94,7 +97,9 @@ def test_unquote_id_reads_each_escape_once():
 
 
 def test_unquote_id_decodes_xtext_escapes():
+    assert quote_id("\n") == r"'\n'"
     assert unquote_id(r"'\u0061'") == "a"
+    assert unquote_id(r"'\u000a'") == "\n"
     assert unquote_id(r"'\\u0061'") == r"\u0061"
     assert unquote_id(r"'\t\n\r\b\f\"\'\\'") == "\t\n\r\b\f\"'\\"
     assert unquote_id(r"'\uD83D\uDE00'") == "\U0001f600"
@@ -125,14 +130,17 @@ def test_feature_union_supports_runtime_isinstance_and_compat_accessors():
     count = by_name["count"]
     assert isinstance(count, AttributeFeature)
     assert count.target == "int" and count.is_attribute and not count.is_enum
+    assert count.kind == "ref" and count.opposite is None and not count.by_key
 
     color = by_name["color"]
     assert isinstance(color, EnumFeature)
     assert color.target is Color and not color.is_attribute and color.is_enum
+    assert color.kind == "ref" and color.opposite is None and not color.by_key
 
     leaf = by_name["leaf"]
     assert isinstance(leaf, ReferenceFeature)
     assert leaf.target is Leaf and not leaf.is_attribute and not leaf.is_enum
+    assert leaf.kind == "contains" and leaf.opposite is None and not leaf.by_key
 
 
 def test_generated_names_avoid_explicit_ids():
